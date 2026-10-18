@@ -1,0 +1,37 @@
+# ─── Secrets / local environment ────────────────────────────────
+.env
+*.key
+
+# ─── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# ─── Test / tooling caches ─────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Runtime artifacts (generated while testing) ───────────────
+# Traces are the orchestrator's debug logs — keep them out of Git
+# (the folder itself is preserved with a .gitkeep).
+traces/*
+!traces/.gitkeep
+
+# Uploaded documents / local vector store
+data/documents/*
+!data/documents/.gitkeep
+data/index/*
+!data/index/.gitkeep
+
+# ─── Editors / OS ──────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
