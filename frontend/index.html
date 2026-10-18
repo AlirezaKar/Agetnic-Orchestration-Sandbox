@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agetnic Orchestration Sandbox — Test Harness</title>
+  <link rel="stylesheet" href="/assets/css/styles.css" />
+</head>
+<body>
+  <!-- ═══════════════════════════════════════════════════════════
+       Header: title + live provider status badges
+       ═══════════════════════════════════════════════════════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">◎</div>
+      <div>
+        <h1>Agetnic Orchestration Sandbox</h1>
+        <p class="subtitle">Test harness — watch how the Manager delegates any prompt to the right agents</p>
+      </div>
+    </div>
+    <div class="status-cluster">
+      <span class="badge" id="badge-llm" title="LLM provider used by Manager/Planner/agents">LLM: …</span>
+      <span class="badge" id="badge-search" title="Web-search provider used by the Web Search agent">Search: …</span>
+      <span class="badge" id="badge-docs" title="Documents indexed in the local RAG store">Docs: …</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- ═════════════════════════════════════════════════════════
+         Left sidebar: mode selection + document upload + run history
+         ═════════════════════════════════════════════════════════ -->
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Mode</h2>
+        <div id="mode-list" class="mode-list"><!-- filled by app.js --></div>
+      </section>
+
+      <section class="panel">
+        <h2>Documents (RAG corpus)</h2>
+        <label class="upload-zone" for="file-input">
+          <span>＋ Drop or choose a .txt / .md file</span>
+          <input type="file" id="file-input" accept=".txt,.md" hidden />
+        </label>
+        <ul id="doc-list" class="doc-list"><li class="muted">No documents indexed yet.</li></ul>
+      </section>
+
+      <section class="panel grow">
+        <h2>Run history <button id="btn-refresh-traces" class="ghost-btn" title="Refresh">⟳</button></h2>
+        <ul id="trace-list" class="trace-list"><li class="muted">No runs yet.</li></ul>
+      </section>
+    </aside>
+
+    <!-- ═════════════════════════════════════════════════════════
+         Main column: conversation + orchestration timeline
+         ═════════════════════════════════════════════════════════ -->
+    <main class="main">
+      <div id="chat" class="chat">
+        <div class="empty-state" id="empty-state">
+          <h2>Orchestration test console</h2>
+          <p>
+            Type any prompt — in <strong>Auto</strong> mode the <strong>Manager</strong> analyses the goal,
+            the <strong>Planner</strong> decomposes it into tasks, and the <strong>parallel Executor</strong>
+            delegates each task to the right agent (Document · Web Search · General · Number).
+          </p>
+          <p class="muted">Every run stores its input, thinking, process and output as JSON in <code>traces/</code> — click any run in the history to inspect it.</p>
+          <div class="suggestions">
+            <button class="chip" data-prompt="Search the web for the latest trends in multi-agent LLM orchestration and analyze the key numbers in the results">🔎 Search + analyze (parallel)</button>
+            <button class="chip" data-prompt="According to the uploaded documents, what is the vacation policy? Summarize it.">📄 Ask the documents</button>
+            <button class="chip" data-prompt="Calculate 12.5*(3+1)/2 and explain the result">🔢 Math + explain</button>
+            <button class="chip" data-prompt="Explain how retrieval-augmented generation works, in simple terms">💬 General knowledge</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Composer -->
+      <footer class="composer">
+        <textarea id="prompt" rows="2" placeholder="Ask anything… (Enter to send · Shift+Enter for a new line)"></textarea>
+        <div class="composer-actions">
+          <span class="muted" id="composer-mode-label">Mode: Auto</span>
+          <button id="btn-clear" class="ghost-btn">Clear session</button>
+          <button id="btn-send" class="primary-btn">Send ▸</button>
+        </div>
+      </footer>
+    </main>
+
+    <!-- ═════════════════════════════════════════════════════════
+         Right drawer: raw trace inspector (JSON)
+         ═════════════════════════════════════════════════════════ -->
+    <aside class="inspector" id="inspector">
+      <div class="inspector-head">
+        <h2>Trace inspector</h2>
+        <div>
+          <button id="btn-copy-trace" class="ghost-btn">Copy JSON</button>
+          <button id="btn-close-inspector" class="ghost-btn">✕</button>
+        </div>
+      </div>
+      <p class="muted inspector-note" id="inspector-note">
+        The complete run record (input · thinking · process · output) persisted to
+        <code>traces/&lt;run_id&gt;.json</code>.
+      </p>
+      <pre id="trace-json" class="trace-json">Select a run from the history — or send a prompt — to inspect its trace.</pre>
+    </aside>
+  </div>
+
+  <script src="/assets/js/app.js"></script>
+</body>
+</html>
