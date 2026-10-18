@@ -80,6 +80,12 @@ def safe_calculate(expression: str) -> Optional[float]:
             return _eval(n.body)
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
             return n.value
+        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Pow):
+            # Guard: exponents explode memory (2**10**12 is petabytes).
+            left, right = _eval(n.left), _eval(n.right)
+            if abs(right) > 12 or abs(left) > 1e9:
+                raise ValueError("exponentiation out of safe range")
+            return left ** right
         if isinstance(n, ast.BinOp) and type(n.op) in _ALLOWED_OPS:
             return _ALLOWED_OPS[type(n.op)](_eval(n.left), _eval(n.right))
         if isinstance(n, ast.UnaryOp) and type(n.op) in _ALLOWED_OPS:
