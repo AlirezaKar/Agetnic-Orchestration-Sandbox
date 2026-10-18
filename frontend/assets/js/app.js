@@ -51,7 +51,10 @@ async function loadHealth() {
     llm.textContent = `LLM: ${health.llm_provider}`;
     llm.classList.add("ok");
     const search = $("badge-search");
-    search.textContent = `Search: ${health.web_search_provider}`;
+    const fetcher = health.page_fetcher && health.page_fetcher !== "none"
+      ? ` · ${health.page_fetcher}`
+      : "";
+    search.textContent = `Search: ${health.web_search_provider}${fetcher}`;
     search.classList.add("ok");
   } catch {
     $("badge-llm").textContent = "LLM: offline";

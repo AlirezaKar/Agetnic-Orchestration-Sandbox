@@ -12,7 +12,7 @@ frozen :class:`Settings` object so the rest of the code never touches
 Sections
 --------
 1. LLM / Orchestrator  — provider, API keys, model names
-2. Web search          — search provider + its API keys
+2. Web search          — SearXNG (metasearch) + Crawl4AI (deep crawling)
 3. Orchestration       — parallelism / re-planning / timeouts
 4. Storage             — where traces and documents are written
 5. Server              — host/port/CORS for the test harness
@@ -87,10 +87,19 @@ class Settings:
     llm_temperature: float = 0.2
     llm_max_tokens: int = 2048
 
-    # ── 2. Web search ───────────────────────────────────────────
-    web_search_provider: str = "simulated"  # simulated | tavily | serper
-    tavily_api_key: str = ""
-    serper_api_key: str = ""
+    # ── 2. Web search (open-source stack) ──────────────────────
+    web_search_provider: str = "simulated"  # simulated | searxng
+    # SearXNG — self-hosted metasearch engine (JSON API)
+    searxng_base_url: str = "http://localhost:8888"
+    searxng_api_key: str = ""               # optional (instances behind auth)
+    searxng_language: str = ""              # e.g. "en", "de"; empty = instance default
+    searxng_time_range: str = ""            # '' | day | month | year
+    searxng_safesearch: int = 0             # 0 = off, 1 = moderate, 2 = strict
+    # Crawl4AI — LLM-friendly deep crawling of the top search results
+    crawl4ai_enabled: bool = True           # false → snippets only, no crawling
+    crawl4ai_max_pages: int = 2             # how many top results to deep-crawl
+    crawl4ai_max_content_chars: int = 6000  # per-page content cap for prompts/traces
+    page_fetch_timeout: float = 20.0        # seconds per crawled page
 
     # ── 3. Orchestration ────────────────────────────────────────
     max_parallel_tasks: int = 4
@@ -134,14 +143,16 @@ class Settings:
             "groq_model_orchestrator": self.groq_model_orchestrator,
             "groq_model_agent": self.groq_model_agent,
             "web_search_provider": self.web_search_provider,
+            "searxng_base_url": self.searxng_base_url,
+            "crawl4ai_enabled": self.crawl4ai_enabled,
+            "crawl4ai_max_pages": self.crawl4ai_max_pages,
             "max_parallel_tasks": self.max_parallel_tasks,
             "max_replan_attempts": self.max_replan_attempts,
             "max_plan_tasks": self.max_plan_tasks,
             "task_timeout_seconds": self.task_timeout_seconds,
             # Secrets are reported as booleans only — never leaked.
             "groq_api_key_set": bool(self.groq_api_key),
-            "tavily_api_key_set": bool(self.tavily_api_key),
-            "serper_api_key_set": bool(self.serper_api_key),
+            "searxng_api_key_set": bool(self.searxng_api_key),
         }
 
 
@@ -156,8 +167,15 @@ def load_settings() -> Settings:
         llm_temperature=_get_float("LLM_TEMPERATURE", 0.2),
         llm_max_tokens=_get_int("LLM_MAX_TOKENS", 2048),
         web_search_provider=_get("WEB_SEARCH_PROVIDER", "simulated").lower(),
-        tavily_api_key=_get("TAVILY_API_KEY", ""),
-        serper_api_key=_get("SERPER_API_KEY", ""),
+        searxng_base_url=_get("SEARXNG_BASE_URL", "http://localhost:8888"),
+        searxng_api_key=_get("SEARXNG_API_KEY", ""),
+        searxng_language=_get("SEARXNG_LANGUAGE", ""),
+        searxng_time_range=_get("SEARXNG_TIME_RANGE", "").lower(),
+        searxng_safesearch=_get_int("SEARXNG_SAFESEARCH", 0),
+        crawl4ai_enabled=_get("CRAWL4AI_ENABLED", "true").lower() not in ("false", "0", "no"),
+        crawl4ai_max_pages=_get_int("CRAWL4AI_MAX_PAGES", 2),
+        crawl4ai_max_content_chars=_get_int("CRAWL4AI_MAX_CONTENT_CHARS", 6000),
+        page_fetch_timeout=_get_float("PAGE_FETCH_TIMEOUT", 20.0),
         max_parallel_tasks=_get_int("MAX_PARALLEL_TASKS", 4),
         max_replan_attempts=_get_int("MAX_REPLAN_ATTEMPTS", 1),
         max_plan_tasks=_get_int("MAX_PLAN_TASKS", 8),

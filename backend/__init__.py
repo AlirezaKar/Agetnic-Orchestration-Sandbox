@@ -10,7 +10,7 @@ agents      Worker agents: document, web_search, general, number
 orchestration
             Manager (root brain) · Planner · parallel Executor · Router · Traces
 rag         Local document store + lexical retrieval for the Document agent
-search      Pluggable web-search providers (simulated / tavily / serper)
+search      Open-source web search: SearXNG (metasearch) + Crawl4AI (deep crawl)
 api         FastAPI test-harness server + REST endpoints
 """
 

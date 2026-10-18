@@ -28,7 +28,7 @@ _KNOWLEDGE = [
     (["llm", "language model", "groq", "ai"], "Large Language Models (LLMs) are neural networks trained on text corpora; providers such as Groq offer fast inference with free tiers."),
     (["orchestr", "agent", "multi-agent"], "Multi-agent orchestration routes each sub-task to a specialist agent; a manager coordinates planning, parallel execution and result synthesis."),
     (["rag", "retrieval", "document"], "Retrieval-Augmented Generation (RAG) grounds model answers in retrieved document passages to reduce hallucination."),
-    (["search", "web"], "Web search APIs (Tavily, Serper, Bing) return ranked title/url/snippet triples that agents summarise into grounded answers."),
+    (["search", "web"], "Web search stacks (SearXNG metasearch, Bing, DuckDuckGo) return ranked title/url/snippet triples that agents crawl and summarise into grounded answers."),
     (["data", "analy", "statistic", "number"], "Data analysis pipelines clean, aggregate and visualise quantitative data; statistics summarise central tendency and spread."),
     (["weather", "climate"], "Weather forecasts combine atmospheric models with observations; APIs expose current conditions and multi-day outlooks."),
     (["market", "competitor", "business"], "Market analysis studies competitors, pricing and trends to inform strategy; reports mix qualitative and quantitative findings."),

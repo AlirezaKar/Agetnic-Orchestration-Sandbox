@@ -46,10 +46,14 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 MB
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Liveness + which providers would be used right now."""
+    from ..search import get_page_fetcher
+
+    fetcher = get_page_fetcher()
     return HealthResponse(
         status="ok",
         llm_provider=settings.effective_llm_provider,
         web_search_provider=settings.web_search_provider,
+        page_fetcher=fetcher.name if fetcher else "none",
         models={
             "orchestrator": settings.groq_model_orchestrator,
             "agent": settings.groq_model_agent,
@@ -78,7 +82,7 @@ async def modes() -> dict:
             {
                 "id": Mode.WEB_SEARCH.value,
                 "label": "Web Search",
-                "description": "Search the web and answer grounded in the results.",
+                "description": "SearXNG metasearch + Crawl4AI deep-crawl, answered grounded in the results.",
             },
             {
                 "id": Mode.GENERAL.value,

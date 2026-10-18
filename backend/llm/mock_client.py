@@ -227,6 +227,7 @@ def _manager_response(user_text: str) -> str:
 def _search_agent_response(user_text: str) -> str:
     query = _extract_section(user_text, "SEARCH QUERY") or _extract_section(user_text, "INPUT")
     results = _extract_section(user_text, "SEARCH RESULTS")
+    pages = _extract_section(user_text, "PAGE CONTENT")
     if not query:
         query = user_text.strip()[:200]
     if results:
@@ -236,16 +237,22 @@ def _search_agent_response(user_text: str) -> str:
             if ln.strip() and not ln.strip().startswith(("###", "##", "#"))
         ][:3]
         body = " ".join(s[:160] for s in snippets)
+        crawl_note = (
+            f" Full crawled page content was also used as grounding "
+            f"({len(pages.split('[page')) - 1} page(s))."
+            if pages
+            else ""
+        )
         return (
             f"[Web Search Agent — offline mock synthesis]\n\n"
             f"Query: \"{query}\"\n\n"
-            f"Based on the retrieved search results: {body}\n\n"
+            f"Based on the retrieved search results: {body}.{crawl_note}\n\n"
             f"Sources are listed in the task's structured data (simulated provider)."
         )
     return (
         f"[Web Search Agent — offline mock]\n\n"
         f"No search results were available for \"{query}\". "
-        f"Configure WEB_SEARCH_PROVIDER with an API key for live results."
+        f"Configure WEB_SEARCH_PROVIDER=searxng in .env for live results."
     )
 
 

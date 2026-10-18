@@ -19,7 +19,7 @@ from ..config import settings
 from ..llm import get_agent_llm
 from ..rag.store import DocumentStore
 from ..schemas import AgentName
-from ..search import get_search_provider
+from ..search import get_page_fetcher, get_search_provider
 from .base import BaseAgent
 from .document_agent import DocumentAgent
 from .general_agent import GeneralAgent
@@ -39,7 +39,10 @@ def get_agents() -> Dict[AgentName, BaseAgent]:
     llm = get_agent_llm()
     return {
         AgentName.DOCUMENT: DocumentAgent(llm, get_document_store()),
-        AgentName.WEB_SEARCH: WebSearchAgent(llm, get_search_provider()),
+        # Web search = SearXNG results + Crawl4AI deep-crawl (both from .env)
+        AgentName.WEB_SEARCH: WebSearchAgent(
+            llm, get_search_provider(), get_page_fetcher()
+        ),
         AgentName.GENERAL: GeneralAgent(llm),
         AgentName.NUMBER: NumberAgent(llm),
     }

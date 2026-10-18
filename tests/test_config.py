@@ -21,13 +21,13 @@ def test_effective_provider_auto_uses_key(monkeypatch):
 
 
 def test_redacted_never_leaks_secrets():
-    s = Settings(groq_api_key="sk-secret", tavily_api_key="t-secret", serper_api_key="s-secret")
+    s = Settings(groq_api_key="sk-secret", searxng_api_key="sx-secret")
     red = s.redacted()
     dumped = str(red)
     assert "sk-secret" not in dumped
-    assert "t-secret" not in dumped
-    assert "s-secret" not in dumped
+    assert "sx-secret" not in dumped
     assert red["groq_api_key_set"] is True
+    assert red["searxng_api_key_set"] is True
 
 
 def test_load_settings_creates_directories(tmp_path, monkeypatch):

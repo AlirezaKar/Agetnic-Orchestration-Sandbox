@@ -251,6 +251,7 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     llm_provider: str
     web_search_provider: str
+    page_fetcher: str = "none"  # crawl4ai | simple_http | none
     models: Dict[str, str]
     trace_dir: str
     document_count: int = 0
