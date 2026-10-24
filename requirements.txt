@@ -1,0 +1,22 @@
+# ─── Web framework / server ────────────────────────────────────
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+
+# ─── LLM HTTP client + config ─────────────────────────────────
+httpx>=0.27
+pydantic>=2.6
+python-dotenv>=1.0
+
+# ─── Deep web crawling (Crawl4AI) — optional but recommended ──
+#     Provides LLM-friendly markdown extraction via headless browser.
+#     One-time browser setup after install:  crawl4ai-setup
+#     If missing, the search agent falls back to a plain HTTP fetcher.
+crawl4ai>=0.9
+
+# ─── Testing ───────────────────────────────────────────────────
+# pytest-asyncio>=1.0 avoids Python 3.14+ asyncio event-loop-policy
+# DeprecationWarnings; httpx2>=2.0 is required by Starlette's TestClient.
+pytest>=8.4
+pytest-asyncio>=1.0
+httpx2>=2.0
