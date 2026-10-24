@@ -82,10 +82,10 @@ class Settings:
     llm_provider: str = "auto"            # auto | groq | mock
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model_orchestrator: str = "llama-3.3-70b-versatile"
-    groq_model_agent: str = "llama-3.3-70b-versatile"
+    groq_model_orchestrator: str = "openai/gpt-oss-120b"
+    groq_model_agent: str = "openai/gpt-oss-20b"
     llm_temperature: float = 0.2
-    llm_max_tokens: int = 2048
+    llm_max_tokens: int = 4096
 
     # ── 2. Web search (open-source stack) ──────────────────────
     web_search_provider: str = "simulated"  # simulated | searxng
@@ -162,10 +162,10 @@ def load_settings() -> Settings:
         llm_provider=_get("LLM_PROVIDER", "auto").lower(),
         groq_api_key=_get("GROQ_API_KEY", ""),
         groq_base_url=_get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-        groq_model_orchestrator=_get("GROQ_MODEL_ORCHESTRATOR", "llama-3.3-70b-versatile"),
-        groq_model_agent=_get("GROQ_MODEL_AGENT", "llama-3.3-70b-versatile"),
+        groq_model_orchestrator=_get("GROQ_MODEL_ORCHESTRATOR", "openai/gpt-oss-120b"),
+        groq_model_agent=_get("GROQ_MODEL_AGENT", "openai/gpt-oss-20b"),
         llm_temperature=_get_float("LLM_TEMPERATURE", 0.2),
-        llm_max_tokens=_get_int("LLM_MAX_TOKENS", 2048),
+        llm_max_tokens=_get_int("LLM_MAX_TOKENS", 4096),
         web_search_provider=_get("WEB_SEARCH_PROVIDER", "simulated").lower(),
         searxng_base_url=_get("SEARXNG_BASE_URL", "http://localhost:8888"),
         searxng_api_key=_get("SEARXNG_API_KEY", ""),

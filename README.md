@@ -85,7 +85,8 @@ python3 run_server.py          # → http://localhost:8000/
 ```
 
 With `GROQ_API_KEY` set, the Manager/Planner/agents use **Groq**
-(`llama-3.3-70b-versatile` by default — free tier).  Without a key, a
+(`openai/gpt-oss-120b` for orchestration and `openai/gpt-oss-20b` for worker
+agents by default — free/developer tier).  Without a key, a
 deterministic **mock LLM** keeps the whole pipeline runnable and testable.
 
 ## Configuration (`.env`)
@@ -98,8 +99,8 @@ sections: **LLM/Orchestrator**, **Web search**, **Orchestration**,
 |----------|---------|---------|
 | `LLM_PROVIDER` | `auto` (Groq if key, else mock) · `groq` · `mock` | `auto` |
 | `GROQ_API_KEY` | Orchestrator + agent API key | *(empty)* |
-| `GROQ_MODEL_ORCHESTRATOR` | Model for Manager & Planner | `llama-3.3-70b-versatile` |
-| `GROQ_MODEL_AGENT` | Model for worker agents | `llama-3.3-70b-versatile` |
+| `GROQ_MODEL_ORCHESTRATOR` | Model for Manager & Planner | `openai/gpt-oss-120b` |
+| `GROQ_MODEL_AGENT` | Model for worker agents | `openai/gpt-oss-20b` |
 | `WEB_SEARCH_PROVIDER` | `simulated` · `searxng` | `simulated` |
 | `SEARXNG_BASE_URL` | Your SearXNG instance | `http://localhost:8888` |
 | `CRAWL4AI_ENABLED` | Deep-crawl top results into markdown | `true` |

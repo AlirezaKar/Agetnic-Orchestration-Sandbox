@@ -61,3 +61,83 @@ async def test_usage_accounting(mock_llm):
         [LLMMessage("system", "You are the General Agent."), LLMMessage("user", "hello")]
     )
     assert response.usage["total_tokens"] > 0
+
+
+# ──────────────────────────────────────────────────────────────────
+#  GroqClient HTTP contract & retired-model migration
+# ──────────────────────────────────────────────────────────────────
+async def test_groq_client_migrates_deprecated_model_on_404(monkeypatch):
+    import httpx
+    from backend.config import Settings
+    from backend.llm.groq_client import GroqClient
+
+    seen_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(body)
+        if body["model"] == "llama-3.3-70b-versatile":
+            return httpx.Response(
+                404,
+                json={
+                    "error": {
+                        "message": "The model `llama-3.3-70b-versatile` does not exist or you do not have access to it.",
+                        "type": "invalid_request_error",
+                        "code": "model_not_found",
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": body["model"],
+                "choices": [{"message": {"content": "<think>internal</think>Konnichiwa"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("backend.llm.groq_client.httpx.AsyncClient", fake_client)
+
+    client = GroqClient(
+        Settings(groq_api_key="gsk_test", groq_model_orchestrator="llama-3.3-70b-versatile")
+    )
+    res = await client.complete([LLMMessage("user", "hello in japanese")])
+
+    assert [p["model"] for p in seen_payloads] == [
+        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
+    ]
+    assert "max_completion_tokens" in seen_payloads[1]
+    assert res.model == "openai/gpt-oss-120b"
+    assert res.content == "Konnichiwa"
+
+
+async def test_groq_client_unknown_model_404_gives_actionable_error(monkeypatch):
+    import httpx
+    from backend.config import Settings
+    from backend.llm.base import LLMError
+    from backend.llm.groq_client import GroqClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404,
+            json={"error": {"message": "not found", "code": "model_not_found"}},
+        )
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("backend.llm.groq_client.httpx.AsyncClient", fake_client)
+
+    client = GroqClient(Settings(groq_api_key="gsk_test", groq_model_orchestrator="typo-model"))
+    with pytest.raises(LLMError, match="GROQ_MODEL_ORCHESTRATOR"):
+        await client.complete([LLMMessage("user", "hi")])
