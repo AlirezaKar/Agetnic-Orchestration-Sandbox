@@ -55,13 +55,16 @@ def get_page_fetcher() -> Optional[PageFetcher]:
 
 
 def reset_search_cache() -> None:
-    """
-    Drop cached providers/fetchers.
-
-    Also releases the Crawl4AI browser if one was started.
-    """
-    fetcher = get_page_fetcher.cache_clear() or None
-    # Best-effort browser cleanup for an existing cached fetcher:
-    # lru_cache has already dropped its reference, so the instance is
-    # garbage-collected; close() is exposed for explicit shutdown hooks.
+    """Drop cached search providers/fetchers (sync helper for tests)."""
+    get_page_fetcher.cache_clear()
     get_search_provider.cache_clear()
+
+
+async def shutdown_search() -> None:
+    """Close any live browser-backed page fetcher and clear search caches."""
+    if get_page_fetcher.cache_info().currsize > 0:
+        fetcher = get_page_fetcher()
+        close_fn = getattr(fetcher, "close", None)
+        if callable(close_fn):
+            await close_fn()
+    reset_search_cache()

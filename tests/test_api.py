@@ -12,7 +12,8 @@ from backend.api import create_app
 
 @pytest.fixture
 def client():
-    return TestClient(create_app())
+    with TestClient(create_app()) as c:
+        yield c
 
 
 def test_health(client):

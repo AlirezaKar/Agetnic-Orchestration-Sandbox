@@ -39,7 +39,7 @@ def test_trace_round_trip(tmp_path, monkeypatch):
     path = recorder.save()
 
     assert path.exists()
-    raw = json.loads(path.read_text())
+    raw = json.loads(path.read_text(encoding="utf-8"))
     # The four evaluation pillars must all be present:
     assert raw["input"] == "test goal"
     assert raw["thinking"] == ["analysis one", "analysis two"]

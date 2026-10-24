@@ -15,6 +15,8 @@ Reads ``.env`` (see ``.env.example``), then serves:
 
 from __future__ import annotations
 
+import sys
+
 import uvicorn
 
 from backend.api import create_app
@@ -22,15 +24,20 @@ from backend.config import settings
 
 
 def main() -> None:
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8", errors="replace")
+
     app = create_app()
     provider = settings.effective_llm_provider
+    browser_host = "localhost" if settings.host in ("0.0.0.0", "::") else settings.host
     print("─" * 62)
     print("  Agetnic Orchestration Sandbox")
     print(f"  LLM provider : {provider}"
           + ("  (set GROQ_API_KEY in .env for real LLM calls)" if provider == "mock" else ""))
     print(f"  Web search   : {settings.web_search_provider}")
     print(f"  Traces       : {settings.trace_dir}")
-    print(f"  UI + API     : http://{settings.host}:{settings.port}/")
+    print(f"  UI + API     : http://{browser_host}:{settings.port}/  (bound to {settings.host}:{settings.port})")
     print("─" * 62)
 
     uvicorn.run(app, host=settings.host, port=settings.port)

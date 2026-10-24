@@ -4,21 +4,32 @@ tests.conftest
 
 Shared test fixtures.
 
-The whole suite runs against the **offline mock LLM** and the
-**simulated search provider** so it passes on any machine — no API keys,
-no internet.  Environment variables are set *before* any backend import,
-which is exactly how ``backend.config`` reads them.
+The whole suite runs against the **offline mock LLM**, the **simulated
+search provider**, and an isolated temporary storage directory so it
+passes on any machine — no API keys, no internet, and no test artifacts
+left behind in ``traces/`` or ``data/documents/``.  Environment variables
+are set *before* any backend import, which is how ``backend.config``
+reads them.
 """
 
 from __future__ import annotations
 
+import atexit
 import os
+from pathlib import Path
+import shutil
+import tempfile
 
-# ── Force deterministic offline providers for the entire suite ──
+_TEST_RUNTIME_DIR = Path(tempfile.mkdtemp(prefix="agetnic_test_"))
+atexit.register(shutil.rmtree, _TEST_RUNTIME_DIR, True)
+
+# ── Force deterministic offline providers & isolated storage ───
 os.environ["LLM_PROVIDER"] = "mock"
 os.environ["WEB_SEARCH_PROVIDER"] = "simulated"
 os.environ["MAX_REPLAN_ATTEMPTS"] = "1"
 os.environ["TASK_TIMEOUT_SECONDS"] = "5"
+os.environ["TRACE_DIR"] = str(_TEST_RUNTIME_DIR / "traces")
+os.environ["DOCUMENT_DIR"] = str(_TEST_RUNTIME_DIR / "documents")
 
 import pytest  # noqa: E402
 
@@ -43,5 +54,5 @@ def manager() -> Manager:
 
 @pytest.fixture
 def document_store():
-    """The process-wide RAG store (empty-ish; tests add their own docs)."""
+    """The process-wide RAG store (isolated per test session)."""
     return get_document_store()

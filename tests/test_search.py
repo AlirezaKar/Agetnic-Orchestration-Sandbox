@@ -168,16 +168,66 @@ def test_crawl4ai_availability_probe():
     assert isinstance(Crawl4AIFetcher.is_available(), bool)
 
 
-async def test_crawl4ai_fetch_error_is_captured_not_raised():
-    """Without a working browser, fetch() must degrade to ok=False."""
+async def test_crawl4ai_fetch_error_is_captured_not_raised(monkeypatch):
+    """Browser/startup errors must degrade cleanly to ok=False without raising."""
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("crawl4ai")
+    fake_mod.CacheMode = types.SimpleNamespace(ENABLED="enabled")
+    fake_mod.CrawlerRunConfig = lambda **kwargs: kwargs
+    monkeypatch.setitem(sys.modules, "crawl4ai", fake_mod)
+
     fetcher = Crawl4AIFetcher(Settings(crawl4ai_max_content_chars=100))
+
+    async def broken_browser():
+        raise RuntimeError("Playwright browser unavailable")
+
+    monkeypatch.setattr(fetcher, "_get_crawler", broken_browser)
     page = await fetcher.fetch("https://example.com/whatever")
+
     assert isinstance(page, PageContent)
     assert page.fetcher == "crawl4ai"
-    # In this sandbox browsers can't be installed → expect graceful failure.
-    # On a machine with `crawl4ai-setup` run it may succeed — both OK here.
-    if not page.ok:
-        assert page.error
+    assert page.ok is False
+    assert page.error and "Playwright browser unavailable" in page.error
+
+
+async def test_crawl4ai_fetch_truncates_and_closes(monkeypatch):
+    """Successful crawl extracts title, truncates markdown, and closes cleanly."""
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("crawl4ai")
+    fake_mod.CacheMode = types.SimpleNamespace(ENABLED="enabled")
+    fake_mod.CrawlerRunConfig = lambda **kwargs: kwargs
+    monkeypatch.setitem(sys.modules, "crawl4ai", fake_mod)
+
+    closed = False
+
+    class FakeBrowser:
+        async def arun(self, *, url, config):
+            return types.SimpleNamespace(
+                success=True,
+                markdown="x" * 250,
+                metadata={"title": "Fetched Title"},
+            )
+
+        async def __aexit__(self, exc_type, exc, tb):
+            nonlocal closed
+            closed = True
+
+    fetcher = Crawl4AIFetcher(Settings(crawl4ai_max_content_chars=80))
+    fetcher._crawler = FakeBrowser()
+
+    page = await fetcher.fetch("https://example.com/doc")
+    assert page.ok is True
+    assert page.title == "Fetched Title"
+    assert page.markdown.startswith("x" * 80)
+    assert "[…content truncated…]" in page.markdown
+
+    await fetcher.close()
+    assert closed is True
+    assert fetcher._crawler is None
 
 
 # ──────────────────────────────────────────────────────────────────

@@ -17,7 +17,12 @@ from .base import (
     SearchResponse,
     SearchResult,
 )
-from .factory import get_page_fetcher, get_search_provider, reset_search_cache
+from .factory import (
+    get_page_fetcher,
+    get_search_provider,
+    reset_search_cache,
+    shutdown_search,
+)
 
 __all__ = [
     "PageContent",
@@ -29,4 +34,5 @@ __all__ = [
     "get_page_fetcher",
     "get_search_provider",
     "reset_search_cache",
+    "shutdown_search",
 ]

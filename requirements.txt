@@ -15,5 +15,8 @@ python-dotenv>=1.0
 crawl4ai>=0.9
 
 # ─── Testing ───────────────────────────────────────────────────
-pytest>=8.0
-pytest-asyncio>=0.23
+# pytest-asyncio>=1.0 avoids Python 3.14+ asyncio event-loop-policy
+# DeprecationWarnings; httpx2>=2.0 is required by Starlette's TestClient.
+pytest>=8.4
+pytest-asyncio>=1.0
+httpx2>=2.0
