@@ -1,4 +1,4 @@
-"""HTTP surface: playground, diagnostics, direct search, and the agent loop."""
+"""HTTP surface: test-harness UI, diagnostics, direct search, and the agent loop."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.agent import WebSearchAgent
@@ -19,7 +20,7 @@ from app.llm.registry import (
     build_chain,
     build_provider,
     describe_providers,
-    resolve_provider,
+    resolve_named,
 )
 from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
@@ -27,12 +28,17 @@ from app.search.providers import PROVIDER_CLASSES
 from app.search.registry import build_search_chain, describe_search_providers
 
 STATIC_DIR = Path(__file__).parent / "static"
+ASSETS_DIR = STATIC_DIR / "assets"
 
 app = FastAPI(
     title="Agetnic Orchestration Sandbox",
     version="0.2.0",
     description="Pluggable free model providers + web search, no mock model.",
 )
+
+
+if ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 
 # --------------------------------------------------------------- schemas
@@ -117,9 +123,13 @@ async def providers() -> dict[str, Any]:
 async def provider_models(name: str) -> Any:
     settings = get_settings()
     try:
-        resolved = resolve_provider(name.lower(), settings)
+        resolved = resolve_named(name.lower(), settings)
         provider = build_provider(resolved, settings)
         models = await provider.list_models()
+        try:
+            recommended = (await provider.ranked_models())[:10]
+        except ProviderError:  # pragma: no cover - listing already succeeded
+            recommended = []
     except ConfigurationError as exc:
         return _error(400, "configuration", exc)
     except ProviderError as exc:
@@ -128,6 +138,8 @@ async def provider_models(name: str) -> Any:
         "provider": name.lower(),
         "endpoint": provider.base_url,
         "count": len(models),
+        "recommended": recommended,
+        "configured_model": provider.model,
         "models": models,
         "models_url": resolved.preset.models_url,
     }
@@ -229,7 +241,7 @@ async def diagnose(
     model_report: dict[str, Any] = {"ok": False, "error": {"message": "no provider configured"}}
     try:
         if provider:
-            resolved = resolve_provider(provider.lower(), settings)
+            resolved = resolve_named(provider.lower(), settings)
             ping_target = build_provider(resolved, settings)
         elif chain:
             ping_target = chain.providers[0]

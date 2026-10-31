@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 1024
     llm_timeout: float = 60.0
+    # When the configured model id has been retired, try the next live model
+    # instead of failing (the answer reports which model actually served it).
+    llm_auto_substitute: bool = True
+    llm_model_attempts: int = 3
 
     # ------------------------------------------------- provider API keys
     groq_api_key: str | None = None

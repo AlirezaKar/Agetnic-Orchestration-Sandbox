@@ -27,7 +27,9 @@ class LLMPreset:
     base_url: str
     key_field: str | None
     model_field: str
-    default_model: str | None
+    # Documented example only — never used as a runtime default, because model
+    # ids retire. Leave the env unset (or "auto") to let the backend pick.
+    example_model: str | None
     key_url: str
     models_url: str
     free_tier: str
@@ -53,7 +55,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="https://api.groq.com/openai/v1",
         key_field="groq_api_key",
         model_field="groq_model",
-        default_model="llama-3.3-70b-versatile",
+        example_model="openai/gpt-oss-120b",
         key_url="https://console.groq.com/keys",
         models_url="https://console.groq.com/docs/models",
         free_tier="Free tier, no card: ~30 req/min + daily token caps (up to 14.4k req/day on 8B).",
@@ -66,7 +68,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="https://generativelanguage.googleapis.com/v1beta/openai",
         key_field="gemini_api_key",
         model_field="gemini_model",
-        default_model="gemini-2.5-flash",
+        example_model="gemini-flash-latest",
         key_url="https://aistudio.google.com/apikey",
         models_url="https://ai.google.dev/gemini-api/docs/models",
         free_tier="Free tier, no card: per-model RPM/RPD limits (Flash ~10-15 RPM).",
@@ -80,7 +82,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="https://openrouter.ai/api/v1",
         key_field="openrouter_api_key",
         model_field="openrouter_model",
-        default_model="meta-llama/llama-3.3-70b-instruct:free",
+        example_model="google/gemma-4-31b-it:free",
         key_url="https://openrouter.ai/keys",
         models_url="https://openrouter.ai/models?max_price=0",
         free_tier="Free models (ID ends in :free): 20 req/min, 50 req/day, "
@@ -98,7 +100,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="https://api.mistral.ai/v1",
         key_field="mistral_api_key",
         model_field="mistral_model",
-        default_model="mistral-small-latest",
+        example_model="mistral-medium-latest",
         key_url="https://console.mistral.ai/api-keys",
         models_url="https://docs.mistral.ai/getting-started/models/models_overview/",
         free_tier="Free 'Experiment' plan: monthly token allowance, heavily rate limited (~2 req/min).",
@@ -112,7 +114,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
         key_field="cloudflare_api_token",
         model_field="cloudflare_model",
-        default_model="@cf/meta/llama-3.1-8b-instruct",
+        example_model="@cf/openai/gpt-oss-120b",
         key_url="https://dash.cloudflare.com/profile/api-tokens",
         models_url="https://developers.cloudflare.com/workers-ai/models/",
         free_tier="10,000 neurons/day free on every plan (no card).",
@@ -127,7 +129,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="https://integrate.api.nvidia.com/v1",
         key_field="nvidia_api_key",
         model_field="nvidia_model",
-        default_model="meta/llama-3.3-70b-instruct",
+        example_model="meta/llama-3.3-70b-instruct",
         key_url="https://build.nvidia.com/",
         models_url="https://build.nvidia.com/models",
         free_tier="Free developer credits on signup (rate limited), no card needed.",
@@ -140,7 +142,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="https://api.cerebras.ai/v1",
         key_field="cerebras_api_key",
         model_field="cerebras_model",
-        default_model="llama-3.3-70b",
+        example_model="llama-3.3-70b",
         key_url="https://cloud.cerebras.ai/",
         models_url="https://inference-docs.cerebras.ai/models/overview",
         free_tier="Free trial credits (as of 2026 a card is required after the trial; "
@@ -155,7 +157,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="https://router.huggingface.co/v1",
         key_field="huggingface_api_key",
         model_field="huggingface_model",
-        default_model="meta-llama/Llama-3.1-8B-Instruct",
+        example_model="meta-llama/Llama-3.1-8B-Instruct",
         key_url="https://huggingface.co/settings/tokens",
         models_url="https://huggingface.co/models?inference=warm",
         free_tier="Small free monthly inference credits for signed-in accounts.",
@@ -168,7 +170,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="{ollama_base_url}",
         key_field=None,
         model_field="ollama_model",
-        default_model="llama3.2",
+        example_model="llama3.2",
         key_url="https://ollama.com/download",
         models_url="https://ollama.com/library",
         free_tier="100% free and local, no account, no rate limits.",
@@ -184,7 +186,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="{lmstudio_base_url}",
         key_field=None,
         model_field="lmstudio_model",
-        default_model=None,
+        example_model=None,
         key_url="https://lmstudio.ai/",
         models_url="https://lmstudio.ai/models",
         free_tier="100% free and local, no account.",
@@ -200,7 +202,7 @@ PRESETS: dict[str, LLMPreset] = {
         base_url="{custom_base_url}",
         key_field="custom_api_key",
         model_field="custom_model",
-        default_model=None,
+        example_model=None,
         key_url="(your own provider's dashboard)",
         models_url="(your provider's model list, or GET /v1/models)",
         free_tier="Whatever your own provider offers.",
