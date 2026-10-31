@@ -24,7 +24,7 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.4.0 | 2026-10-31 | merged (PR #4, `7846668`) | [v0.4.0.md](v0.4.0.md) | `Not Found` on `POST /chat` fixed, relative assets, launcher |
 | 0.5.0 | 2026-10-31 | merged (PR #6, `9547b54`) | [v0.5.0.md](v0.5.0.md) | Real program logs: errors+tracebacks, requests, terminal mirror, process data |
 | 0.6.0 | 2026-10-31 | merged (PR #8, `1b50f80`) | [v0.6.0.md](v0.6.0.md) | Lean `.env`, `LLM_PROVIDER=auto` + explicit models, `scripts.start`, no nulls in doctor JSON |
-| 0.7.0 | 2026-10-31 | in review | [v0.7.0.md](v0.7.0.md) | Manager orchestration: planner → parallel document/search/data/general agents → synthesis, attachments |
+| 0.7.0 | 2026-10-31 | merged (PR #10, `a02e3fa`) | [v0.7.0.md](v0.7.0.md) | Manager orchestration: planner → parallel document/search/data/general agents → synthesis, attachments |
 
 ## Adding a version
 
