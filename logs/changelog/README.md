@@ -12,7 +12,7 @@ Release notes, one file per version. Runtime logs are **not** here — they live
 The version string is the single source of truth in `app/main.py`
 (`VERSION`) and is mirrored into the page as `<meta name="agetnic-version">`,
 into the `?v=` cache-bust on every asset, and into the composer label
-(`· v0.5.0`). If those disagree, the browser is showing a cached page.
+(`· v0.6.0`). If those disagree, the browser is showing a cached page.
 
 ## Index
 
@@ -23,6 +23,7 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.3.0 | 2026-10-31 | superseded | [v0.3.0.md](v0.3.0.md) | Intermediate API-routing rework; never shipped on its own |
 | 0.4.0 | 2026-10-31 | merged (PR #4, `7846668`) | [v0.4.0.md](v0.4.0.md) | `Not Found` on `POST /chat` fixed, relative assets, launcher |
 | 0.5.0 | 2026-10-31 | merged (PR #6, `9547b54`) | [v0.5.0.md](v0.5.0.md) | Real program logs: errors+tracebacks, requests, terminal mirror, process data |
+| 0.6.0 | 2026-10-31 | in review | [v0.6.0.md](v0.6.0.md) | Lean `.env`, `LLM_PROVIDER=auto` + explicit models, `scripts.start`, no nulls in doctor JSON |
 
 ## Adding a version
 

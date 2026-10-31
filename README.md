@@ -26,14 +26,29 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# open .env, set LLM_PROVIDER + one API key (see §2)
+# open .env: keep LLM_PROVIDER=auto, fill ONE provider key + its model (see §2)
 
-python -m scripts.check_providers      # table + which env var is missing
-python -m scripts.check_providers --provider groq --models   # live ids, best first
-python -m scripts.doctor               # pings the model + every search backend
+python -m scripts.start           # checks, then the server on http://localhost:8000
+```
+
+`scripts.start` is the whole quickstart in one command, in this order:
+
+| Step | Command it runs | What it tells you |
+|---|---|---|
+| 1 | `python -m scripts.check_providers` | which providers are ready, which env var is missing, where to get it |
+| 2 | `python -m scripts.doctor` | does the model actually answer, does search actually answer |
+| 3 | `python run.py` | uvicorn serving the UI **and** the API on one port |
+
+If a check fails it stops before starting the server (add `--force` to start anyway,
+`--check-only` to stop after the checks, `--no-checks` to skip them).
+The individual commands still work on their own:
+
+```bash
+python -m scripts.check_providers                            # table + what is missing
+python -m scripts.check_providers --provider groq --models    # live ids, best first
+python -m scripts.doctor --agent                              # include a full agent round trip
 python -m scripts.check_search -q "python 3.13 release notes"
-
-python3 run.py                    # UI + API on http://localhost:8000  (add --reload while editing)
+python3 run.py --reload                                       # server only
 ```
 
 `run.py` is the supported entry point: it starts **one** process that serves both the page
@@ -54,59 +69,72 @@ python -m unittest discover -s tests -v     # offline, no keys, no network
 
 ## 2. Choosing the core model (all free)
 
-Set `LLM_PROVIDER` to one of these and fill the matching key. **Every option is free**
-(free permanent tier, free monthly credits, or a local runtime). Two links per provider:
-where to create the key, and where to see the *live* model IDs.
+Two independent choices: **which provider** and **which model**.
 
-| `LLM_PROVIDER` | Free tier | Get an API key | Model list | Required env |
-|---|---|---|---|---|
-| `groq` | ~30 req/min, 14.4k req/day on 8B, no card | <https://console.groq.com/keys> | <https://console.groq.com/docs/models> | `GROQ_API_KEY` |
-| `gemini` | Free tier per model, 1M context, no card | <https://aistudio.google.com/apikey> | <https://ai.google.dev/gemini-api/docs/models> | `GEMINI_API_KEY` |
-| `openrouter` | ~20 `:free` models, 20 req/min, 50 req/day | <https://openrouter.ai/keys> | <https://openrouter.ai/models?max_price=0> | `OPENROUTER_API_KEY` |
-| `mistral` | Free "Experiment" plan, ~2 req/min | <https://console.mistral.ai/api-keys> | <https://docs.mistral.ai/getting-started/models/models_overview/> | `MISTRAL_API_KEY` |
-| `cloudflare` | 10,000 neurons/day, no card | <https://dash.cloudflare.com/profile/api-tokens> | <https://developers.cloudflare.com/workers-ai/models/> | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` |
-| `nvidia` | Free developer credits, no card | <https://build.nvidia.com/> | <https://build.nvidia.com/models> | `NVIDIA_API_KEY` |
-| `huggingface` | Small free monthly credits | <https://huggingface.co/settings/tokens> | <https://huggingface.co/models?inference=warm> | `HUGGINGFACE_API_KEY` |
-| `ollama` | Local, unlimited, no account | <https://ollama.com/download> | <https://ollama.com/library> | `OLLAMA_MODEL` (server on `:11434`) |
-| `lmstudio` | Local, unlimited, no account | <https://lmstudio.ai/> | <https://lmstudio.ai/models> | `LMSTUDIO_MODEL` (server on `:1234`) |
-| `cerebras` | Free trial credits then card | <https://cloud.cerebras.ai/> | <https://inference-docs.cerebras.ai/models/overview> | `CEREBRAS_API_KEY` |
-| `custom` | whatever your endpoint offers | *(your provider)* | *(your provider, or `GET /v1/models`)* | `CUSTOM_BASE_URL` + `CUSTOM_MODEL` |
+- `LLM_PROVIDER=auto` (default) — the first provider in the order below that has **both** a
+  key and a model is used. No network call, no guessing.
+- `LLM_PROVIDER=<name>` — that provider is used, even if others are also configured.
+- The **model is always written by you**, on the line under its API key
+  (`GROQ_MODEL=…` next to `GROQ_API_KEY=…`). Nothing is substituted or invented; the id you
+  write is the id that is called. If it is missing, the provider counts as not ready and the
+  error tells you which line to fill and where the live ids are.
 
-### `LLM_MODEL=auto` — why there is no hard-coded default
+```dotenv
+LLM_PROVIDER=auto          # or: groq, gemini, openrouter, mistral, cerebras, nvidia,
+                           #     cloudflare, huggingface, ollama, lmstudio, custom
+GROQ_API_KEY=gsk_…
+GROQ_MODEL=openai/gpt-oss-120b
+```
 
-Model ids retire constantly, and a retired id fails 100% of the time. Real examples, both
-seen on 2026-10-31:
+Auto order: `groq → gemini → openrouter → mistral → cerebras → nvidia → cloudflare →
+huggingface → ollama → lmstudio → custom`. A key without a model does not win; the next
+provider in the order is tried. `LLM_FALLBACKS=gemini,openrouter` puts those first instead.
+
+| Provider | Free tier | Get an API key | Model list |
+|---|---|---|---|
+| `groq` | ~30 req/min, 14.4k req/day on 8B, no card | <https://console.groq.com/keys> | <https://console.groq.com/docs/models> |
+| `gemini` | Free tier per model, 1M context, no card | <https://aistudio.google.com/apikey> | <https://ai.google.dev/gemini-api/docs/models> |
+| `openrouter` | ~20 `:free` models, 20 req/min, 50 req/day | <https://openrouter.ai/keys> | <https://openrouter.ai/models?max_price=0> |
+| `mistral` | Free "Experiment" plan, ~2 req/min | <https://console.mistral.ai/api-keys> | <https://docs.mistral.ai/getting-started/models/models_overview/> |
+| `cloudflare` | 10,000 neurons/day, no card | <https://dash.cloudflare.com/profile/api-tokens> | <https://developers.cloudflare.com/workers-ai/models/> |
+| `nvidia` | Free developer credits, no card | <https://build.nvidia.com/> | <https://build.nvidia.com/models> |
+| `huggingface` | Small free monthly credits | <https://huggingface.co/settings/tokens> | <https://huggingface.co/models?inference=warm> |
+| `cerebras` | Free trial credits then card | <https://cloud.cerebras.ai/> | <https://inference-docs.cerebras.ai/models/overview> |
+| `ollama` | Local, unlimited, no account | <https://ollama.com/download> | <https://ollama.com/library> |
+| `lmstudio` | Local, unlimited, no account | <https://lmstudio.ai/> | <https://lmstudio.ai/models> |
+| `custom` | whatever your endpoint offers | *(your provider)* | *(your provider, or `GET /v1/models`)* |
+
+### Model ids retire — copy a live one
+
+A retired id fails 100% of the time. Both of these were real:
 
 | Symptom | Provider's own message | Meaning |
 |---|---|---|
-| `[gemini] chat/completions failed with HTTP 404` | *"This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash"* | The endpoint and the key are fine — the **model id is retired** |
-| `[openrouter] chat/completions failed with HTTP 400` (or 404) | *"No endpoints found for meta-llama/llama-3.3-70b-instruct:free"* | The id still exists in the catalogue but **has zero live endpoints** |
+| `[gemini] … HTTP 404` | *"models/gemini-2.5-flash is no longer available to new users, use models/gemini-3.8-flash"* | the key and endpoint are fine, the **model id is retired** |
+| `[openrouter] … HTTP 400/404` | *"No endpoints found for meta-llama/llama-3.3-70b-instruct:free"* | the id exists in the catalogue but has **no live endpoints** |
 
-So the backend no longer ships a default id. With `LLM_MODEL=auto` (the default) it asks the
-provider's `/models` and picks the best live model:
+So ask the provider what your key can call, instead of trusting a blog post:
 
-- **Gemini:** the rolling `gemini-flash-latest` alias first (survives renames), then the
-  newest full Flash (`gemini-3.8-flash`, …), Lite only after that, images/TTS/audio/embeddings excluded.
-- **OpenRouter:** only ids ending in `:free`, preferring models whose
-  `supported_parameters` include `tools` (the agent needs function calling).
-- **Groq:** `gpt-oss-120b` → `gpt-oss-20b` → Llama 3.3 → 8B instant.
-- **Local (Ollama/LM Studio):** whatever the server actually lists.
+```bash
+python -m scripts.check_providers --provider gemini --models   # live ids, best first
+python -m scripts.check_providers --provider gemini --models --autofix   # writes the best id into .env
+```
 
-If you *do* pin an id and it gets retired, `LLM_AUTO_SUBSTITUTE=true` (default) retries with
-the next live model and reports which model answered. `LLM_MODEL_ATTEMPTS` caps the tries.
+`--autofix` writes the recommended id into `.env` (backup: `.env.bak`) — it still ends up as
+an explicit `<PROVIDER>_MODEL` line, which is the only thing the runtime reads.
 
 Notes that matter:
 
-- **Never copy an id from a blog post.** `GET /providers/gemini/models` (or
-  `python -m scripts.check_providers --provider gemini --models`) lists what your key can
-  actually call, best first under `recommended`.
-- `python -m scripts.check_providers --provider gemini --models --autofix` writes the
-  recommended id into `.env` for you (backup: `.env.bak`).
-- **Tool calling is required** for web search. Most Llama/Qwen/Gemini/Mistral models support
-  it; tiny 1–3B models often do not, and the API will return a 400 that the error hint
-  explains.
-- `gemini` is wired through Google's OpenAI-compatibility endpoint
-  (`/v1beta/openai`), which supports function calling — that's why one code path works.
+- **Tool calling is required** for web search. Llama/Qwen/Gemini/Mistral models support it;
+  tiny 1–3B models often do not, and the 400 error says so.
+- `gemini` goes through Google's OpenAI-compatibility endpoint (`/v1beta/openai`), which is
+  why one provider code path covers all of them.
+- `LLM_MODEL` / `LLM_BASE_URL` / `LLM_API_KEY` are advanced overrides for a **manually**
+  chosen provider (point a preset at a proxy). In `auto` mode they are ignored, and
+  `check_providers` says so.
+- Want the old "let the backend pick a live model" behaviour? Put `auto` in that provider's
+  model line (`GROQ_MODEL=auto`) or set `LLM_AUTO_SUBSTITUTE=true` to fall back to a live id
+  when yours has been retired. The response reports which model answered.
 
 ### Failover
 
@@ -116,9 +144,8 @@ LLM_FALLBACKS=gemini,openrouter
 ```
 
 Tried left to right; the first provider that answers wins. A 429 on Groq silently moves to
-Gemini. Each fallback uses its own `<PROVIDER>_API_KEY` / `<PROVIDER>_MODEL`.
-`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` override the **primary** only (useful to point a
-preset at a proxy).
+Gemini. Each fallback uses its own `<PROVIDER>_API_KEY` / `<PROVIDER>_MODEL`, so a fallback
+that has no model line is skipped with a message saying which line to fill.
 
 ### Custom provider
 
@@ -350,9 +377,10 @@ app/
   logs.py              LOGGING: rotating files, redaction, request lines, crash capture
   static/index.html    test harness (modes, diagnostics, history, inspector)
   static/assets/       the original dark console CSS + app.js
-run.py                 launcher: preflight + banner + terminal mirror + startup record
+run.py                 server launcher: preflight + banner + logs + startup record
 logs/                  runtime logs (git-ignored) + logs/changelog/ release notes
 scripts/
+  start.py             checks then server: the one command to run
   logs.py              read them: list | tail -f | errors | requests | process
   doctor.py            model + search + optional agent, one command
   check_providers.py   table, links, --ping, --models
@@ -364,10 +392,12 @@ tests/                 offline tests (MockTransport, no keys)
 
 | Symptom | Cause / fix |
 |---|---|
-| `400 configuration … LLM_PROVIDER` | No key for the selected provider. `python -m scripts.check_providers --links` |
+| `400 configuration … LLM_PROVIDER` | No provider is ready. A provider needs **both** a key and a model; the message lists exactly which env vars to fill |
+| `missing GROQ_MODEL` / `no model` status | The key is fine, the model line is empty. Copy a live id: `python -m scripts.check_providers --provider groq --models` |
+| `auto` picked a provider you did not want | Another provider earlier in the auto order has a key + model. Set `LLM_PROVIDER=<name>` to pin one, or `LLM_FALLBACKS=<name>` to put it first |
 | `502 [groq] HTTP 429` | Free-tier rate limit. Add `LLM_FALLBACKS=gemini` or wait |
-| `[gemini] … HTTP 404` / `no longer available to new users` | Retired model id. Set `GEMINI_MODEL=auto` (or `LLM_MODEL=auto`) |
-| `[openrouter] … HTTP 400/404` / `No endpoints found` | That `:free` model lost its endpoints. Use `OPENROUTER_MODEL=auto` |
+| `[gemini] … HTTP 404` / `no longer available to new users` | Retired model id. Copy a live one into `GEMINI_MODEL` (`python -m scripts.check_providers --provider gemini --models`) |
+| `[openrouter] … HTTP 400/404` / `No endpoints found` | That `:free` model lost its endpoints. Pick another `:free` id for `OPENROUTER_MODEL` |
 | `502 … endpoint not found` | Wrong base URL path (OpenAI-style ends with `/v1`, Gemini `/v1beta/openai`) |
 | `model rejected tool calling` | Model too small for function calling. Pick a bigger one |
 | `search … bot challenge` | DDG blocking the IP. `SEARCH_PROVIDERS=tavily,ddg` or `wikipedia,ddg` |
@@ -421,6 +451,11 @@ become `«redacted»` (tracebacks included). Prompts/answers are not logged at `
 
 Tuning: `LOG_LEVEL` (default `INFO`), `LOG_ROTATE_MB` (5), `LOG_BACKUPS` (5), `LOG_DIR`.
 One run can override everything: `python3 run.py --log-level DEBUG --log-dir /tmp/agetnic`.
+
+`artifacts/doctor.json` marks checks that were not requested explicitly, e.g.
+`"agent": {"skipped": true, "reason": "…"}` — nothing is `null`. The agent run only happens
+with `--agent`, because it costs one model call plus one or two searches; `--search-only`
+skips the model ping the same way.
 
 `logs/changelog/` holds release notes, one markdown file per version, indexed in
 [`logs/changelog/README.md`](logs/changelog/README.md) — those are notes, not logs.

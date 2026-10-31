@@ -36,6 +36,11 @@ ARTIFACTS = Path("artifacts")
 OK, BAD, SKIP = "PASS", "FAIL", "SKIP"
 
 
+def skipped(reason: str) -> dict:
+    """Explicit "this was not run" record — never a bare JSON null."""
+    return {"skipped": True, "reason": reason}
+
+
 def line(status: str, label: str, detail: str = "") -> None:
     print(f"  [{status}] {label:<24} {detail}")
 
@@ -45,10 +50,12 @@ async def check_model(settings) -> tuple[bool, list[dict]]:
     reports: list[dict] = []
     print("\n1) core model")
     if not chain:
-        line(BAD, "configured", "no provider has its key set")
+        line(BAD, "configured", "no provider has both a key and a model")
         for note in chain.skipped:
             print(f"         {note}")
         print("         -> pick one: python -m scripts.check_providers --links")
+        if any("MODEL" in note for note in chain.skipped):
+            print("         -> a key alone is not enough: fill <PROVIDER>_MODEL too")
         return False, reports
     for note in chain.skipped:
         print(f"         (skipped: {note})")
@@ -133,22 +140,36 @@ def main() -> int:
     print("Agetnic Orchestration Sandbox — doctor")
     print("=" * 72)
     print(f"  .env present: {os.path.exists('.env')}")
+    if settings.is_auto_provider:
+        ready = [p["name"] for p in describe_providers(settings) if p["configured"]]
+        print(f"  provider    : auto -> {ready[0] if ready else '(none ready)'}"
+              f"   candidates: {', '.join(settings.llm_chain[:3])}…")
+    else:
+        print(f"  provider    : {settings.llm_provider} (manual)")
     print(f"  model chain : {' -> '.join(settings.llm_chain)}")
+    if settings.unused_llm_overrides:
+        print(f"  note        : {', '.join(settings.unused_llm_overrides)} ignored in auto mode")
     print(f"  search chain: {' -> '.join(settings.search_chain)}")
     configured = [p["name"] for p in describe_providers(settings) if p["configured"]]
     print(f"  providers ready: {', '.join(configured) or 'none'}")
     if not os.path.exists(".env"):
         print("  note: no .env file — copy .env.example to .env unless you set env vars another way")
 
-    results: dict = {"model": None, "search": None, "agent": None}
+    results: dict = {
+        "model": skipped("not requested (--search-only)"),
+        "search": [],
+        "agent": skipped("not requested; pass --agent for a full model+search round trip"),
+    }
     model_ok = True
     if not args.search_only:
         model_ok, model_reports = asyncio.run(check_model(settings))
         results["model"] = model_reports
+    else:
+        print("\n1) core model\n  [SKIP] skipped (--search-only)")
     search_ok, search_reports = asyncio.run(check_search(settings, args.query))
     results["search"] = search_reports
 
-    agent_ok = None
+    agent_ok = "skipped"
     if args.agent:
         agent_ok, agent_data = asyncio.run(
             check_agent(settings, args.question or "What is the latest Python release? Cite sources.")
@@ -156,18 +177,26 @@ def main() -> int:
         results["agent"] = agent_data
 
     print("\n" + "=" * 72)
+    # An empty chain means the model check cannot pass, even under --search-only.
+    model_ok = model_ok if not args.search_only else (bool(build_chain(settings)) or "skipped")
     summary = {
-        "model_ok": model_ok if not args.search_only else None,
+        "model_ok": model_ok,
         "search_ok": search_ok,
         "agent_ok": agent_ok,
     }
     print(f"summary: {json.dumps(summary)}")
+    if agent_ok == "skipped":
+        print("  agent: skipped — no agent run was requested (use --agent). "
+              "In artifacts/doctor.json it is {\"skipped\": true, \"reason\": …}, "
+              "not a failure")
+
     if not search_ok:
         print("Search failed everywhere. Keyless backends: ddg, wikipedia. "
               "Set SEARCH_PROVIDERS=wikipedia,ddg to try the reliable one first.")
     if not args.search_only and not model_ok:
-        print("Model failed. Fill LLM_PROVIDER + key in .env "
-              "(python -m scripts.check_providers --links shows every free option).")
+        print("Model failed. .env needs a provider key AND its model, e.g.")
+        print("    GROQ_API_KEY=gsk_…   GROQ_MODEL=openai/gpt-oss-120b")
+        print("    (model ids: python -m scripts.check_providers --provider groq --models)")
 
     log.info("doctor finished model_ok=%s search_ok=%s agent_ok=%s", model_ok, search_ok, agent_ok)
     if not model_ok:

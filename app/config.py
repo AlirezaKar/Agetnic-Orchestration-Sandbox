@@ -17,6 +17,22 @@ from typing import Any
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# When LLM_PROVIDER=auto, the first provider in this order that has both a key
+# and an explicitly configured model is used.
+AUTO_PROVIDER_ORDER: tuple[str, ...] = (
+    "groq",
+    "gemini",
+    "openrouter",
+    "mistral",
+    "cerebras",
+    "nvidia",
+    "cloudflare",
+    "huggingface",
+    "ollama",
+    "lmstudio",
+    "custom",
+)
+
 DEFAULT_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -52,8 +68,9 @@ class Settings(BaseSettings):
     reload: bool = False
 
     # ------------------------------------------------------- core model
-    # Which provider is the brain of the backend. See app/llm/presets.py
-    llm_provider: str = "groq"
+    # Which provider is the brain of the backend: "auto" or a provider name.
+    # See app/llm/presets.py; "auto" walks AUTO_PROVIDER_ORDER.
+    llm_provider: str = "auto"
     # Optional override applied to the *primary* provider only.
     llm_base_url: str | None = None
     llm_api_key: str | None = None
@@ -64,9 +81,9 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 1024
     llm_timeout: float = 60.0
-    # When the configured model id has been retired, try the next live model
-    # instead of failing (the answer reports which model actually served it).
-    llm_auto_substitute: bool = True
+    # Off by default: the model you wrote in <PROVIDER>_MODEL is the one used.
+    # Turn on to substitute a live model when that id has been retired.
+    llm_auto_substitute: bool = False
     llm_model_attempts: int = 3
 
     # ------------------------------------------------- provider API keys
@@ -165,8 +182,27 @@ class Settings(BaseSettings):
 
     # ----------------------------------------------------------- helpers
     @property
+    def is_auto_provider(self) -> bool:
+        return (self.llm_provider or "").strip().lower() in ("", "auto")
+
+    @property
+    def unused_llm_overrides(self) -> list[str]:
+        """LLM_* knobs that only apply to a manually chosen provider."""
+        if not self.is_auto_provider:
+            return []
+        pairs = (
+            ("LLM_MODEL", self.llm_model),
+            ("LLM_BASE_URL", self.llm_base_url),
+            ("LLM_API_KEY", self.llm_api_key),
+        )
+        return [name for name, value in pairs if value]
+
+    @property
     def llm_chain(self) -> list[str]:
-        chain = [self.llm_provider, *split_csv(self.llm_fallbacks)]
+        if self.is_auto_provider:
+            chain = [*AUTO_PROVIDER_ORDER, *split_csv(self.llm_fallbacks)]
+        else:
+            chain = [self.llm_provider, *split_csv(self.llm_fallbacks)]
         return split_csv(",".join(chain))
 
     @property
@@ -178,6 +214,7 @@ class Settings(BaseSettings):
     def public_summary(self) -> dict[str, Any]:
         """Config summary safe to expose over HTTP (no secrets)."""
         return {
+            "llm_provider": self.llm_provider,
             "llm_chain": self.llm_chain,
             "search_chain": self.search_chain,
             "llm_model": self.llm_model,
