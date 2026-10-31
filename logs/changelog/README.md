@@ -22,7 +22,7 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.2.0 | 2026-10-31 | merged (PR #3, `82a159e`) | [v0.2.0.md](v0.2.0.md) | PR #1 frontend restored, with diagnostics kept |
 | 0.3.0 | 2026-10-31 | superseded | [v0.3.0.md](v0.3.0.md) | Intermediate API-routing rework; never shipped on its own |
 | 0.4.0 | 2026-10-31 | merged (PR #4, `7846668`) | [v0.4.0.md](v0.4.0.md) | `Not Found` on `POST /chat` fixed, relative assets, launcher |
-| 0.5.0 | 2026-10-31 | current | [v0.5.0.md](v0.5.0.md) | Real program logs: errors+tracebacks, requests, terminal mirror, process data |
+| 0.5.0 | 2026-10-31 | merged (PR #6, `9547b54`) | [v0.5.0.md](v0.5.0.md) | Real program logs: errors+tracebacks, requests, terminal mirror, process data |
 
 ## Adding a version
 
