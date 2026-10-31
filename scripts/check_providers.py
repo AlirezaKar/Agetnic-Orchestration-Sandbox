@@ -21,6 +21,7 @@ import json
 import sys
 from pathlib import Path
 
+from app import logs
 from app.config import get_settings
 from app.llm.base import ProviderError
 from app.llm.presets import PRESETS
@@ -175,6 +176,7 @@ async def list_models(
 
 
 def main() -> int:
+    logs.setup_logging()
     parser = argparse.ArgumentParser(description="Inspect and test model providers.")
     parser.add_argument("--provider", help="target a single provider")
     parser.add_argument("--ping", action="store_true", help="send a tiny completion to each configured provider")
