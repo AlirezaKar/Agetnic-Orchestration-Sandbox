@@ -1,4 +1,4 @@
-"""HTTP surface: playground, diagnostics, direct search, and the agent loop."""
+"""HTTP surface: test-harness UI, diagnostics, direct search, and the agent loop."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.agent import WebSearchAgent
@@ -27,12 +28,17 @@ from app.search.providers import PROVIDER_CLASSES
 from app.search.registry import build_search_chain, describe_search_providers
 
 STATIC_DIR = Path(__file__).parent / "static"
+ASSETS_DIR = STATIC_DIR / "assets"
 
 app = FastAPI(
     title="Agetnic Orchestration Sandbox",
     version="0.2.0",
     description="Pluggable free model providers + web search, no mock model.",
 )
+
+
+if ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 
 # --------------------------------------------------------------- schemas

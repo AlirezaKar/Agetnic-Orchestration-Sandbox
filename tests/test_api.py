@@ -18,11 +18,25 @@ class ApiTests(unittest.TestCase):
         cls.client = TestClient(app)
 
     # ------------------------------------------------------------- basics
-    def test_index_serves_playground(self):
+    def test_index_serves_test_harness(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("Agetnic Orchestration Sandbox", response.text)
         self.assertIn("Run diagnostics", response.text)
+        self.assertIn("/assets/js/app.js", response.text)
+        self.assertIn('id="mode-list"', response.text)
+        self.assertIn('id="diag-summary"', response.text)
+        self.assertIn('id="trace-json"', response.text)
+
+    def test_static_assets_are_served(self):
+        for path, marker in (
+            ("/assets/css/styles.css", ".topbar"),
+            ("/assets/css/extra.css", ".diag-row"),
+            ("/assets/js/app.js", "runDiagnostics"),
+        ):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200, path)
+            self.assertIn(marker, response.text, path)
 
     def test_health_reports_missing_model_and_usable_search(self):
         data = self.client.get("/health").json()

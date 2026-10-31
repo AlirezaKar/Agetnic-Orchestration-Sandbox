@@ -36,8 +36,9 @@ python -m scripts.check_search -q "python 3.13 release notes"
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Open <http://localhost:8000> — a playground with "Run agent", "Search" and
-"Run diagnostics" buttons, plus the full provider list with key/model links.
+Open <http://localhost:8000> — the **test harness** (the original PR #1 UI, rebuilt on this
+API): mode selector (Agent / Answer only / Search only), search-backend list, diagnostics
+panel, run history, trace inspector, and a providers modal with every key/model link.
 
 ```bash
 python -m unittest discover -s tests -v     # offline, no keys, no network
@@ -231,10 +232,21 @@ curl -s "localhost:8000/diagnose" | python -m json.tool          # model + searc
 
 ### Layer 4 — end to end in the browser
 
-Open <http://localhost:8000>, press **Search** (no model involved) and then **Run agent**.
-The trace under the answer shows which tool ran, its arguments, latency and whether it
-failed — so you can see the search call happen instead of trusting the prose. `/chat` also
-returns `search_provider` and `sources`, so the answer is traceable to real URLs.
+Open <http://localhost:8000>:
+
+1. **Search only** mode → press Send. No model is involved; the chain runs and the answer
+   panel shows provider, hits and latency.
+2. **Agent** mode → press Send. The answer carries a clickable timeline: model step → tool
+   step (arguments, latency, ok/failed) → final answer, plus the `sources` list. That is the
+   search call happening, not prose you have to trust.
+3. **Run diagnostics** (top bar) → the model ping and every configured backend appear in the
+   sidebar with pass/fail + latency, the badge turns green, and the raw report opens in the
+   trace inspector.
+4. **Providers** (top bar) → every free provider with its *Get API key* and *See models*
+   links, plus whether it is configured and whether a search backend needs a server.
+
+Depending on the mode, `/chat` returns `search_provider`, `sources` and the full `trace`, so
+the UI never has to imply that a search happened — it shows it.
 
 ### What I actually checked in the code (audit notes)
 
@@ -323,7 +335,8 @@ app/
     base.py            SearchResult / SearchResponse / SearchError
   agent.py             tool-calling loop + trace + sources
   main.py              FastAPI routes
-  static/index.html    playground
+  static/index.html    test harness (modes, diagnostics, history, inspector)
+  static/assets/       the original dark console CSS + app.js
 scripts/
   doctor.py            model + search + optional agent, one command
   check_providers.py   table, links, --ping, --models

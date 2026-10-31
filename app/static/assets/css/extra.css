@@ -1,0 +1,91 @@
+
+/* ═══════════════════════════════════════════════════════════════
+   Additions for this build (provider-agnostic models + server-less
+   search): diagnostics panel, backend list, provider modal, sources.
+   ═══════════════════════════════════════════════════════════════ */
+
+.badge.bad { color: var(--red); border-color: rgba(255, 107, 107, 0.4); }
+.badge.warn { color: var(--amber); border-color: rgba(240, 180, 41, 0.4); }
+
+/* Timeline kinds used by this build */
+.tl-kind.model  { background: var(--purple-soft); color: var(--purple); }
+.tl-kind.tool   { background: var(--amber-soft);  color: var(--amber); }
+
+.tl-meta { color: var(--muted); font-size: 11px; margin-top: 6px; font-family: var(--mono); }
+
+/* Diagnostics panel */
+.diag-summary { font-size: 12px; line-height: 1.55; }
+.diag-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 0; font-size: 12px;
+  border-bottom: 1px dashed var(--border);
+}
+.diag-row:last-child { border-bottom: 0; }
+.diag-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diag-row .ms { color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+
+/* Backend / provider lists */
+.provider-list { display: flex; flex-direction: column; gap: 6px; }
+.provider-item {
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  border-radius: 8px;
+  padding: 7px 9px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.provider-item:hover { border-color: var(--accent); }
+.provider-item.active { border-color: var(--accent); background: var(--accent-soft); }
+.provider-item .row1 { display: flex; align-items: center; gap: 6px; }
+.provider-item .pname { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-item .pdesc { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
+.pill {
+  font-size: 9.5px; font-family: var(--mono); padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
+  white-space: nowrap;
+}
+.pill.ok { color: var(--green); border-color: rgba(62, 207, 142, .4); }
+.pill.bad { color: var(--red); border-color: rgba(255, 107, 107, .4); }
+.pill.warn { color: var(--amber); border-color: rgba(240, 180, 41, .4); }
+
+/* Sources under an answer */
+.sources { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.sources a { color: var(--accent); font-size: 11.5px; text-decoration: none; word-break: break-all; }
+.sources a:hover { text-decoration: underline; }
+
+/* Modal (providers + diagnostics detail) */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(4, 7, 12, 0.72);
+  display: none; align-items: center; justify-content: center; padding: 24px; z-index: 50;
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+  width: min(880px, 100%); max-height: 84vh; overflow-y: auto;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 18px;
+}
+.modal h2 { margin: 0 0 4px; font-size: 15px; }
+.modal .modal-sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+.modal h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 18px 0 8px; }
+.provider-card {
+  border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px;
+  margin-bottom: 8px; background: var(--bg-soft);
+}
+.provider-card .pc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.provider-card .pc-name { font-weight: 600; font-size: 13px; }
+.provider-card .pc-links { margin-top: 5px; display: flex; gap: 12px; flex-wrap: wrap; }
+.provider-card a { color: var(--accent); font-size: 11.5px; text-decoration: none; }
+.provider-card a:hover { text-decoration: underline; }
+.provider-card .pc-note { color: var(--muted); font-size: 11px; margin-top: 5px; line-height: 1.5; }
+.provider-card code { font-size: 10.5px; }
+
+.composer-actions select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; padding: 5px 8px; font-size: 12px;
+}
+.spinner {
+  display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin .7s linear infinite; vertical-align: -2px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
