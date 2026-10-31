@@ -48,8 +48,8 @@ class EnvExampleTests(unittest.TestCase):
         keys = env_keys()
         for required in (
             "LLM_PROVIDER",
-            "LLM_MODEL",
             "LLM_FALLBACKS",
+            "GROQ_MODEL",
             "CUSTOM_BASE_URL",
             "CUSTOM_API_KEY",
             "CUSTOM_MODEL",
@@ -57,6 +57,30 @@ class EnvExampleTests(unittest.TestCase):
             "SEARCH_PROVIDERS",
         ):
             self.assertIn(required, keys)
+
+    def test_models_are_never_prefilled(self):
+        # The model is chosen by the owner of the key, never guessed here.
+        for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.endswith("_MODEL"):
+                self.assertEqual(value.strip(), "", f"{key} must be left blank")
+
+    def test_template_stays_lean(self):
+        lines = [
+            line.strip()
+            for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        comments = [line for line in lines if line.startswith("#")]
+        self.assertLess(
+            len(comments) / len(lines),
+            0.35,
+            "comments should stay minimal: one short line per section/provider",
+        )
+        self.assertLess(len(lines), 130, "the template must stay readable")
 
     def test_no_secret_is_committed(self):
         pattern = re.compile(

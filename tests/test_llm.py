@@ -171,13 +171,20 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(chain.providers, [])
         self.assertIn("GROQ_API_KEY", chain.skipped[0])
 
-    def test_unset_model_falls_back_to_auto_discovery(self):
+    def test_key_without_model_is_not_ready_and_not_guessed(self):
         cfg = settings(llm_provider="groq", groq_api_key="gsk_test")
         chain = build_chain(cfg)
-        self.assertEqual([p.name for p in chain.providers], ["groq"])
-        # Model ids retire, so "not configured" means "ask the provider".
-        self.assertEqual(chain.primary.model, "auto")
-        self.assertTrue(chain.primary.is_auto)
+        # Nothing is invented: the model must be written in .env.
+        self.assertEqual(chain.providers, [])
+        self.assertIn("GROQ_MODEL", chain.skipped[0])
+
+    def test_model_can_be_entered_explicitly(self):
+        cfg = settings(llm_provider="groq", groq_api_key="k", groq_model="openai/gpt-oss-120b")
+        provider = build_chain(cfg).primary
+        self.assertEqual(provider.model, "openai/gpt-oss-120b")
+        self.assertFalse(provider.is_auto)
+        # an explicit id is used as-is, no substitution unless asked for
+        self.assertFalse(cfg.llm_auto_substitute)
 
     def test_model_env_overrides_default(self):
         cfg = settings(llm_provider="groq", groq_api_key="k", groq_model="llama-3.1-8b-instant")
@@ -191,11 +198,13 @@ class ResolutionTests(unittest.TestCase):
             llm_base_url="https://proxy.test/v1",
             llm_fallbacks="gemini",
             gemini_api_key="g",
+            gemini_model="gemini-flash-latest",
         )
         chain = build_chain(cfg)
         self.assertEqual(chain.providers[0].base_url, "https://proxy.test/v1")
         self.assertEqual(chain.providers[0].model, "my-proxy-model")
-        self.assertEqual(chain.providers[1].model, "auto")
+        self.assertEqual(chain.providers[1].name, "gemini")
+        self.assertEqual(chain.providers[1].model, "gemini-flash-latest")
 
     def test_custom_provider_requires_base_and_model(self):
         cfg = settings(llm_provider="custom")
@@ -248,6 +257,7 @@ class ResolutionTests(unittest.TestCase):
             llm_provider="cloudflare",
             cloudflare_api_token="t",
             cloudflare_account_id="acc123",
+            cloudflare_model="@cf/openai/gpt-oss-120b",
         )
         provider = build_chain(cfg).primary
         self.assertEqual(
@@ -262,7 +272,7 @@ class ResolutionTests(unittest.TestCase):
         self.assertNotIn("Authorization", provider._headers())
 
     def test_gemini_uses_openai_compatible_endpoint(self):
-        cfg = settings(llm_provider="gemini", gemini_api_key="k")
+        cfg = settings(llm_provider="gemini", gemini_api_key="k", gemini_model="gemini-flash-latest")
         self.assertEqual(
             build_chain(cfg).primary.base_url,
             "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -275,13 +285,14 @@ class ResolutionTests(unittest.TestCase):
             llm_base_url="http://localhost:9102/v1beta/openai",
             llm_model="gemini-3.8-flash",
             groq_api_key="k2",
+            groq_model="openai/gpt-oss-120b",
         )
         primary = resolve_named("gemini", cfg)
         self.assertEqual(primary.base_url, "http://localhost:9102/v1beta/openai")
         self.assertEqual(primary.model, "gemini-3.8-flash")
         other = resolve_named("groq", cfg)
         self.assertEqual(other.base_url, "https://api.groq.com/openai/v1")
-        self.assertEqual(other.model, "auto")
+        self.assertEqual(other.model, "openai/gpt-oss-120b")
 
     def test_unknown_provider_is_a_clear_error(self):
         with self.assertRaises(ConfigurationError):
@@ -312,8 +323,10 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
         cfg = settings(
             llm_provider="groq",
             groq_api_key="k",
+            groq_model="llama-3.1-8b-instant",
             llm_fallbacks="gemini",
             gemini_api_key="k2",
+            gemini_model="gemini-flash-latest",
         )
         chain = build_chain(cfg)
         chain.providers[0]._transport = httpx.MockTransport(primary)
@@ -327,7 +340,7 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("secondary", calls)
 
     async def test_all_providers_failing_raises_with_detail(self):
-        cfg = settings(llm_provider="groq", groq_api_key="k")
+        cfg = settings(llm_provider="groq", groq_api_key="k", groq_model="llama-3.1-8b-instant")
         chain = build_chain(cfg)
         chain.providers[0]._transport = httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
         with self.assertRaises(ProviderError) as ctx:
@@ -337,7 +350,17 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_chain_explains_what_to_set(self):
         with self.assertRaises(ConfigurationError) as ctx:
             await build_chain(settings()).complete([{"role": "user", "content": "hi"}])
-        self.assertIn("LLM_PROVIDER", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("GROQ_API_KEY", message)
+        self.assertIn("GROQ_MODEL", message)
+
+    async def test_missing_model_error_points_at_the_model_list(self):
+        cfg = settings(llm_provider="groq", groq_api_key="k")
+        with self.assertRaises(ConfigurationError) as ctx:
+            build_provider(resolve_provider("groq", cfg, primary=True), cfg)
+        message = str(ctx.exception)
+        self.assertIn("GROQ_MODEL", message)
+        self.assertIn("console.groq.com/docs/models", message)
 
     async def test_ping_reports_failure_without_raising(self):
         provider = make_provider(lambda request: httpx.Response(429, json={}))
@@ -348,7 +371,7 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
 
 class BuildProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_build_provider_from_resolved(self):
-        cfg = settings(llm_provider="groq", groq_api_key="k")
+        cfg = settings(llm_provider="groq", groq_api_key="k", groq_model="openai/gpt-oss-120b")
         provider = build_provider(resolve_provider("groq", cfg, primary=True), cfg)
         self.assertEqual(provider.name, "groq")
         self.assertEqual(provider.timeout, 60.0)

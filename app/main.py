@@ -203,7 +203,8 @@ async def providers() -> dict[str, Any]:
         "core": {
             "provider_env": "LLM_PROVIDER",
             "value": settings.llm_provider,
-            "model_override_env": "LLM_MODEL",
+            "provider_mode": "auto" if settings.is_auto_provider else "manual",
+            "model_override_env": "LLM_MODEL",  # manual mode only
             "model_override": settings.llm_model,
             "chain": settings.llm_chain,
             "ready": [p.name for p in chain.providers],

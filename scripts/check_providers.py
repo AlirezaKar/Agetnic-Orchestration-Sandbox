@@ -39,7 +39,16 @@ ARTIFACTS = Path("artifacts")
 def print_table(settings) -> None:
     providers = describe_providers(settings)
     chain = settings.llm_chain
-    print(f"\ncore provider: {settings.llm_provider}   chain: {' -> '.join(chain)}\n" + "-" * 96)
+    ready = [p["name"] for p in providers if p["configured"]]
+    if settings.is_auto_provider:
+        chosen = ready[0] if ready else "nothing ready yet"
+        print(f"\ncore provider: auto -> {chosen}   (first ready wins)")
+    else:
+        print(f"\ncore provider: {settings.llm_provider} (manual)")
+    print(f"chain: {' -> '.join(chain)}\n" + "-" * 96)
+    if settings.unused_llm_overrides:
+        print(f"note: {', '.join(settings.unused_llm_overrides)} ignored while LLM_PROVIDER=auto "
+              "(set LLM_PROVIDER manually to use them)")
     print(f"{'provider':<14}{'status':<13}{'free tier':<48}model")
     print("-" * 96)
     for p in providers:
@@ -48,15 +57,23 @@ def print_table(settings) -> None:
             "missing_model": "no model",
             "incomplete": "incomplete",
         }.get(p["status"], "no key")
-        if p["name"] in chain:
+        active = (
+            (settings.is_auto_provider and ready and p["name"] == ready[0])
+            or (not settings.is_auto_provider and p["name"] in chain)
+        )
+        if active:
             status += " *"
         free = (p["free_tier"][:46] + "…") if len(p["free_tier"]) > 47 else p["free_tier"]
-        print(f"{p['name']:<14}{status:<13}{free:<48}{p['model_value']}")
+        model = p["model_value"] or (
+            f"(set {p['model_env']})" if p["status"] == "missing_model" else ""
+        )
+        print(f"{p['name']:<14}{status:<13}{free:<48}{model}")
     print("-" * 96)
-    print("* = active in LLM_PROVIDER / LLM_FALLBACKS")
+    print("* = active provider (manual choice, or the auto pick)")
     missing = [p for p in providers if not p["configured"] and p["name"] in chain]
-    for p in missing:
-        print(f"  {p['name']}: set {', '.join(p['missing_env'])}  -> key: {p['key_url']}")
+    for p in missing[:6]:
+        where = p["models_url"] if p["status"] == "missing_model" else p["key_url"]
+        print(f"  {p['name']}: set {', '.join(p['missing_env'])}  -> {where}")
 
 
 def print_links(settings) -> None:

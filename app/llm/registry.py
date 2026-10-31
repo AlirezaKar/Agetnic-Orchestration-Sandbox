@@ -82,10 +82,9 @@ def resolve_provider(name: str, settings: Settings, *, primary: bool = False) ->
             account_id=(settings.cloudflare_account_id or "").strip(),
         )
 
-    # No model configured anywhere → let the provider tell us what it serves.
-    if not model:
-        model = "auto"
-
+    # The model is always the one written in <PROVIDER>_MODEL (or LLM_MODEL).
+    # Nothing is guessed here: an explicit id is what the user asked for, and a
+    # missing one is reported instead of silently picking something.
     # ---- optional overrides, primary provider only
     if primary:
         base_url = _value(settings, "llm_base_url") or base_url
@@ -102,6 +101,8 @@ def resolve_provider(name: str, settings: Settings, *, primary: bool = False) ->
     if preset.key_field and preset.name != "custom" and not api_key:
         # A custom gateway may be keyless; every hosted provider needs a key.
         missing.append(preset.key_field.upper())
+    if not model:
+        missing.append(preset.model_field.upper())
 
     return ResolvedProvider(
         preset=preset,
@@ -117,16 +118,33 @@ def resolve_provider(name: str, settings: Settings, *, primary: bool = False) ->
 
 
 def resolve_named(name: str, settings: Settings) -> ResolvedProvider:
-    """Resolve a provider by name, applying LLM_* overrides if it is the primary."""
+    """Resolve a provider by name, applying LLM_* overrides if it is the primary.
+
+    In ``LLM_PROVIDER=auto`` mode the winner is only known once the chain is
+    built, so per-provider values are used as-is here.
+    """
+    if settings.is_auto_provider:
+        return resolve_provider(name, settings)
     primary = (name or "").strip().lower() == (settings.llm_provider or "").strip().lower()
     return resolve_provider(name, settings, primary=primary)
+
+
+def _where_to_fix(resolved: ResolvedProvider) -> str:
+    """One sentence pointing at the exact place for whatever is missing."""
+    model_env = resolved.preset.model_field.upper()
+    if model_env in resolved.missing:
+        return (
+            f"Set {model_env} to a model id from {resolved.preset.models_url} "
+            f"(or run `python -m scripts.check_providers --provider {resolved.name} --models`)"
+        )
+    return f"Get a key at {resolved.preset.key_url}"
 
 
 def build_provider(resolved: ResolvedProvider, settings: Settings) -> OpenAICompatProvider:
     if not resolved.ready:
         raise ConfigurationError(
             f"Provider '{resolved.name}' is not configured. Missing env: "
-            f"{', '.join(resolved.missing)}. Get a key at {resolved.preset.key_url}",
+            f"{', '.join(resolved.missing)}. {_where_to_fix(resolved)}",
             missing=resolved.missing,
         )
     return OpenAICompatProvider(
@@ -145,6 +163,17 @@ def build_provider(resolved: ResolvedProvider, settings: Settings) -> OpenAIComp
         auto_substitute=settings.llm_auto_substitute,
         max_model_attempts=settings.llm_model_attempts,
     )
+
+
+def _missing_from(skipped: list[str]) -> list[str]:
+    """Collect env var names out of "name: missing A, B" skip lines."""
+    found: list[str] = []
+    for entry in skipped:
+        for part in entry.split("missing", 1)[-1].split(","):
+            name = part.strip().split()[0] if part.strip() else ""
+            if name and name.isupper() and name not in found:
+                found.append(name)
+    return found
 
 
 class ModelChain:
@@ -168,10 +197,14 @@ class ModelChain:
         **kwargs: Any,
     ) -> ModelResponse:
         if not self.providers:
+            reasons = "; ".join(self.skipped[:4]) or "no provider selected"
             raise ConfigurationError(
-                "No model provider is configured. Set LLM_PROVIDER plus the matching "
-                "API key in .env (see .env.example) — e.g. GROQ_API_KEY, or "
-                "LLM_PROVIDER=custom with CUSTOM_BASE_URL/CUSTOM_MODEL."
+                "No model provider is ready (LLM_PROVIDER selects one, or auto "
+                "tries each in turn). Every provider needs BOTH a key and a model, "
+                "e.g. GROQ_API_KEY + GROQ_MODEL. "
+                f"Skipped: {reasons}. "
+                "See .env.example, or `python -m scripts.check_providers --links`.",
+                missing=_missing_from(self.skipped),
             )
         errors: list[dict[str, Any]] = []
         for provider in self.providers:
@@ -189,8 +222,12 @@ def build_chain(settings: Settings) -> ModelChain:
     providers: list[OpenAICompatProvider] = []
     skipped: list[str] = []
     for index, name in enumerate(settings.llm_chain):
+        # LLM_MODEL / LLM_BASE_URL / LLM_API_KEY are manual-mode overrides: in
+        # auto mode the provider is only known at the end of this loop.
         try:
-            resolved = resolve_provider(name, settings, primary=index == 0)
+            resolved = resolve_provider(
+                name, settings, primary=index == 0 and not settings.is_auto_provider
+            )
         except ConfigurationError as exc:
             skipped.append(str(exc))
             continue
@@ -230,9 +267,7 @@ def describe_providers(settings: Settings) -> list[dict[str, Any]]:
                 "missing_env": missing,
                 "model_env": preset.model_field.upper(),
                 "example_model": preset.example_model,
-                "model_value": (
-                    getattr(settings, preset.model_field, None) or "auto"
-                ),
+                "model_value": (getattr(settings, preset.model_field, None) or ""),
                 "api_key_env": (preset.key_field or "").upper() or None,
                 "base_url": preset.base_url,
                 "key_url": preset.key_url,
