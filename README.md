@@ -28,7 +28,8 @@ pip install -r requirements.txt
 cp .env.example .env
 # open .env, set LLM_PROVIDER + one API key (see §2)
 
-python -m scripts.check_providers      # shows what is configured / what is missing
+python -m scripts.check_providers      # table + which env var is missing
+python -m scripts.check_providers --provider groq --models   # live ids, best first
 python -m scripts.doctor               # pings the model + every search backend
 python -m scripts.check_search -q "python 3.13 release notes"
 
@@ -64,11 +65,36 @@ where to create the key, and where to see the *live* model IDs.
 | `cerebras` | Free trial credits then card | <https://cloud.cerebras.ai/> | <https://inference-docs.cerebras.ai/models/overview> | `CEREBRAS_API_KEY` |
 | `custom` | whatever your endpoint offers | *(your provider)* | *(your provider, or `GET /v1/models`)* | `CUSTOM_BASE_URL` + `CUSTOM_MODEL` |
 
+### `LLM_MODEL=auto` — why there is no hard-coded default
+
+Model ids retire constantly, and a retired id fails 100% of the time. Real examples, both
+seen on 2026-10-31:
+
+| Symptom | Provider's own message | Meaning |
+|---|---|---|
+| `[gemini] chat/completions failed with HTTP 404` | *"This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash"* | The endpoint and the key are fine — the **model id is retired** |
+| `[openrouter] chat/completions failed with HTTP 400` (or 404) | *"No endpoints found for meta-llama/llama-3.3-70b-instruct:free"* | The id still exists in the catalogue but **has zero live endpoints** |
+
+So the backend no longer ships a default id. With `LLM_MODEL=auto` (the default) it asks the
+provider's `/models` and picks the best live model:
+
+- **Gemini:** the rolling `gemini-flash-latest` alias first (survives renames), then the
+  newest full Flash (`gemini-3.8-flash`, …), Lite only after that, images/TTS/audio/embeddings excluded.
+- **OpenRouter:** only ids ending in `:free`, preferring models whose
+  `supported_parameters` include `tools` (the agent needs function calling).
+- **Groq:** `gpt-oss-120b` → `gpt-oss-20b` → Llama 3.3 → 8B instant.
+- **Local (Ollama/LM Studio):** whatever the server actually lists.
+
+If you *do* pin an id and it gets retired, `LLM_AUTO_SUBSTITUTE=true` (default) retries with
+the next live model and reports which model answered. `LLM_MODEL_ATTEMPTS` caps the tries.
+
 Notes that matter:
 
-- **Model IDs drift.** Do not trust the defaults; copy the exact id from the model list.
-  `GET /providers/groq/models` (or `python -m scripts.check_providers --models`) calls the
-  provider's own `/models` endpoint with your key.
+- **Never copy an id from a blog post.** `GET /providers/gemini/models` (or
+  `python -m scripts.check_providers --provider gemini --models`) lists what your key can
+  actually call, best first under `recommended`.
+- `python -m scripts.check_providers --provider gemini --models --autofix` writes the
+  recommended id into `.env` for you (backup: `.env.bak`).
 - **Tool calling is required** for web search. Most Llama/Qwen/Gemini/Mistral models support
   it; tiny 1–3B models often do not, and the API will return a 400 that the error hint
   explains.
@@ -311,7 +337,9 @@ tests/                 offline tests (MockTransport, no keys)
 |---|---|
 | `400 configuration … LLM_PROVIDER` | No key for the selected provider. `python -m scripts.check_providers --links` |
 | `502 [groq] HTTP 429` | Free-tier rate limit. Add `LLM_FALLBACKS=gemini` or wait |
-| `502 … model or path not found` | Wrong model id. `GET /providers/<name>/models` |
+| `[gemini] … HTTP 404` / `no longer available to new users` | Retired model id. Set `GEMINI_MODEL=auto` (or `LLM_MODEL=auto`) |
+| `[openrouter] … HTTP 400/404` / `No endpoints found` | That `:free` model lost its endpoints. Use `OPENROUTER_MODEL=auto` |
+| `502 … endpoint not found` | Wrong base URL path (OpenAI-style ends with `/v1`, Gemini `/v1beta/openai`) |
 | `model rejected tool calling` | Model too small for function calling. Pick a bigger one |
 | `search … bot challenge` | DDG blocking the IP. `SEARCH_PROVIDERS=tavily,ddg` or `wikipedia,ddg` |
 | `all search backends failed` | No network / all keys missing. `python -m scripts.check_search --all` |

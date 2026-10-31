@@ -81,8 +81,10 @@ def resolve_provider(name: str, settings: Settings, *, primary: bool = False) ->
             custom_base_url=(settings.custom_base_url or "").rstrip("/"),
             account_id=(settings.cloudflare_account_id or "").strip(),
         )
-        if not model:
-            model = preset.default_model
+
+    # No model configured anywhere → let the provider tell us what it serves.
+    if not model:
+        model = "auto"
 
     # ---- optional overrides, primary provider only
     if primary:
@@ -95,15 +97,11 @@ def resolve_provider(name: str, settings: Settings, *, primary: bool = False) ->
     for required in preset.extra_required:
         if not _value(settings, required):
             missing.append(required.upper())
-    if preset.name == "custom":
-        if not base_url:
-            missing.append("CUSTOM_BASE_URL")
-        if not model:
-            missing.append("CUSTOM_MODEL")
-    elif preset.key_field and not api_key:
+    if preset.name == "custom" and not base_url:
+        missing.append("CUSTOM_BASE_URL")
+    if preset.key_field and preset.name != "custom" and not api_key:
+        # A custom gateway may be keyless; every hosted provider needs a key.
         missing.append(preset.key_field.upper())
-    if not model and preset.name != "custom":
-        missing.append(preset.model_field.upper())
 
     return ResolvedProvider(
         preset=preset,
@@ -116,6 +114,12 @@ def resolve_provider(name: str, settings: Settings, *, primary: bool = False) ->
         auth_scheme=auth_scheme,
         auth_header=auth_header,
     )
+
+
+def resolve_named(name: str, settings: Settings) -> ResolvedProvider:
+    """Resolve a provider by name, applying LLM_* overrides if it is the primary."""
+    primary = (name or "").strip().lower() == (settings.llm_provider or "").strip().lower()
+    return resolve_provider(name, settings, primary=primary)
 
 
 def build_provider(resolved: ResolvedProvider, settings: Settings) -> OpenAICompatProvider:
@@ -138,6 +142,8 @@ def build_provider(resolved: ResolvedProvider, settings: Settings) -> OpenAIComp
         timeout=settings.llm_timeout,
         key_url=resolved.preset.key_url,
         models_url=resolved.preset.models_url,
+        auto_substitute=settings.llm_auto_substitute,
+        max_model_attempts=settings.llm_model_attempts,
     )
 
 
@@ -223,6 +229,10 @@ def describe_providers(settings: Settings) -> list[dict[str, Any]]:
                 "status": status,
                 "missing_env": missing,
                 "model_env": preset.model_field.upper(),
+                "example_model": preset.example_model,
+                "model_value": (
+                    getattr(settings, preset.model_field, None) or "auto"
+                ),
                 "api_key_env": (preset.key_field or "").upper() or None,
                 "base_url": preset.base_url,
                 "key_url": preset.key_url,

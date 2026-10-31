@@ -15,6 +15,7 @@ from app.llm.registry import (
     build_chain,
     build_provider,
     describe_providers,
+    resolve_named,
     resolve_provider,
 )
 
@@ -170,11 +171,13 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(chain.providers, [])
         self.assertIn("GROQ_API_KEY", chain.skipped[0])
 
-    def test_key_resolves_and_uses_default_model(self):
+    def test_unset_model_falls_back_to_auto_discovery(self):
         cfg = settings(llm_provider="groq", groq_api_key="gsk_test")
         chain = build_chain(cfg)
         self.assertEqual([p.name for p in chain.providers], ["groq"])
-        self.assertEqual(chain.primary.model, "llama-3.3-70b-versatile")
+        # Model ids retire, so "not configured" means "ask the provider".
+        self.assertEqual(chain.primary.model, "auto")
+        self.assertTrue(chain.primary.is_auto)
 
     def test_model_env_overrides_default(self):
         cfg = settings(llm_provider="groq", groq_api_key="k", groq_model="llama-3.1-8b-instant")
@@ -192,7 +195,7 @@ class ResolutionTests(unittest.TestCase):
         chain = build_chain(cfg)
         self.assertEqual(chain.providers[0].base_url, "https://proxy.test/v1")
         self.assertEqual(chain.providers[0].model, "my-proxy-model")
-        self.assertEqual(chain.providers[1].model, "gemini-2.5-flash")
+        self.assertEqual(chain.providers[1].model, "auto")
 
     def test_custom_provider_requires_base_and_model(self):
         cfg = settings(llm_provider="custom")
@@ -265,6 +268,21 @@ class ResolutionTests(unittest.TestCase):
             "https://generativelanguage.googleapis.com/v1beta/openai",
         )
 
+    def test_resolve_named_applies_overrides_only_for_the_primary(self):
+        cfg = settings(
+            llm_provider="gemini",
+            gemini_api_key="k",
+            llm_base_url="http://localhost:9102/v1beta/openai",
+            llm_model="gemini-3.8-flash",
+            groq_api_key="k2",
+        )
+        primary = resolve_named("gemini", cfg)
+        self.assertEqual(primary.base_url, "http://localhost:9102/v1beta/openai")
+        self.assertEqual(primary.model, "gemini-3.8-flash")
+        other = resolve_named("groq", cfg)
+        self.assertEqual(other.base_url, "https://api.groq.com/openai/v1")
+        self.assertEqual(other.model, "auto")
+
     def test_unknown_provider_is_a_clear_error(self):
         with self.assertRaises(ConfigurationError):
             resolve_provider("definitely-not-a-provider", settings())
@@ -287,6 +305,8 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
 
         def secondary(request):
             calls.append("secondary")
+            if request.method == "GET" and request.url.path.endswith("/models"):
+                return httpx.Response(200, json={"data": [{"id": "gemini-flash-latest"}]})
             return httpx.Response(200, json=chat_response("from backup"))
 
         cfg = settings(
@@ -302,7 +322,9 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
         result = await chain.complete([{"role": "user", "content": "hi"}])
         self.assertEqual(result.content, "from backup")
         self.assertEqual(result.provider, "gemini")
-        self.assertEqual(calls, ["primary", "secondary"])
+        # primary errors, then gemini resolves its model list + answers
+        self.assertEqual(calls[0], "primary")
+        self.assertIn("secondary", calls)
 
     async def test_all_providers_failing_raises_with_detail(self):
         cfg = settings(llm_provider="groq", groq_api_key="k")
