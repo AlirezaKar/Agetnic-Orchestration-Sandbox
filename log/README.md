@@ -19,7 +19,7 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.1.0 | 2026-10-31 | merged | [v0.1.0.md](v0.1.0.md) | Provider-agnostic core, custom `.env` provider, key-free search backends |
 | 0.2.0 | 2026-10-31 | merged (PR #3, `82a159e`) | [v0.2.0.md](v0.2.0.md) | PR #1 frontend restored, with diagnostics kept |
 | 0.3.0 | 2026-10-31 | superseded | [v0.3.0.md](v0.3.0.md) | Intermediate API-routing rework; never shipped on its own |
-| 0.4.0 | 2026-10-31 | current | [v0.4.0.md](v0.4.0.md) | `Not Found` on `POST /chat` fixed, relative assets, launcher |
+| 0.4.0 | 2026-10-31 | merged (PR #4, `7846668`) | [v0.4.0.md](v0.4.0.md) | `Not Found` on `POST /chat` fixed, relative assets, launcher |
 
 ## Adding a version
 
