@@ -51,6 +51,9 @@ class OrchestratorApiTests(unittest.TestCase):
             _env_file=None,
             files_dir=str(Path(self.tmp.name) / "files"),
             orchestrator_timeout=5.0,
+            orchestrator_planner="heuristic",
+            orchestrator_review=False,
+            orchestrator_log_runs=False,
         )
         get_settings.cache_clear()
         main_module.reset_store()
@@ -124,6 +127,7 @@ class OrchestratorApiTests(unittest.TestCase):
         self.assertEqual(names, ["document", "search", "data", "general"])
         self.assertIn("roster", body)
         self.assertEqual(body["planner"], "heuristic")
+        self.assertIn("review", body)
         self.assertTrue(body["enabled"])
 
     # ------------------------------------------------------- /orchestrate
@@ -206,7 +210,97 @@ class OrchestratorApiTests(unittest.TestCase):
         body = self.client.get("/health").json()
         self.assertTrue(body["orchestrator"]["enabled"])
         self.assertEqual(body["orchestrator"]["planner"], "heuristic")
+        self.assertIn("review", body["orchestrator"])
         self.assertIn("files", body)
+
+
+    # ------------------------------------------------------- trace / logs
+    def test_orchestrate_returns_a_step_by_step_trace(self):
+        upload = self.client.post(
+            "/files", json={"name": "policy.md", "text": "Refunds within 30 days."}
+        ).json()
+        payload = self.client.post(
+            "/orchestrate",
+            json={
+                "message": "Summarise the refund policy and compute the average of 10, 20, 40.",
+                "file_ids": [upload["id"]],
+            },
+        ).json()
+        orch = payload["orchestration"]
+        self.assertTrue(orch["run_id"].startswith("run-"))
+        self.assertTrue(orch["trace"])
+        titles = [event["title"] for event in orch["trace"]]
+        self.assertIn("Request received", titles)
+        self.assertIn("Final synthesis prompt", titles)
+        self.assertIn("Final answer", titles)
+        # the planner prompt and each agent's prompt are in the trace, with messages
+        planner = [e for e in orch["trace"] if e["title"].startswith("Selected the agents")]
+        self.assertTrue(planner)
+        agent_prompts = [
+            e for e in orch["trace"] if e["actor"] in ("document", "data") and e["detail"].get("messages")
+        ]
+        self.assertTrue(agent_prompts)
+        self.assertIn("role", agent_prompts[0]["detail"]["messages"][0])
+        # waves describe the parallelism
+        self.assertTrue(orch["waves"])
+        self.assertEqual(orch["waves"][0]["wave"], 1)
+
+    def test_detail_trace_is_clipped(self):
+        self.settings.orchestrator_trace_chars = 40
+        payload = self.client.post("/orchestrate", json={"message": "Explain closures."}).json()
+        prompts = [
+            event for event in payload["orchestration"]["trace"] if event["detail"].get("messages")
+        ]
+        self.assertTrue(prompts)
+        longest = max(
+            (message["content"] for event in prompts for message in event["detail"]["messages"]),
+            key=len,
+        )
+        self.assertIn("more chars", longest)
+
+    def test_runs_endpoint_lists_and_returns_a_run(self):
+        with mock.patch.dict("os.environ", {"LOG_DIR": str(Path(self.tmp.name) / "logs")}):
+            self.settings.orchestrator_log_runs = True
+            payload = self.client.post(
+                "/orchestrate", json={"message": "Explain closures in JavaScript."}
+            ).json()
+            run_id = payload["orchestration"]["run_id"]
+            listing = self.client.get("/runs").json()
+            self.assertEqual(listing["count"], 1)
+            self.assertEqual(listing["runs"][0]["run_id"], run_id)
+            detail = self.client.get(f"/runs/{run_id}").json()
+            self.assertEqual(detail["run_id"], run_id)
+            self.assertTrue(detail["orchestration"]["trace"])
+            missing = self.client.get("/runs/run-does-not-exist")
+            self.assertEqual(missing.status_code, 404)
+            self.assertIn("hint", missing.json())
+
+    def test_runs_are_empty_when_logging_is_off(self):
+        with mock.patch.dict("os.environ", {"LOG_DIR": str(Path(self.tmp.name) / "logs2")}):
+            self.client.post("/orchestrate", json={"message": "Explain closures."})
+            self.assertEqual(self.client.get("/runs").json()["count"], 0)
+
+    def test_planner_can_be_overridden_per_request(self):
+        response = self.client.post(
+            "/orchestrate",
+            json={"message": "Explain closures.", "planner": "auto"},
+        )
+        self.assertEqual(response.status_code, 200)
+        plan = response.json()["orchestration"]["plan"]
+        # this fake model returns prose, not a plan, so "auto" falls back to the rules
+        self.assertEqual(plan["strategy"], "heuristic")
+        self.assertEqual(plan["detail_source"], "rules")
+        self.assertEqual(self.client.post("/orchestrate", json={"message": "x", "planner": "magic"}).status_code, 422)
+
+    def test_review_flag_can_be_turned_off_per_request(self):
+        payload = self.client.post(
+            "/orchestrate",
+            json={
+                "message": "Summarise this and compute the total of 10, 20, 30.",
+                "review": False,
+            },
+        ).json()
+        self.assertFalse(payload["orchestration"]["review"]["asked"])
 
     def test_api_prefix_aliases(self):
         self.assertEqual(self.client.get("/api/agents").status_code, 200)

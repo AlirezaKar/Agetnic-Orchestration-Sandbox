@@ -401,10 +401,219 @@
   }
 
   /* ───────────────── orchestration rendering ────────────────── */
+  const STAGE_ICON = {
+    run: "▶",
+    manager: "M",
+    planner: "P",
+    agent: "A",
+    tool: "⚙",
+    synthesis: "✎",
+    merge: "⇄",
+    done: "✓",
+  };
+
   function agentStatusTone(status) {
     if (status === "ok") return "completed";
     if (status === "failed") return "failed";
     return "queued";
+  }
+
+  function actorTone(actor) {
+    return ["manager", "planner"].includes(actor) ? "core" : "agent-" + actor;
+  }
+
+  function detailText(detail, key) {
+    const value = detail[key];
+    if (value === null || value === undefined) return "";
+    return typeof value === "string" ? value : JSON.stringify(value);
+  }
+
+  function preBlock(text, cls) {
+    const pre = el("pre", "trace-pre" + (cls ? " " + cls : ""));
+    pre.textContent = text;
+    return pre;
+  }
+
+  function renderMessages(messages) {
+    const box = el("div", "trace-messages");
+    (messages || []).forEach((message) => {
+      const row = el("div", "trace-message " + (message.role || "user"));
+      row.appendChild(el("span", "trace-role", message.role || "?"));
+      row.appendChild(preBlock(message.content || "", "msg"));
+      box.appendChild(row);
+    });
+    return box;
+  }
+
+  function renderJson(value, label) {
+    const box = el("div", "trace-json-block");
+    if (label) box.appendChild(el("div", "trace-kv-label", label));
+    box.appendChild(preBlock(JSON.stringify(value, null, 2)));
+    return box;
+  }
+
+  function renderChips(pairs) {
+    const row = el("div", "trace-chips");
+    pairs.forEach(([label, value]) => {
+      if (value === undefined || value === null || value === "" || value === false) return;
+      row.appendChild(el("span", "trace-chip", label + ": " + String(value).slice(0, 160)));
+    });
+    return row.childElementCount ? row : null;
+  }
+
+  function renderEventBody(event) {
+    const detail = event.detail || {};
+    const body = el("div", "trace-body");
+    let rendered = false;
+
+    if (detail.messages) {
+      body.appendChild(renderMessages(detail.messages));
+      rendered = true;
+    }
+    if (detail.content) {
+      body.appendChild(el("div", "trace-kv-label", "output"));
+      body.appendChild(preBlock(detail.content));
+      rendered = true;
+    }
+    const pairs = [
+      ["model", detail.provider && detail.model ? detail.provider + "/" + detail.model : detail.model],
+      ["step", detail.step],
+      ["finish", detail.finish_reason],
+      ["task", detail.task],
+      ["why", detail.reason],
+      ["note", detail.note],
+      ["error", detail.error],
+      ["query", detail.query],
+      ["excerpts", detail.excerpts],
+      ["context chars", detail.context_chars],
+      ["wave", detail.wave],
+      ["agents", Array.isArray(detail.agents) ? detail.agents.join(", ") : detail.agents],
+      ["from", Array.isArray(detail.from_agents) ? detail.from_agents.join(", ") : detail.from_agents],
+      ["status", detail.status],
+      ["latency", detail.latency_ms !== undefined ? detail.latency_ms + " ms" : ""],
+      ["files", Array.isArray(detail.files) ? detail.files.map((f) => (f.name || f)).join(", ") : detail.files],
+      ["roster", Array.isArray(detail.roster) ? detail.roster.join(", ") : detail.roster],
+      ["planner", detail.planner],
+      ["review", detail.review],
+      ["synthesize", detail.synthesize],
+      ["has model", detail.has_model],
+    ];
+    const chips = renderChips(pairs);
+    if (chips) {
+      body.appendChild(chips);
+      rendered = true;
+    }
+    if (detail.summary && detail.steps) {
+      body.appendChild(el("div", "trace-kv-label", "plan"));
+      body.appendChild(preBlock(detail.summary));
+    }
+    if (detail.requests) {
+      body.appendChild(renderJson(detail.requests, "follow-up requested"));
+      rendered = true;
+    }
+    if (detail.steps && Array.isArray(detail.steps)) {
+      (detail.steps || []).forEach((step) => {
+        const card = el("div", "trace-step");
+        card.appendChild(el("span", "trace-chip strong", step.agent));
+        card.appendChild(el("div", "trace-step-task", step.task || ""));
+        if (step.depends_on && step.depends_on.length) {
+          card.appendChild(el("div", "trace-step-dep", "waits for " + step.depends_on.join(", ")));
+        }
+        if (step.reason) card.appendChild(el("div", "trace-step-why", "why: " + step.reason));
+        body.appendChild(card);
+      });
+      rendered = true;
+    }
+    if (detail.arguments) {
+      body.appendChild(renderJson(detail.arguments, "tool arguments"));
+      rendered = true;
+    }
+    if (detail.output) {
+      body.appendChild(renderJson(detail.output, "tool result"));
+      rendered = true;
+    }
+    if (detail.results && Array.isArray(detail.results)) {
+      body.appendChild(renderJson(detail.results, "results"));
+      rendered = true;
+    }
+    if (detail.computed) {
+      body.appendChild(el("div", "trace-kv-label", "computed by code"));
+      body.appendChild(preBlock(detail.computed));
+      rendered = true;
+    }
+    if (detail.excerpts && Array.isArray(detail.excerpts)) {
+      body.appendChild(renderJson(detail.excerpts, "retrieved excerpts"));
+      rendered = true;
+    }
+    if (detail.parsed !== undefined) {
+      body.appendChild(renderChips([["plan accepted", detail.parsed], ["reason", detail.reason]]));
+      rendered = true;
+    }
+    if (detail.sources && Array.isArray(detail.sources) && detail.sources.length) {
+      body.appendChild(el("div", "trace-sources", "sources: " + detail.sources.join(" · ")));
+      rendered = true;
+    }
+    if (!rendered) {
+      body.appendChild(renderJson(detail, ""));
+    }
+    return body;
+  }
+
+  function renderTraceEvent(event, expandAll) {
+    const detail = event.detail || {};
+    const row = el("div", "trace-row stage-" + event.stage);
+    if (expandAll) row.classList.add("open");
+
+    const head = el("div", "trace-row-head");
+    head.appendChild(el("span", "trace-icon", STAGE_ICON[event.stage] || "•"));
+    head.appendChild(el("span", "trace-actor " + actorTone(event.actor), event.actor));
+    head.appendChild(el("span", "trace-title", event.title || ""));
+    if (detail.latency_ms !== undefined) {
+      head.appendChild(el("span", "trace-ms", detail.latency_ms + " ms"));
+    } else {
+      head.appendChild(el("span", "trace-ms", event.offset_ms + " ms"));
+    }
+    head.appendChild(el("span", "trace-seq", "#" + event.seq));
+    const body = renderEventBody(event);
+    if (!body.childElementCount) {
+      row.appendChild(head);
+      return row;
+    }
+    head.addEventListener("click", () => row.classList.toggle("open"));
+    row.appendChild(head);
+    row.appendChild(body);
+    return row;
+  }
+
+  function renderPlanSummary(orch) {
+    const plan = orch.plan || {};
+    const box = el("div", "plan-summary");
+    const top = el("div", "plan-top");
+    top.appendChild(el("span", "plan-intent", plan.intent || "plan"));
+    top.appendChild(el("span", "plan-chip", "selection: " + (plan.strategy || "?")));
+    top.appendChild(el("span", "plan-chip", "briefs: " + (plan.detail_source || "rules")));
+    if (orch.model_calls) top.appendChild(el("span", "plan-chip", orch.model_calls + " model call(s)"));
+    box.appendChild(top);
+    if (plan.summary) box.appendChild(el("div", "plan-text", plan.summary));
+    (plan.steps || []).forEach((step) => {
+      const line = el("div", "plan-step");
+      line.appendChild(el("span", "plan-agent", step.label || step.agent));
+      line.appendChild(el("span", "plan-wave", "wave " + (step.wave || 1)));
+      if (step.depends_on && step.depends_on.length) {
+        line.appendChild(el("span", "plan-dep", "← " + step.depends_on.join(", ")));
+      }
+      box.appendChild(line);
+    });
+    (orch.waves || []).forEach((wave) => {
+      const line = el("div", "plan-wave-line");
+      line.textContent =
+        "wave " + wave.wave + ": " + (wave.agents || []).join(" + ") +
+        (wave.depends_on && Object.keys(wave.depends_on).length
+          ? "  (uses " + Object.entries(wave.depends_on).map(([a, d]) => a + " ← " + d.join(",")).join("; ") + ")"
+          : "");
+      box.appendChild(line);
+    });
+    return box;
   }
 
   function renderOrchestration(container, data) {
@@ -413,49 +622,63 @@
 
     const panel = el("div", "orch-panel");
     const head = el("div", "orch-head");
-    head.appendChild(el("span", "orch-title", "Manager plan"));
-    head.appendChild(el("span", "orch-chip", orch.strategy + " planner"));
-    head.appendChild(el("span", "orch-chip", orch.plan.parallel ? "parallel · " + orch.agents.length + " agents" : "single agent"));
-    if (orch.synthesized) head.appendChild(el("span", "orch-chip good", "synthesised"));
-    head.appendChild(el("span", "orch-time", orch.parallel_ms + " ms parallel · " + orch.latency_ms + " ms total"));
+    head.appendChild(el("span", "orch-title", "How this answer was built"));
+    head.appendChild(el("span", "orch-chip", (orch.plan.agents || []).join(" → ") || "no agents"));
+    head.appendChild(el("span", "orch-chip", (orch.waves || []).length + " wave(s)"));
+    if (orch.synthesized) head.appendChild(el("span", "orch-chip good", "manager synthesis"));
+    head.appendChild(
+      el("span", "orch-time", orch.parallel_ms + " ms agents · " + orch.latency_ms + " ms total")
+    );
     panel.appendChild(head);
-    panel.appendChild(el("div", "orch-summary", orch.plan.summary));
 
-    const steps = el("div", "orch-steps");
-    (orch.agents || []).forEach((agent) => {
-      const card = el("div", "orch-step");
-      const top = el("div", "orch-step-head");
-      top.appendChild(el("span", "status-dot " + agentStatusTone(agent.status)));
-      top.appendChild(el("span", "orch-agent", agent.label || agent.agent));
-      top.appendChild(el("span", "orch-status " + agentStatusTone(agent.status), agent.status));
-      top.appendChild(el("span", "orch-ms", (agent.latency_ms || 0) + " ms"));
-      if (agent.model) top.appendChild(el("span", "orch-model", agent.provider + "/" + agent.model));
-      top.addEventListener("click", () => card.classList.toggle("open"));
-      card.appendChild(top);
+    panel.appendChild(renderPlanSummary(orch));
 
-      const body = el("div", "orch-step-body");
-      if (agent.reason) body.appendChild(el("div", "orch-reason", "why: " + agent.reason));
-      if (agent.task) body.appendChild(el("div", "orch-task", agent.task));
-      const text = agent.status === "failed"
-        ? agent.error + (agent.hint ? "\n\n" + agent.hint : "")
-        : agent.status === "skipped"
-          ? agent.detail || "skipped"
-          : agent.answer || agent.detail || "(no output)";
-      body.appendChild(el("pre", "orch-answer", text));
-      if (agent.sources && agent.sources.length) {
-        body.appendChild(el("div", "orch-sources", "sources: " + agent.sources.join(" · ")));
-      }
-      card.appendChild(body);
-      steps.appendChild(card);
-    });
-    panel.appendChild(steps);
+    const tools = el("div", "orch-toolbar");
+    const expand = el("button", "ghost-btn", "Expand all steps");
+    expand.type = "button";
+    const collapse = el("button", "ghost-btn", "Collapse");
+    collapse.type = "button";
+    const raw = el("button", "ghost-btn", "Raw JSON");
+    raw.type = "button";
+    tools.appendChild(expand);
+    tools.appendChild(collapse);
+    tools.appendChild(raw);
+    if (orch.run_id) tools.appendChild(el("span", "orch-runid", orch.run_id));
+    panel.appendChild(tools);
 
+    const timeline = el("div", "trace-timeline");
+    (orch.trace || []).forEach((event) => timeline.appendChild(renderTraceEvent(event, false)));
+    panel.appendChild(timeline);
+
+    expand.addEventListener("click", () =>
+      panel.querySelectorAll(".trace-row").forEach((node) => node.classList.add("open"))
+    );
+    collapse.addEventListener("click", () =>
+      panel.querySelectorAll(".trace-row").forEach((node) => node.classList.remove("open"))
+    );
+    raw.addEventListener("click", () => showInspector(data, "Raw orchestration payload"));
+
+    if (orch.review && orch.review.asked) {
+      panel.appendChild(
+        el(
+          "div",
+          "orch-note",
+          "manager review: " + (orch.review.note || orch.review.reason || "done") +
+            (orch.review.follow_up && orch.review.follow_up.length
+              ? " — asked for " + orch.review.follow_up.map((f) => f.agent).join(", ")
+              : " — no extra work needed")
+        )
+      );
+    }
     if (orch.files && orch.files.length) {
       panel.appendChild(
         el("div", "orch-files", "files: " + orch.files.map((f) => f.name).join(", "))
       );
     }
     (orch.notes || []).forEach((note) => panel.appendChild(el("div", "orch-note", note)));
+    if (orch.log_path) {
+      panel.appendChild(el("div", "orch-log", "full unclipped trace: " + orch.log_path));
+    }
     container.appendChild(panel);
   }
 
@@ -486,6 +709,44 @@
   async function loadAgents() {
     const result = await api("/agents");
     renderAgentsPanel(result.ok ? result.data : null);
+  }
+
+  /* ─────────────────── orchestration run log (log base) ───────────── */
+  async function loadRunLog() {
+    const list = $("runs-list");
+    const summary = $("runs-summary");
+    if (!list) return;
+    const result = await api("/runs?limit=8");
+    if (!result.ok) {
+      if (summary) summary.textContent = "Run log unavailable (GET /runs).";
+      return;
+    }
+    const runs = result.data.runs || [];
+    if (summary) {
+      summary.textContent = runs.length
+        ? runs.length + " recent run(s) · " + (result.data.dir || "logs/orchestrator")
+        : "No runs yet — send a prompt in Auto mode.";
+      summary.className = "diag-summary";
+    }
+    list.textContent = "";
+    runs.forEach((run) => {
+      const row = el("div", "run-row");
+      row.appendChild(el("span", "run-intent", run.intent || "run"));
+      row.appendChild(el("span", "run-agents", (run.agents || []).join(",")));
+      row.appendChild(el("span", "run-ms", (run.latency_ms || 0) + " ms"));
+      row.title = run.message + "\n" + run.run_id;
+      row.addEventListener("click", () => openRun(run.run_id));
+      list.appendChild(row);
+    });
+  }
+
+  async function openRun(runId) {
+    const result = await api("/runs/" + encodeURIComponent(runId));
+    if (!result.ok) {
+      showInspector({ error: "run not found", run_id: runId }, "Run " + runId);
+      return;
+    }
+    showInspector(result.data, "Logged run " + runId + " (full, unclipped)");
   }
 
   /* ──────────────────── search backend sidebar ──────────────── */
@@ -841,9 +1102,10 @@
       const orch = data.orchestration;
       const bits = [];
       if (orch.model) bits.push(orch.provider + "/" + orch.model);
-      bits.push(orch.strategy + " planner");
-      bits.push(orch.agents.length + " agent(s)");
-      bits.push(orch.parallel_ms + " ms parallel · " + orch.latency_ms + " ms total");
+      bits.push(orch.strategy + " planner / " + (orch.plan.detail_source || "rules") + " briefs");
+      bits.push((orch.plan.agents || []).length + " agent(s) in " + (orch.waves || []).length + " wave(s)");
+      if (orch.model_calls) bits.push(orch.model_calls + " model call(s)");
+      bits.push(orch.parallel_ms + " ms agents · " + orch.latency_ms + " ms total");
       body.appendChild(el("div", "tl-meta", bits.join(" · ")));
     } else {
       renderMeta(body, data);
@@ -984,6 +1246,7 @@
     state.busy = false;
     $("btn-send").disabled = false;
     $("btn-send").textContent = sendLabel;
+    if (mode === "auto" && result && result.ok) loadRunLog();
     scrollChat();
   }
 
@@ -1048,6 +1311,8 @@
     );
     const refreshAgents = $("btn-refresh-agents");
     if (refreshAgents) refreshAgents.addEventListener("click", loadAgents);
+    const refreshRuns = $("btn-refresh-runs");
+    if (refreshRuns) refreshRuns.addEventListener("click", loadRunLog);
     $("btn-clear").addEventListener("click", clearSession);
     $("btn-diag").addEventListener("click", runDiagnostics);
     $("btn-diag-top").addEventListener("click", runDiagnostics);
@@ -1120,6 +1385,7 @@
       loadHealth();
       loadProviders();
       loadAgents();
+      loadRunLog();
     }
 
     if (!state.runs.length) {

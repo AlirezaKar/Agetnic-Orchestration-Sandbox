@@ -96,10 +96,37 @@ class AgentResult:
 
 
 class WebSearchAgent:
-    def __init__(self, model_chain: Any, search_chain: Any, settings: Settings):
+    """One model, two tools (``web_search``, ``fetch_url``), fully traced.
+
+    ``observer`` is an optional callable the orchestrator passes in to see the
+    loop from the inside:
+
+    * ``observer("prompt", {"messages": [...]})`` before every model call
+    * ``observer("model", {"response": ModelResponse, "step": int})`` after it
+    * ``observer("tool", {"call": ToolCall, "output": dict, "latency_ms": int})``
+
+    It is deliberately dumb: it only forwards data, it never decides anything.
+    """
+
+    def __init__(
+        self,
+        model_chain: Any,
+        search_chain: Any,
+        settings: Settings,
+        observer: Any = None,
+    ):
         self.model_chain = model_chain
         self.search_chain = search_chain
         self.settings = settings
+        self.observer = observer
+
+    def _observe(self, kind: str, payload: dict[str, Any]) -> None:
+        if self.observer is None:
+            return
+        try:
+            self.observer(kind, payload)
+        except Exception:  # pragma: no cover - tracing must never break the run
+            pass
 
     # ------------------------------------------------------------- tooling
     async def _run_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -164,6 +191,7 @@ class WebSearchAgent:
         stopped = "max_steps"
 
         for step in range(1, max_steps + 1):
+            self._observe("prompt", {"messages": [dict(m) for m in messages], "step": step})
             response: ModelResponse = await self.model_chain.complete(
                 messages,
                 tools,
@@ -172,6 +200,7 @@ class WebSearchAgent:
             )
             provider, model = response.provider, response.model
             usage = response.usage or usage
+            self._observe("model", {"response": response, "step": step})
             trace.append(
                 {
                     "step": step,
@@ -211,6 +240,10 @@ class WebSearchAgent:
                 except Exception as exc:  # defensive: never kill the loop
                     output = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 elapsed = int((time.perf_counter() - tool_started) * 1000)
+                self._observe(
+                    "tool",
+                    {"call": call, "output": output, "latency_ms": elapsed, "step": step},
+                )
 
                 if call.name == "web_search" and output.get("ok"):
                     search_provider = output.get("provider") or search_provider
@@ -243,9 +276,12 @@ class WebSearchAgent:
 
         # ran out of steps: ask once more without tools for a final summary
         try:
+            final_messages = messages + [
+                {"role": "user", "content": "Stop calling tools. Answer now with what you have."}
+            ]
+            self._observe("prompt", {"messages": [dict(m) for m in final_messages], "step": max_steps + 1})
             final = await self.model_chain.complete(
-                messages
-                + [{"role": "user", "content": "Stop calling tools. Answer now with what you have."}],
+                final_messages,
                 None,
                 temperature=self.settings.llm_temperature,
                 max_tokens=self.settings.llm_max_tokens,

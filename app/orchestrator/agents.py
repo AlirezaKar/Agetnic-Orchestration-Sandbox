@@ -8,6 +8,10 @@ merge whatever comes back, including failures.
 * ``search``    runs the existing tool loop (web_search / fetch_url) with sources
 * ``data``      computes statistics deterministically, then explains them
 * ``general``   plain completion, no tools
+
+Each agent writes its own steps into the run trace: the task it was given, the
+exact prompt it sent to the model, every tool call and result, and its answer.
+That is what the UI shows under "How this answer was built".
 """
 
 from __future__ import annotations
@@ -41,6 +45,10 @@ class AgentOutcome:
     provider: str = ""
     model: str = ""
     detail: str = ""
+    wave: int = 0
+    model_calls: int = 0
+    tool_calls: int = 0
+    depends_on: list[str] = field(default_factory=list)
 
     @property
     def label(self) -> str:
@@ -62,6 +70,10 @@ class AgentOutcome:
             "provider": self.provider,
             "model": self.model,
             "detail": self.detail,
+            "wave": self.wave,
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_calls,
+            "depends_on": self.depends_on,
         }
 
 
@@ -75,10 +87,54 @@ class AgentContext:
     search_chain: Any
     settings: Settings
     history: list[dict[str, Any]] = field(default_factory=list)
+    trace: Any = None
+    upstream: dict[str, "AgentOutcome"] = field(default_factory=dict)
 
     @property
     def has_model(self) -> bool:
         return bool(self.model_chain)
+
+    # ------------------------------------------------------------- tracing
+    def emit(self, stage: str, actor: str, title: str, **detail: Any) -> None:
+        if self.trace is not None:
+            self.trace.add(stage, actor, title, **detail)
+
+    def emit_prompt(
+        self,
+        stage: str,
+        actor: str,
+        title: str,
+        messages: list[dict[str, Any]],
+        **detail: Any,
+    ) -> None:
+        if self.trace is not None:
+            self.trace.add_prompt(stage, actor, title, messages, **detail)
+
+    def emit_response(
+        self, stage: str, actor: str, title: str, response: Any, **detail: Any
+    ) -> None:
+        if self.trace is not None:
+            self.trace.add_response(stage, actor, title, response, **detail)
+
+    def upstream_block(self, step: PlanStep) -> tuple[str, list[str]]:
+        """Text + agent names from agents this step depends on."""
+        parts: list[str] = []
+        used: list[str] = []
+        for name in step.depends_on:
+            outcome = self.upstream.get(name)
+            if outcome is None:
+                continue
+            used.append(name)
+            body = outcome.answer.strip() or (outcome.error or "(no output)")
+            parts.append(f"### {outcome.label} ({name}) — {outcome.status}\n{body[:3000]}")
+        if not parts:
+            return "", []
+        block = (
+            "\n\nFindings from agents that ran before you. Use them where they help, "
+            "do not repeat them, and do not contradict them without saying why:\n\n"
+            + "\n\n".join(parts)
+        )
+        return block, used
 
 
 # ---------------------------------------------------------------- retrieval
@@ -165,6 +221,7 @@ GENERAL_PROMPT = (
 
 async def run_general(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
     started = time.perf_counter()
+    upstream_text, used = ctx.upstream_block(step)
     if not ctx.has_model:
         return AgentOutcome(
             agent="general",
@@ -174,13 +231,32 @@ async def run_general(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             error="No model provider is configured.",
             hint="Set LLM_PROVIDER and a provider key + model in .env.",
             latency_ms=int((time.perf_counter() - started) * 1000),
+            depends_on=list(step.depends_on),
         )
     messages = [{"role": "system", "content": GENERAL_PROMPT}]
     messages.extend(_merge_history(ctx.history))
-    messages.append({"role": "user", "content": step.task or ctx.message})
-    response = await ctx.model_chain.complete(
-        messages, None, temperature=ctx.settings.llm_temperature, max_tokens=ctx.settings.llm_max_tokens
+    messages.append({"role": "user", "content": (step.task or ctx.message) + upstream_text})
+    ctx.emit(
+        "agent",
+        "general",
+        "Task received",
+        task=step.task,
+        reason=step.reason,
+        from_agents=used,
+        history_turns=len(_merge_history(ctx.history)),
     )
+    ctx.emit_prompt("agent", "general", "Prompt sent to the model", messages, kind="general")
+    try:
+        response = await ctx.model_chain.complete(
+            messages,
+            None,
+            temperature=ctx.settings.llm_temperature,
+            max_tokens=ctx.settings.llm_max_tokens,
+        )
+    except Exception as exc:
+        ctx.emit("agent", "general", "Model call failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    ctx.emit_response("agent", "general", "Model reply", response)
     return AgentOutcome(
         agent="general",
         status="ok",
@@ -190,6 +266,8 @@ async def run_general(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         provider=response.provider,
         model=response.model,
         latency_ms=int((time.perf_counter() - started) * 1000),
+        model_calls=1,
+        depends_on=list(step.depends_on),
     )
 
 
@@ -197,11 +275,24 @@ async def run_general(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
 
 async def run_search(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
     started = time.perf_counter()
+    upstream_text, used = ctx.upstream_block(step)
+    calls = {"model": 0, "tool": 0}
+
     if not ctx.has_model:
         # No model: still useful to run the chain and hand back raw results.
+        ctx.emit(
+            "agent",
+            "search",
+            "Task received",
+            task=step.task,
+            reason=step.reason,
+            from_agents=used,
+            note="no model configured — returning raw search results",
+        )
         try:
             response = await ctx.search_chain.search(ctx.message[:300], ctx.settings.agent_max_search_results)
         except Exception as exc:
+            ctx.emit("tool", "search", "web_search failed", kind="result", ok=False, error=str(exc))
             return AgentOutcome(
                 agent="search",
                 status="failed",
@@ -209,7 +300,21 @@ async def run_search(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
                 reason=step.reason,
                 error=f"{type(exc).__name__}: {exc}",
                 latency_ms=int((time.perf_counter() - started) * 1000),
+                depends_on=list(step.depends_on),
             )
+        ctx.emit(
+            "tool",
+            "search",
+            f"web_search '{response.query}'",
+            kind="result",
+            tool="web_search",
+            ok=True,
+            provider=response.provider,
+            results=[
+                {"title": item.title, "url": item.url, "snippet": item.snippet}
+                for item in response.results
+            ],
+        )
         lines = [f"- {item.title} — {item.url}" for item in response.results]
         return AgentOutcome(
             agent="search",
@@ -218,11 +323,63 @@ async def run_search(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             task=step.task,
             reason=step.reason,
             sources=[item.url for item in response.results],
-            detail=f"raw results from {response.provider}",
+            detail=f"{len(response.results)} raw result(s) from {response.provider}",
             latency_ms=int((time.perf_counter() - started) * 1000),
+            tool_calls=1,
+            depends_on=list(step.depends_on),
         )
 
-    agent = WebSearchAgent(ctx.model_chain, ctx.search_chain, ctx.settings)
+    def observe(kind: str, payload: dict[str, Any]) -> None:
+        if kind == "prompt":
+            calls["model"] += 1
+            ctx.emit_prompt(
+                "agent",
+                "search",
+                f"Prompt sent to the model (step {payload.get('step')})",
+                payload["messages"],
+                kind="search",
+                tools=["web_search", "fetch_url"],
+            )
+        elif kind == "model":
+            ctx.emit_response(
+                "agent",
+                "search",
+                f"Model reply (step {payload.get('step')})",
+                payload["response"],
+            )
+        elif kind == "tool":
+            call = payload["call"]
+            calls["tool"] += 1
+            ctx.emit(
+                "tool",
+                "search",
+                f"Tool call: {call.name}",
+                kind="call",
+                tool=call.name,
+                arguments=call.arguments,
+                step=payload.get("step"),
+            )
+            ctx.emit(
+                "tool",
+                "search",
+                f"Tool result: {call.name}",
+                kind="result",
+                tool=call.name,
+                ok=bool(payload["output"].get("ok")),
+                latency_ms=payload.get("latency_ms"),
+                output=payload["output"],
+            )
+
+    ctx.emit(
+        "agent",
+        "search",
+        "Task received",
+        task=step.task,
+        reason=step.reason,
+        from_agents=used,
+        max_steps=ctx.settings.agent_max_steps,
+    )
+    agent = WebSearchAgent(ctx.model_chain, ctx.search_chain, ctx.settings, observer=observe)
     extra = ""
     if ctx.attachments:
         names = ", ".join(item.name for item in ctx.attachments)
@@ -230,7 +387,7 @@ async def run_search(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             f"\n\nContext: the user also attached {names}. Use them only if the request "
             "refers to them; do not pretend they were searched online."
         )
-    result = await agent.run(step.task + extra, history=ctx.history, allow_search=True)
+    result = await agent.run(step.task + upstream_text + extra, history=ctx.history, allow_search=True)
     return AgentOutcome(
         agent="search",
         status="ok" if result.answer else "failed",
@@ -244,6 +401,9 @@ async def run_search(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         detail=f"{result.steps} step(s) · search via {result.search_provider or 'n/a'}",
         latency_ms=int((time.perf_counter() - started) * 1000),
         data={"trace": result.trace[:12], "search_provider": result.search_provider},
+        model_calls=calls["model"],
+        tool_calls=calls["tool"],
+        depends_on=list(step.depends_on),
     )
 
 
@@ -267,15 +427,43 @@ async def run_document(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             task=step.task,
             reason=step.reason,
             detail="no attachments in this request",
+            depends_on=list(step.depends_on),
         )
     budget = max(int(ctx.settings.files_context_chars), 1500)
     scored = rank_chunks(ctx.attachments, f"{ctx.message} {step.task}", limit=8)
     context = _context_block(scored, budget)
     files = ", ".join(item.name for item in ctx.attachments)
+    upstream_text, used = ctx.upstream_block(step)
+
+    ctx.emit(
+        "agent",
+        "document",
+        "Task received",
+        task=step.task,
+        reason=step.reason,
+        from_agents=used,
+        files=[item.summary() for item in ctx.attachments],
+    )
+    ctx.emit(
+        "agent",
+        "document",
+        "Retrieved excerpts (keyword ranking, no embeddings)",
+        query=f"{ctx.message} {step.task}"[:300],
+        budget_chars=budget,
+        excerpts=[
+            {
+                "file": attachment.name,
+                "score": round(score, 3),
+                "chars": len(chunk),
+                "preview": re.sub(r"\s+", " ", chunk.strip())[:240],
+            }
+            for attachment, chunk, score in scored
+        ],
+    )
 
     if not ctx.has_model:
         # Extractive fallback: honest, useful, no model required.
-        excerpt = context[: budget]
+        excerpt = context[:budget]
         return AgentOutcome(
             agent="document",
             status="ok",
@@ -288,6 +476,7 @@ async def run_document(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             detail="extractive (no model)",
             data={"files": [item.summary() for item in ctx.attachments]},
             latency_ms=int((time.perf_counter() - started) * 1000),
+            depends_on=list(step.depends_on),
         )
 
     messages = [
@@ -297,12 +486,27 @@ async def run_document(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             "content": (
                 f"Request: {ctx.message}\n\nYour task: {step.task}\n\n"
                 f"Attached files: {files}\n\nExcerpts:\n\n{context}"
-            ),
+            )
+            + upstream_text,
         },
     ]
-    response = await ctx.model_chain.complete(
-        messages, None, temperature=0.1, max_tokens=ctx.settings.llm_max_tokens
+    ctx.emit_prompt(
+        "agent",
+        "document",
+        "Prompt sent to the model",
+        messages,
+        kind="document",
+        excerpts=len(scored),
+        context_chars=len(context),
     )
+    try:
+        response = await ctx.model_chain.complete(
+            messages, None, temperature=0.1, max_tokens=ctx.settings.llm_max_tokens
+        )
+    except Exception as exc:
+        ctx.emit("agent", "document", "Model call failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    ctx.emit_response("agent", "document", "Model reply", response)
     return AgentOutcome(
         agent="document",
         status="ok" if response.content else "failed",
@@ -314,6 +518,8 @@ async def run_document(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         detail=f"{len(ctx.attachments)} file(s), {len(scored)} excerpt(s)",
         data={"files": [item.summary() for item in ctx.attachments]},
         latency_ms=int((time.perf_counter() - started) * 1000),
+        model_calls=1,
+        depends_on=list(step.depends_on),
     )
 
 
@@ -469,6 +675,26 @@ async def run_data(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         "request_numbers": _stats(numbers_f) if numbers_f else {},
         "computed": computed,
     }
+    upstream_text, used = ctx.upstream_block(step)
+
+    ctx.emit(
+        "agent",
+        "data",
+        "Task received",
+        task=step.task,
+        reason=step.reason,
+        from_agents=used,
+        tables=[profile["file"] for profile in profiles],
+        expression=expression[0] if expression else None,
+    )
+    ctx.emit(
+        "agent",
+        "data",
+        "Computed the figures in code (deterministic, no model)",
+        computed=computed,
+        profiles=profiles,
+        expression={"text": expression[0], "value": expression[1]} if expression else None,
+    )
 
     if not ctx.has_model:
         return AgentOutcome(
@@ -480,6 +706,7 @@ async def run_data(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             detail="computed, not narrated (no model)",
             data=data,
             latency_ms=int((time.perf_counter() - started) * 1000),
+            depends_on=list(step.depends_on),
         )
 
     messages = [
@@ -489,12 +716,19 @@ async def run_data(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             "content": (
                 f"Request: {ctx.message}\n\nYour task: {step.task}\n\n"
                 f"Computed figures:\n{computed}"
-            ),
+            )
+            + upstream_text,
         },
     ]
-    response = await ctx.model_chain.complete(
-        messages, None, temperature=0.1, max_tokens=min(600, ctx.settings.llm_max_tokens)
-    )
+    ctx.emit_prompt("agent", "data", "Prompt sent to the model", messages, kind="data")
+    try:
+        response = await ctx.model_chain.complete(
+            messages, None, temperature=0.1, max_tokens=min(600, ctx.settings.llm_max_tokens)
+        )
+    except Exception as exc:
+        ctx.emit("agent", "data", "Model call failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    ctx.emit_response("agent", "data", "Model reply", response)
     return AgentOutcome(
         agent="data",
         status="ok",
@@ -506,6 +740,8 @@ async def run_data(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         detail="computed + interpreted",
         data=data,
         latency_ms=int((time.perf_counter() - started) * 1000),
+        model_calls=1,
+        depends_on=list(step.depends_on),
     )
 
 

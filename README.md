@@ -339,19 +339,30 @@ which is the intended, non-silent behaviour.
 The single-agent loop in §6 is one model with two tools. Auto mode adds a lead:
 
 ```
+1. classify      rules read the prompt, the files and the roster
+2. plan          rules select the agents ─► LLM writes each agent's brief + who waits for whom
+3. delegate      wave 1: independent agents run in parallel
+                 wave 2: an agent that depends on another receives its result as input
+4. review        the manager reads the reports and may ask for one more agent task
+5. wrap up       the manager writes one answer from all reports (or merges them deterministically)
+```
+
+```
                      ┌── Document analyst ── attachments, quotes ──┐
 prompt ─► MANAGER ─► PLANNER ─┼── Web researcher ──── URLs, sources ─┼─► MANAGER ─► answer
-                     ├── Data analyst ────── exact figures ──────┤   (synthesis)
-                     └── Generalist ──────── own knowledge ──────┘
-                              all selected agents run in parallel
+                     ├── Data analyst ────── exact figures ──────┤   review     (synthesis)
+                     └── Generalist ──────── own knowledge ──────┘   + follow-up
+                          wave 1 in parallel → wave 2 uses wave 1
 ```
 
 | Piece | Where | What it decides |
 |---|---|---|
-| Manager | `app/orchestrator/manager.py` | plan → parallel run → one answer (+ sources, errors, timings) |
-| Planner | `app/orchestrator/planner.py` | which agents, what each is told, and why |
-| Executor | `app/orchestrator/executor.py` | `asyncio.gather` + semaphore + per-agent timeout; failures stay isolated |
+| Manager | `app/orchestrator/manager.py` | classify → plan → waves → review → one answer (+ sources, errors, timings) |
+| Planner | `app/orchestrator/planner.py` | which agents run, the brief each one gets, and the dependency graph |
+| Executor | `app/orchestrator/executor.py` | waves: `asyncio.gather` + semaphore + per-agent timeout; failures stay isolated |
 | Agents | `app/orchestrator/agents.py` | document / search / data / general, one signature, one result type |
+| Trace | `app/orchestrator/trace.py` | every step of the run: prompts, tool calls, tool results, replies |
+| Run log | `app/orchestrator/runlog.py` | one unclipped JSON record per run in `logs/orchestrator/` |
 | Attachments | `app/orchestrator/files.py` | upload decoding, extraction, on-disk store |
 
 ### What a plan looks like
@@ -366,30 +377,65 @@ curl -s -X POST localhost:8000/orchestrate -H 'content-type: application/json' \
 {
   "answer": "…the manager's written answer…",
   "mode": "auto",
+  "run_id": "run-20261031-153930-fc0f41",
   "orchestration": {
-    "strategy": "heuristic", "synthesized": true, "parallel_ms": 2140, "latency_ms": 3900,
+    "run_id": "run-20261031-153930-fc0f41",
+    "strategy": "auto", "synthesized": true, "model_calls": 5,
+    "parallel_ms": 50, "latency_ms": 134,
     "plan": {
-      "intent": "research-analysis",
-      "summary": "Document analyst, Data analyst, Web researcher work in parallel (1 file(s)), then the manager merges their answers.",
-      "steps": [{"agent": "document", "task": "…", "reason": "1 attachment(s) provided"}, "…"],
-      "agents": ["document", "data", "search"], "parallel": true
+      "intent": "document-qa", "detail_source": "llm",
+      "summary": "Read the policy file first, then explain the refund rule in plain words.",
+      "steps": [
+        {"agent": "document", "task": "Extract the refund window…", "depends_on": [], "wave": 1},
+        {"agent": "general", "task": "Explain the extracted rule…", "depends_on": ["document"], "wave": 2}
+      ],
+      "agents": ["document", "general"], "waves": [["document"], ["general"]], "parallel": true
     },
-    "agents": [{"agent": "data", "status": "ok", "answer": "…", "data": {"tables": ["…"]}, "latency_ms": 900}]
+    "waves": [{"wave": 1, "agents": ["document"]},
+              {"wave": 2, "agents": ["general"], "depends_on": {"general": ["document"]}}],
+    "review": {"asked": true, "note": "the file answer is enough", "follow_up": []},
+    "trace": [
+      {"seq": 2, "stage": "planner", "actor": "planner", "title": "Selected the agents by rule", "detail": {"selected": ["…"]}},
+      {"seq": 3, "stage": "planner", "actor": "planner", "title": "Planner prompt (writes each agent's brief)",
+       "detail": {"messages": [{"role": "system", "content": "…"}, {"role": "user", "content": "…"}]}},
+      {"seq": 11, "stage": "agent", "actor": "document", "title": "Prompt sent to the model",
+       "detail": {"messages": [{"role": "system", "content": "…"}, {"role": "user", "content": "…"}]}},
+      {"seq": 24, "stage": "synthesis", "actor": "manager", "title": "Final synthesis prompt", "detail": {"messages": ["…"]}}
+    ],
+    "log_path": "logs/orchestrator/run-20261031-153930-fc0f41.json"
   },
-  "sources": ["https://…"]
+  "sources": []
 }
 ```
 
-### Adaptive, not LLM-only
+### Who writes what
 
-The user-visible trade-off is cost and latency, so a model is used only where it
-earns its keep:
-
-| Stage | Default | Optional |
+| Stage | Default | Knob |
 |---|---|---|
-| plan | heuristic rules over wording, attachments, numbers — free, ~0 ms | `ORCHESTRATOR_PLANNER=llm` → one JSON plan from the model, with automatic fallback if it is unusable |
-| agents | one call each, **in parallel** (wall clock ≈ the slowest, not the sum) | `ORCHESTRATOR_MAX_PARALLEL`, `ORCHESTRATOR_TIMEOUT` |
+| selection | rules over wording, attachments, numbers — free, ~0 ms | `ORCHESTRATOR_PLANNER=llm` lets the model choose instead |
+| briefs | **the model** writes one task per selected agent + the dependencies (`auto`) | `ORCHESTRATOR_PLANNER=heuristic` = rules write the briefs, no planner call at all |
+| agents | one call each, in parallel **waves** (wall clock ≈ the slowest) | `ORCHESTRATOR_MAX_PARALLEL`, `ORCHESTRATOR_TIMEOUT` |
+| review | one small call, only when more than one agent ran | `ORCHESTRATOR_REVIEW=false` |
 | wrap-up | one synthesis call | `ORCHESTRATOR_SYNTHESIZE=false` → deterministic labelled merge |
+
+So a two-agent run costs four model calls (planner + 2 agents + review +
+synthesis is five if the review is asked for) — visible in every trace entry and
+in `orchestration.model_calls`.
+
+**Dependencies.** The planner may say "the generalist waits for the document
+analyst". The executor then runs the generalist in wave 2, and hands it the
+document analyst's answer as input:
+
+```
+Findings from agents that ran before you. Use them where they help, do not repeat them,
+and do not contradict them without saying why:
+
+### Document analyst (document) — ok
+policy.md, refund section: refunds are allowed within 30 days of purchase.
+```
+
+A cycle or a dependency on an agent that never ran cannot deadlock the run:
+those steps drop into the next wave with no input.
 
 Rules of thumb in the heuristic planner:
 
@@ -403,6 +449,37 @@ Nothing breaks without a model: the document agent returns the retrieved
 excerpts, the data agent returns the computed figures, and the manager merges
 them with a note saying synthesis was skipped. `/chat` still fails loudly when
 no provider is configured, since it has nothing to fall back on.
+
+### Seeing every step: the trace and the run log
+
+The UI renders the whole run under the answer ("How this answer was built"):
+one row per step, each expandable — the manager's classification, the planner
+prompt and raw reply, the briefs it wrote, the wave the agents started in, each
+agent's prompt (system + user, verbatim), every tool call with its arguments and
+result, each agent's reply, the manager review, and the final synthesis prompt.
+**Expand all steps** opens everything at once; **Raw JSON** sends the payload to
+the inspector.
+
+The same data is on the wire and on disk:
+
+| What | Where | Keeps |
+|---|---|---|
+| `orchestration.trace` | `POST /orchestrate` response | clipped at `ORCHESTRATOR_TRACE_CHARS` (4000) per string, with a "…N more chars" marker |
+| `GET /runs` | list of recent runs (plan, agents, calls, ms, answer preview) | summaries |
+| `GET /runs/{run_id}` | one full record | unclipped |
+| `logs/orchestrator/runs.jsonl` | one JSON line per run | unclipped |
+| `logs/orchestrator/<run-id>.json` | the same record, pretty-printed | unclipped |
+
+```bash
+python -m scripts.logs runs                  # table: run id, plan, agents, calls, ms
+python -m scripts.logs runs --run <id>       # every step, with prompt/tool previews
+python -m scripts.logs runs --run <id> --full  # full JSON details
+curl -s localhost:8000/runs | python -m json.tool
+```
+
+The sidebar's **Run log** panel lists the same runs; clicking one loads the
+stored record into the inspector, so a run can be audited after the page has
+been reloaded.
 
 ### Attachments
 
@@ -440,7 +517,9 @@ Limits: `FILES_MAX_MB=10`, `FILES_MAX_CHARS=200000` (truncation is reported),
 | `POST` | `/files` | upload an attachment (`{name, data_b64}` or `{name, text}`), returns its summary |
 | `GET` | `/files` | attachments currently in the store |
 | `DELETE` | `/files/{id}` | remove one attachment |
-| `GET` | `/agents` | agent roster, planner mode, synthesis flag, readiness |
+| `GET` | `/agents` | agent roster, planner mode, review/synthesis flags, readiness |
+| `GET` | `/runs` | recent orchestration runs from `logs/orchestrator/` (plan, agents, model calls, timing) |
+| `GET` | `/runs/{run_id}` | one run, full unclipped trace (prompts, tool calls, results) |
 | `GET` | `/diagnose` | model ping + search pings + hints |
 | `GET` | `/version` | app version (also in `/health` and in the page `<meta>`) |
 
@@ -480,10 +559,12 @@ app/
     base.py            SearchResult / SearchResponse / SearchError
   agent.py             tool-calling loop + trace + sources
   orchestrator/
-    manager.py         plan -> parallel agents -> synthesis, totals, errors
-    planner.py         heuristic + optional LLM planner, the agent registry
-    executor.py        asyncio.gather + semaphore + timeout, failures isolated
+    manager.py         classify -> plan -> waves -> review -> synthesis, totals, errors
+    planner.py         rules + LLM planner, per-agent briefs, dependency graph
+    executor.py        waves: asyncio.gather + semaphore + timeout, failures isolated
     agents.py          document / search / data / general workers + retrieval
+    trace.py           every step of a run (prompts, tools, replies), clipping
+    runlog.py          logs/orchestrator/ records: save, list, read
     files.py           upload decoding, extraction (txt/csv/json/docx/xlsx/pdf), store
   main.py              FastAPI routes (served at / and /api)
   logs.py              LOGGING: rotating files, redaction, request lines, crash capture
@@ -492,6 +573,7 @@ app/
 run.py                 server launcher: preflight + banner + logs + startup record
 .data/files/           uploaded attachments (runtime, git-ignored)
 logs/                  runtime logs (git-ignored) + logs/changelog/ release notes
+logs/orchestrator/     one JSON record per Auto run (trace, prompts, timings)
 scripts/
   start.py             checks then server: the one command to run
   logs.py              read them: list | tail -f | errors | requests | process

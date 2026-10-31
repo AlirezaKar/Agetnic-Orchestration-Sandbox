@@ -20,4 +20,6 @@ artifacts/
 # runtime logs (logs/changelog/*.md are committed, the rest is generated)
 logs/*.log
 logs/archive/
+# orchestration run records (one JSON per run + runs.jsonl)
+logs/orchestrator/
 .DS_Store

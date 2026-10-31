@@ -10,6 +10,7 @@ from app.orchestrator.files import (
 )
 from app.orchestrator.manager import Manager, OrchestrationResult, agent_catalogue
 from app.orchestrator.planner import AGENTS, Plan, PlanStep, heuristic_plan, make_plan
+from app.orchestrator.trace import RunTrace
 
 __all__ = [
     "AGENTS",
@@ -22,6 +23,7 @@ __all__ = [
     "OrchestrationResult",
     "Plan",
     "PlanStep",
+    "RunTrace",
     "agent_catalogue",
     "catalogue",
     "decode_payload",

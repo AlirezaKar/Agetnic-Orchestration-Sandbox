@@ -155,6 +155,10 @@ async def check_orchestrator(settings, question: str) -> tuple[bool, dict]:
         else "deterministic merge (no model, or ORCHESTRATOR_SYNTHESIZE=false)",
     )
     line(OK if result.latency_ms else SKIP, "timing", f"{result.parallel_ms} ms parallel · {result.latency_ms} ms total")
+    waves = " → ".join("+".join(wave["agents"]) for wave in result.waves) or "none"
+    line(OK, "waves", waves)
+    if result.trace is not None:
+        line(OK, "trace", f"{len(result.trace.events)} steps · {result.log_path or 'not stored'}")
     print("\n  answer:\n")
     print("    " + (result.answer or "(empty)").replace("\n", "\n    ")[:1500])
     return bool(result.answer), result.to_dict()

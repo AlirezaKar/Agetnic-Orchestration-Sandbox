@@ -39,6 +39,7 @@ from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
 from app.orchestrator import (
     AttachmentStore,
+    runlog,
     FileError,
     Manager,
     agent_catalogue,
@@ -65,6 +66,8 @@ API_ROUTES = [
     "POST /files                      (attachment upload)",
     "GET  /files                      (attachments in the store)",
     "GET  /agents                     (agent catalogue + planner mode)",
+    "GET  /runs                       (orchestration log: recent runs)",
+    "GET  /runs/{run_id}              (full trace of one run)",
     "GET  /diagnose",
     "GET  /                           (test harness UI)",
     "GET  /assets/…                   (css + js)",
@@ -122,8 +125,9 @@ class OrchestrateRequest(BaseModel):
     file_ids: list[str] = []
     # Optional per-request overrides of the .env defaults.
     agents: list[str] | None = None
-    planner: str | None = Field(default=None, pattern="^(heuristic|llm)$")
+    planner: str | None = Field(default=None, pattern="^(auto|heuristic|llm)$")
     synthesize: bool | None = None
+    review: bool | None = None
 
 
 class SearchRequest(BaseModel):
@@ -237,6 +241,7 @@ async def health(request: Request) -> dict[str, Any]:
             "enabled": settings.orchestrator_enabled,
             "planner": settings.orchestrator_planner,
             "synthesize": settings.orchestrator_synthesize,
+            "review": settings.orchestrator_review,
             "agents": settings.orchestrator_roster,
         },
         "files": {"count": len(get_store().list())},
@@ -486,6 +491,7 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
             agents=payload.agents,
             planner=payload.planner,
             synthesize=payload.synthesize,
+            review=payload.review,
         )
     except ConfigurationError as exc:
         logs.get_logger("orchestrator").warning("configuration error: %s", exc)
@@ -495,14 +501,45 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
         return _error(502, "provider", exc)
 
     logs.get_logger("orchestrator").info(
-        "request done intent=%s agents=%s parallel_ms=%s total_ms=%s synthesized=%s",
+        "request done run=%s intent=%s agents=%s waves=%s parallel_ms=%s total_ms=%s "
+        "synthesized=%s model_calls=%s",
+        result.run_id,
         result.plan.intent,
         ",".join(result.plan.agents),
+        len(result.waves),
         result.parallel_ms,
         result.latency_ms,
         result.synthesized,
+        result.model_calls,
     )
-    return result.to_dict()
+    return result.to_dict(trace_limit=settings.orchestrator_trace_chars)
+
+
+@router.get("/runs")
+async def runs(limit: int = Query(default=20, ge=1, le=200)) -> dict[str, Any]:
+    """The orchestration log base: what ran, in which order, and how it ended."""
+    items = runlog.list_runs(limit)
+    return {
+        "count": len(items),
+        "runs": items,
+        "dir": str(runlog.runs_dir()),
+        "hint": "Full trace: GET /runs/{run_id}, or python -m scripts.logs runs --run <id>",
+    }
+
+
+@router.get("/runs/{run_id}")
+async def run_detail(run_id: str) -> Any:
+    record = runlog.get_run(run_id)
+    if record is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "not_found",
+                "message": f"no orchestration run '{run_id}'",
+                "hint": "GET /runs lists what is on disk (logs/orchestrator/).",
+            },
+        )
+    return record
 
 
 @router.get("/diagnose")
