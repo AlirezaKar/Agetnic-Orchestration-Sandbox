@@ -8,7 +8,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
-from app.main import app
+from app.main import VERSION, app
 
 
 class ApiTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Agetnic Orchestration Sandbox", response.text)
         self.assertIn("Run diagnostics", response.text)
-        self.assertIn("/assets/js/app.js", response.text)
+        self.assertIn("assets/js/app.js", response.text)
         self.assertIn('id="mode-list"', response.text)
         self.assertIn('id="diag-summary"', response.text)
         self.assertIn('id="trace-json"', response.text)
@@ -37,6 +37,35 @@ class ApiTests(unittest.TestCase):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
             self.assertIn(marker, response.text, path)
+
+    def test_version_endpoint_matches_the_page(self):
+        for path in ("/version", "/api/version"):
+            payload = self.client.get(path).json()
+            self.assertEqual(payload["version"], VERSION, path)
+            self.assertTrue(payload["log"].endswith(f"v{VERSION}.md"), path)
+        self.assertIn(f'content="{VERSION}"', self.client.get("/").text)
+
+    def test_index_is_never_cached(self):
+        response = self.client.get("/")
+        self.assertIn("no-store", response.headers.get("cache-control", ""))
+
+    def test_ui_redirect_is_relative(self):
+        response = self.client.get("/ui", follow_redirects=False)
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], ".")
+
+    def test_head_requests_are_answered(self):
+        self.assertEqual(self.client.head("/").status_code, 200)
+        self.assertEqual(self.client.head("/health").status_code, 200)
+        self.assertEqual(self.client.head("/api/health").status_code, 200)
+
+    def test_head_on_unknown_route_has_no_body(self):
+        response = self.client.head("/nope")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.content, b"")
+
+    def test_favicon_does_not_404(self):
+        self.assertEqual(self.client.get("/favicon.ico").status_code, 204)
 
     def test_health_reports_missing_model_and_usable_search(self):
         data = self.client.get("/health").json()
@@ -112,6 +141,36 @@ class ApiTests(unittest.TestCase):
         response = self.client.post("/chat", json={"message": ""})
         self.assertEqual(response.status_code, 422)
 
+    def test_api_prefix_mirrors_the_root_routes(self):
+        root = self.client.get("/health").json()
+        prefixed = self.client.get("/api/health").json()
+        self.assertEqual(root["version"], prefixed["version"])
+        self.assertEqual(root["search_chain"], prefixed["search_chain"])
+
+    def test_api_prefix_chat_works_instead_of_404(self):
+        response = self.client.post("/api/chat", json={"message": "hello"})
+        # no key configured -> the same actionable 400 as the unprefixed route
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "configuration")
+
+    def test_api_root_lists_routes(self):
+        data = self.client.get("/api").json()
+        self.assertIn("version", data)
+        self.assertTrue(any("/chat" in route for route in data["routes"]))
+
+    def test_unknown_route_returns_explanation(self):
+        response = self.client.get("/definitely-not-a-route")
+        self.assertEqual(response.status_code, 404)
+        body = response.json()
+        self.assertEqual(body["error"], "not_found")
+        self.assertIn("hint", body)
+        self.assertTrue(any("/chat" in route for route in body["routes"]))
+
+    def test_unknown_api_route_explains_the_prefix(self):
+        body = self.client.post("/api/nope", json={}).json()
+        self.assertEqual(body["error"], "not_found")
+        self.assertIn("/api", body["hint"])
+
     def test_diagnose_returns_hints(self):
         data = self.client.get("/diagnose").json()
         self.assertIn("hints", data)
@@ -121,3 +180,41 @@ class ApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FrontendContractTests(unittest.TestCase):
+    """The static UI and the backend must agree on paths and versions."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        cls.index = (root / "app/static/index.html").read_text(encoding="utf-8")
+        cls.app_js = (root / "app/static/assets/js/app.js").read_text(encoding="utf-8")
+
+    def test_assets_are_referenced_relatively(self):
+        # absolute "/assets/..." breaks under any proxy prefix -> unstyled page
+        self.assertIn('href="assets/css/styles.css', self.index)
+        self.assertIn('href="assets/css/extra.css', self.index)
+        self.assertIn('src="assets/js/app.js', self.index)
+        self.assertNotIn('href="/assets/', self.index)
+        self.assertNotIn('src="/assets/', self.index)
+
+    def test_asset_urls_are_cache_busted_with_the_app_version(self):
+        self.assertIn(f"styles.css?v={VERSION}", self.index)
+        self.assertIn(f"extra.css?v={VERSION}", self.index)
+        self.assertIn(f"app.js?v={VERSION}", self.index)
+        self.assertIn(f'content="{VERSION}"', self.index)
+
+    def test_frontend_negotiates_the_api_base(self):
+        for marker in ("candidateBases", "negotiate", "apiUrl", "conn-banner"):
+            self.assertIn(marker, self.app_js, marker)
+
+    def test_frontend_never_hardcodes_root_api_paths(self):
+        for bad in ('fetch("/chat"', 'fetch("/health"', 'fetch("/providers"'):
+            self.assertNotIn(bad, self.app_js)
+
+    def test_frontend_surfaces_connection_problems(self):
+        self.assertIn("Backend not reachable", self.app_js)
+        self.assertIn("Styles failed to load", self.app_js)

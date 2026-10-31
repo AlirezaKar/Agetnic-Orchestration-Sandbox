@@ -33,8 +33,13 @@ python -m scripts.check_providers --provider groq --models   # live ids, best fi
 python -m scripts.doctor               # pings the model + every search backend
 python -m scripts.check_search -q "python 3.13 release notes"
 
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python3 run.py                    # UI + API on http://localhost:8000  (add --reload while editing)
 ```
+
+`run.py` is the supported entry point: it starts **one** process that serves both the page
+and the API, prints the URLs/routes, warns about a missing `.env` or missing assets, and
+appends a startup line to `log/runtime/v<version>.log`. Plain
+`uvicorn app.main:app --port 8000` works too.
 
 Open <http://localhost:8000> — the **test harness** (the original PR #1 UI, rebuilt on this
 API): mode selector (Agent / Answer only / Search only), search-backend list, diagnostics
@@ -305,6 +310,12 @@ which is the intended, non-silent behaviour.
 | `GET` | `/search/diagnose?q=&all=` | ping each backend, per-backend pass/fail + latency |
 | `POST` | `/chat` | agent loop: model + `web_search`/`fetch_url` tools, returns trace |
 | `GET` | `/diagnose` | model ping + search pings + hints |
+| `GET` | `/version` | app version (also in `/health` and in the page `<meta>`) |
+
+**Every route above is also served under `/api`** (`/api/chat`, `/api/health`, …), and
+`GET /api` lists them. That prefix exists because the UI addresses `/api/…`; a proxy that
+adds a prefix therefore keeps working instead of turning into `{"detail":"Not Found"}`.
+Unknown paths return JSON with a `hint` and the route list, and `HEAD /` is answered.
 
 ```bash
 curl -s -X POST localhost:8000/chat -H 'content-type: application/json' \
@@ -334,9 +345,12 @@ app/
     registry.py        ordered chain, dedupe, empty-vs-error semantics
     base.py            SearchResult / SearchResponse / SearchError
   agent.py             tool-calling loop + trace + sources
-  main.py              FastAPI routes
+  main.py              FastAPI routes (served at / and /api)
+  applog.py            per-version runtime log helper (log/runtime/v<version>.log)
   static/index.html    test harness (modes, diagnostics, history, inspector)
   static/assets/       the original dark console CSS + app.js
+run.py                 launcher: preflight + banner + startup log line
+log/                   one changelog per version (v0.4.0.md, …) + runtime/ logs
 scripts/
   doctor.py            model + search + optional agent, one command
   check_providers.py   table, links, --ping, --models
@@ -358,8 +372,26 @@ tests/                 offline tests (MockTransport, no keys)
 | `all search backends failed` | No network / all keys missing. `python -m scripts.check_search --all` |
 | `SearXNG did not return JSON` | Enable `search.formats: [html, json]` in `settings.yml` |
 | Ollama `network error` | `ollama serve` is not running, or `OLLAMA_BASE_URL` is wrong |
+| `{"detail":"Not Found"}` on send | You were on an older page that posted to a path this app did not serve. Reload: the composer must read `· v0.4.0`. Both `/chat` and `/api/chat` answer now |
+| Buttons dead, modes stacked inline | CSS/JS did not load (stale `/assets/...` URLs). Hard-reload; a red banner now says so when it happens |
+| Composer shows no `· v0.4.0` | The browser cached an old page. `Ctrl+Shift+R`, and check the server sends `Cache-Control: no-store` |
 
-## 8. Design notes
+## 8. Logs
+
+- `log/v<version>.md` — one changelog per version (what broke, what changed, how to verify),
+  indexed in [`log/README.md`](log/README.md). Versions that were superseded inside a
+  working tree still get a file, so the series has no silent gaps.
+- `log/runtime/v<version>.log` — one file per version, appended by `run.py`:
+  UTC timestamp, version, bind address, pid, and preflight problem count.
+- `tests/test_logs.py` fails if the current `VERSION` has no changelog or the index
+  forgets a release.
+
+```bash
+ls log/ log/runtime/
+cat log/runtime/v0.4.0.log
+```
+
+## 9. Design notes
 
 - **One dialect, many vendors.** OpenAI-compatible chat completions is the narrow waist;
   presets only carry endpoint/auth/model/link differences. Adding a provider is a dict

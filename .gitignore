@@ -15,4 +15,6 @@ venv/
 # local run artifacts
 artifacts/
 *.log
+# per-version runtime logs (changelogs in log/v*.md are committed)
+log/runtime/
 .DS_Store
