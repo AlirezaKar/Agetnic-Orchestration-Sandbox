@@ -30,6 +30,13 @@
   ];
 
   const STORAGE = { runs: "agetnic.runs.v1", mode: "agetnic.mode.v1" };
+  const UI_VERSION =
+    document.querySelector('meta[name="agetnic-version"]')?.content || "dev";
+
+  // Where the API lives. Negotiated at boot so the harness works when it is
+  // served from the app root, from a sub-path, or behind a proxy that puts the
+  // API under /api — instead of blindly fetching "/chat" and getting a 404.
+  const conn = { base: "", version: null, tried: [] };
 
   // Some browsers (private mode, embedded webviews) throw on localStorage.
   const store = (() => {
@@ -83,9 +90,72 @@
     }
   }
 
-  async function api(path, options = {}) {
+  function apiUrl(path) {
+    // Join like a URL, not like a string: base "/api/" + path "/health" must be
+    // "/api/health", not "/api//health".
+    const base = String(conn.base || "").replace(/\/+$/, "");
+    const suffix = String(path || "").replace(/^\/+/, "");
+    return (base ? base + "/" : "") + suffix;
+  }
+
+  function candidateBases() {
+    const bases = [];
+    const push = (value) => {
+      const base = value === "" ? "" : value.endsWith("/") ? value : value + "/";
+      if (!bases.includes(base)) bases.push(base);
+    };
+    push(""); // relative to the current document (works at any mount path)
     try {
-      const response = await fetch(path, {
+      push(new URL(".", window.location.href).pathname);
+    } catch (_) {
+      /* ignore */
+    }
+    push("api");
+    push("/api/");
+    push("/");
+    return bases;
+  }
+
+  async function negotiate() {
+    conn.tried = [];
+    for (const base of candidateBases()) {
+      const url = base + "health";
+      try {
+        const response = await fetch(url, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          conn.tried.push(url + " → HTTP " + response.status);
+          continue;
+        }
+        const data = await response.json().catch(() => null);
+        if (data && (data.status === "ok" || data.version)) {
+          conn.base = base;
+          conn.version = data.version || null;
+          hideBanner();
+          return true;
+        }
+        conn.tried.push(url + " → not this API");
+      } catch (error) {
+        conn.tried.push(url + " → " + error.message);
+      }
+    }
+    conn.base = "";
+    showBanner(
+      "Backend not reachable",
+      "Tried: " + conn.tried.join(" · ") +
+        ". The page is probably a static copy, or the server is not running. " +
+        "Start it with `python run.py` (or `uvicorn app.main:app --port 8000`) " +
+        "and open http://localhost:8000/ — a static file server cannot answer /chat."
+    );
+    return false;
+  }
+
+  async function api(path, options = {}) {
+    const url = apiUrl(path);
+    try {
+      const response = await fetch(url, {
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         ...options,
       });
@@ -95,14 +165,45 @@
       } catch (_) {
         data = {};
       }
-      return { ok: response.ok, status: response.status, data };
+      return { ok: response.ok, status: response.status, data, path };
     } catch (error) {
       return {
         ok: false,
         status: 0,
+        path,
         data: { message: "Cannot reach the backend: " + error.message },
       };
     }
+  }
+
+  function showBanner(title, text) {
+    const banner = $("conn-banner");
+    if (!banner) return;
+    $("conn-banner-title").textContent = title;
+    $("conn-banner-text").textContent = " " + text;
+    banner.classList.add("show");
+  }
+
+  function hideBanner() {
+    const banner = $("conn-banner");
+    if (banner) banner.classList.remove("show");
+  }
+
+  function checkStyles() {
+    const layout = document.querySelector(".layout");
+    if (!layout) return true;
+    const columns = window.getComputedStyle(layout).gridTemplateColumns;
+    if (!columns || columns === "none") {
+      showBanner(
+        "Styles failed to load",
+        "The stylesheet did not apply, so the panels are stacked instead of laid out. " +
+          "Hard-reload (Ctrl/Cmd+Shift+R). If it persists, confirm that " +
+          "app/static/assets/css/ exists next to app/main.py and that the URL you opened " +
+          "points at the FastAPI app, not at index.html on disk."
+      );
+      return false;
+    }
+    return true;
   }
 
   function showInspector(payload, note) {
@@ -118,10 +219,18 @@
     parts.push(data.message || data.error || "Request failed");
     if (data.status) parts.push("(HTTP " + data.status + ")");
     else if (result.status) parts.push("(HTTP " + result.status + ")");
+    const shown = apiUrl(result.path || "?");
+    parts.push("\n\nrequested: " + (shown.startsWith("/") ? shown : "/" + shown));
     const detail = data.detail;
     if (detail && typeof detail === "object" && detail.hint) parts.push("\n\nhint: " + detail.hint);
     if (data.hint) parts.push("\n\nhint: " + data.hint);
     if (detail && typeof detail === "object" && detail.message) parts.push("\n\n" + detail.message);
+    if (!data.hint && !(detail && detail.hint) && result.status === 404) {
+      parts.push(
+        "\n\nhint: this path is not served here. The API answers on /chat and /api/chat; " +
+          "open the app root instead of index.html on disk."
+      );
+    }
     return parts.join(" ");
   }
 
@@ -184,7 +293,9 @@
     const mode = MODES.find((item) => item.id === state.mode) || MODES[0];
     const pinned = state.pinnedSearch ? " · backend: " + state.pinnedSearch : "";
     $("composer-mode-label").textContent =
-      "Mode: " + mode.title + (state.mode === "search" ? pinned : "");
+      "Mode: " + mode.title +
+      (state.mode === "search" ? pinned : "") +
+      " · v" + UI_VERSION;
   }
 
   /* ──────────────────── search backend sidebar ──────────────── */
@@ -646,6 +757,17 @@
 
   /* ────────────────────────────── wire up ──────────────────── */
   function wire() {
+    const retry = $("conn-banner-retry");
+    if (retry) {
+      retry.addEventListener("click", async () => {
+        hideBanner();
+        const online = await negotiate();
+        if (online) {
+          loadHealth();
+          loadProviders();
+        }
+      });
+    }
     $("btn-send").addEventListener("click", send);
     $("btn-clear").addEventListener("click", clearSession);
     $("btn-diag").addEventListener("click", runDiagnostics);
@@ -700,12 +822,24 @@
     });
   }
 
-  function boot() {
+  async function boot() {
     renderModes();
     renderHistory();
     wire();
-    loadHealth();
-    loadProviders();
+    checkStyles();
+
+    const online = await negotiate();
+    if (!online) {
+      renderSearchList([]);
+      $("badge-llm").textContent = "LLM: offline";
+      $("badge-llm").className = "badge bad";
+      $("badge-search").textContent = "Search: offline";
+      $("badge-search").className = "badge bad";
+    } else {
+      loadHealth();
+      loadProviders();
+    }
+
     if (!state.runs.length) {
       showInspector(
         {

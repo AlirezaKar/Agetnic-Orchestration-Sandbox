@@ -3,11 +3,44 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="agetnic-version" content="0.4.0" />
   <title>Agetnic Orchestration Sandbox — Test Harness</title>
-  <link rel="stylesheet" href="/assets/css/styles.css" />
-  <link rel="stylesheet" href="/assets/css/extra.css" />
+  <!-- Relative asset URLs: the harness keeps working when the app is mounted
+       under a sub-path (/ui/, /sandbox/, a proxy prefix). The ?v= query busts
+       stale caches after an upgrade. -->
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.4.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.4.0" />
+  <style>
+    /* Inline fallback: the connection banner must be readable even if the
+       stylesheets 404 (that is exactly when it matters). */
+    #conn-banner {
+      display: none;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 10px 16px;
+      background: #3a1d1d;
+      color: #ffd7d7;
+      border-bottom: 1px solid #ff6b6b;
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #conn-banner.show { display: flex; }
+    #conn-banner strong { color: #ff9c9c; }
+    #conn-banner code { background: rgba(0, 0, 0, .35); padding: 1px 5px; border-radius: 4px; }
+    #conn-banner button {
+      margin-left: auto; background: transparent; color: #ffd7d7;
+      border: 1px solid #ff6b6b; border-radius: 7px; padding: 4px 10px; cursor: pointer;
+    }
+  </style>
 </head>
 <body>
+  <!-- Connection / asset diagnostics: shown by app.js, never by the server -->
+  <div id="conn-banner" role="alert" aria-live="polite">
+    <strong id="conn-banner-title">Backend not reachable</strong>
+    <span id="conn-banner-text"></span>
+    <button id="conn-banner-retry" type="button">Retry</button>
+  </div>
+
   <!-- ═══════════════════════════════════════════════════════════
        Header: title + live provider status badges + diagnostics
        ═══════════════════════════════════════════════════════════ -->
@@ -130,6 +163,6 @@
     </div>
   </div>
 
-  <script src="/assets/js/app.js"></script>
+  <script src="assets/js/app.js?v=0.4.0" defer></script>
 </body>
 </html>
