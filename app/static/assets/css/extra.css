@@ -89,3 +89,87 @@
   animation: spin .7s linear infinite; vertical-align: -2px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ══════════════════════════════════════════════════════════════
+   Orchestration: manager plan + parallel agent cards
+   ══════════════════════════════════════════════════════════════ */
+.orch-panel {
+  margin-top: 10px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-soft); overflow: hidden;
+}
+.orch-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 11px; border-bottom: 1px solid var(--border);
+  background: rgba(91, 140, 255, 0.06);
+}
+.orch-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); font-weight: 600; }
+.orch-chip {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 20px;
+  border: 1px solid var(--border); color: var(--muted);
+}
+.orch-chip.good { color: var(--green); border-color: rgba(62, 207, 142, 0.4); background: var(--green-soft); }
+.orch-time { margin-left: auto; font-size: 10.5px; color: var(--muted); font-family: var(--mono); }
+.orch-summary { padding: 8px 11px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.orch-steps { display: flex; flex-direction: column; gap: 1px; background: var(--border); }
+.orch-step { background: var(--bg-panel); }
+.orch-step-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 11px; cursor: pointer; font-size: 12px;
+}
+.orch-step-head:hover { background: var(--bg-soft); }
+.orch-agent { font-weight: 600; }
+.orch-status { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+.orch-status.completed { color: var(--green); }
+.orch-status.failed { color: var(--red); }
+.orch-status.queued { color: var(--amber); }
+.orch-ms { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+.orch-model { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.orch-step-body { display: none; padding: 0 11px 10px; }
+.orch-step.open .orch-step-body { display: block; }
+.orch-reason { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.orch-task { font-size: 11px; color: var(--muted); margin-bottom: 6px; font-style: italic; }
+.orch-answer {
+  margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 7px; font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto;
+}
+.orch-sources { margin-top: 6px; font-size: 10.5px; color: var(--muted); word-break: break-all; }
+.orch-files, .orch-note { padding: 6px 11px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); }
+.orch-note { color: var(--amber); }
+
+/* Agent roster panel */
+.agent-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.agent-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+.agent-row.disabled { opacity: .45; }
+.agent-name { color: var(--text); }
+.agent-kind {
+  margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 20px; padding: 0 6px;
+}
+
+/* Attachments */
+.attachments {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 0 2px 8px;
+}
+.att-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.att-list { display: flex; gap: 6px; flex-wrap: wrap; }
+.att-chip {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
+  background: var(--accent-soft); border: 1px solid rgba(91, 140, 255, .35);
+  border-radius: 20px; padding: 2px 4px 2px 9px; color: var(--text);
+}
+.att-size { color: var(--muted); font-size: 10px; }
+.att-remove {
+  background: transparent; border: 0; color: var(--muted); cursor: pointer;
+  font-size: 10px; padding: 1px 4px; border-radius: 50%;
+}
+.att-remove:hover { color: var(--red); background: var(--red-soft); }
+.msg-files { margin-top: 5px; font-size: 11px; color: var(--muted); }
+body.dragging::after {
+  content: "drop to attach — the document agent will read it";
+  position: fixed; inset: 12px; z-index: 60; pointer-events: none;
+  border: 2px dashed var(--accent); border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; color: var(--accent); background: rgba(14, 17, 23, .82);
+}

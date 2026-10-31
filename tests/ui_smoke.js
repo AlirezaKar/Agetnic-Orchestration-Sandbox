@@ -57,6 +57,8 @@ function mount(fetchImpl, pageUrl) {
 const text = (w, id) => (w.document.getElementById(id) || {}).textContent || '';
 const bannerShown = (w) => w.document.getElementById('conn-banner').classList.contains('show');
 const modes = (w) => w.document.querySelectorAll('.mode-btn').length;
+const MODE_COUNT = 4; // auto, agent, answer, search
+const attachButton = (w) => w.document.getElementById('btn-attach');
 
 async function scenarioStaticHost() {
   console.log('B  static host (the "buttons do nothing" case)');
@@ -68,7 +70,7 @@ async function scenarioStaticHost() {
   const w = mount(notFound, 'http://localhost:8000/');
   await sleep(900);
 
-  check('page still renders its modes', modes(w) === 3, `${modes(w)} mode buttons`);
+  check('page still renders its modes', modes(w) === MODE_COUNT, `${modes(w)} mode buttons`);
   check('badges say offline, not "ok"', /offline|unknown|down/.test(text(w, 'badge-llm')), text(w, 'badge-llm'));
   check('red banner explains the failure', bannerShown(w), 'banner hidden');
   check(
@@ -115,7 +117,10 @@ async function scenarioNormalHost() {
 
   check('llm badge resolved', !/backend down|offline/.test(text(w, 'badge-llm')), text(w, 'badge-llm'));
   check('no error banner', !bannerShown(w));
-  check('modes rendered', modes(w) === 3);
+  check('modes rendered', modes(w) === MODE_COUNT, `${modes(w)} mode buttons`);
+  check('auto mode is first and default', (w.document.querySelector('.mode-btn.active') || {}).dataset?.mode === 'auto');
+  check('attachment control is present', !!attachButton(w));
+  check('orchestrator panel is online', /planner/.test(text(w, 'agents-summary')));
   check('search backends listed', w.document.querySelectorAll('#search-list .provider-item').length > 0);
 
   w.document.getElementById('prompt').value = 'hello';

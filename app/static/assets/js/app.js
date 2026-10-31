@@ -13,6 +13,11 @@
 
   const MODES = [
     {
+      id: "auto",
+      title: "Auto (orchestrated)",
+      desc: "Manager plans, document / search / data / general agents run in parallel, manager wraps up.",
+    },
+    {
       id: "agent",
       title: "Agent (tools)",
       desc: "The model decides when to call web_search / fetch_url. Full trace.",
@@ -56,7 +61,9 @@
   })();
 
   const state = {
-    mode: store.getItem(STORAGE.mode) || "agent",
+    mode: store.getItem(STORAGE.mode) || "auto",
+    files: [],
+    agents: null,
     pinnedSearch: null,
     runs: loadRuns(),
     diagnostics: null,
@@ -287,15 +294,198 @@
       node.classList.toggle("active", node.dataset.mode === id);
     });
     updateComposerLabel();
+    if (id !== "auto" && state.files.length) {
+      showBanner(
+        "Attachments need Auto mode",
+        "the document agent reads files through /orchestrate — switch back to Auto to use them."
+      );
+      setTimeout(hideBanner, 6000);
+    }
   }
 
   function updateComposerLabel() {
     const mode = MODES.find((item) => item.id === state.mode) || MODES[0];
     const pinned = state.pinnedSearch ? " · backend: " + state.pinnedSearch : "";
+    const files = state.files.length ? " · " + state.files.length + " file(s)" : "";
     $("composer-mode-label").textContent =
       "Mode: " + mode.title +
       (state.mode === "search" ? pinned : "") +
+      files +
       " · v" + UI_VERSION;
+  }
+
+  /* ──────────────────────── attachments ─────────────────────── */
+  const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+  function humanSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  }
+
+  function renderAttachments() {
+    const box = $("attachments");
+    const list = $("att-list");
+    if (!box || !list) return;
+    list.textContent = "";
+    state.files.forEach((item, index) => {
+      const chip = el("span", "att-chip");
+      chip.appendChild(el("span", "att-name", item.name));
+      chip.appendChild(el("span", "att-size", humanSize(item.size)));
+      const remove = el("button", "att-remove", "✕");
+      remove.type = "button";
+      remove.title = "Remove";
+      remove.addEventListener("click", () => {
+        state.files.splice(index, 1);
+        renderAttachments();
+        updateComposerLabel();
+      });
+      chip.appendChild(remove);
+      list.appendChild(chip);
+    });
+    box.hidden = state.files.length === 0;
+    updateComposerLabel();
+  }
+
+  function addFiles(fileList) {
+    const rejected = [];
+    Array.from(fileList || []).forEach((file) => {
+      if (file.size > MAX_FILE_BYTES) {
+        rejected.push(file.name + " (" + humanSize(file.size) + " > 10 MB)");
+        return;
+      }
+      if (state.files.some((existing) => existing.name === file.name && existing.size === file.size)) {
+        return;
+      }
+      state.files.push({ file, name: file.name, size: file.size });
+    });
+    renderAttachments();
+    if (rejected.length) {
+      showBanner("Some files were not attached", rejected.join(" · "));
+      setTimeout(hideBanner, 6000);
+    }
+  }
+
+  function readAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new window.FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || "");
+        const comma = result.indexOf(",");
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.onerror = () => reject(reader.error || new Error("could not read " + file.name));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function uploadAttachments() {
+    const ids = [];
+    for (const item of state.files) {
+      let payload;
+      try {
+        payload = await readAsBase64(item.file);
+      } catch (error) {
+        return { error: "Could not read " + item.name + ": " + error.message };
+      }
+      const result = await api("/files", {
+        method: "POST",
+        body: JSON.stringify({ name: item.name, data_b64: payload }),
+      });
+      if (!result.ok) {
+        return { error: errorText(result) };
+      }
+      ids.push(result.data.id);
+    }
+    return { ids };
+  }
+
+  /* ───────────────── orchestration rendering ────────────────── */
+  function agentStatusTone(status) {
+    if (status === "ok") return "completed";
+    if (status === "failed") return "failed";
+    return "queued";
+  }
+
+  function renderOrchestration(container, data) {
+    const orch = data.orchestration;
+    if (!orch) return;
+
+    const panel = el("div", "orch-panel");
+    const head = el("div", "orch-head");
+    head.appendChild(el("span", "orch-title", "Manager plan"));
+    head.appendChild(el("span", "orch-chip", orch.strategy + " planner"));
+    head.appendChild(el("span", "orch-chip", orch.plan.parallel ? "parallel · " + orch.agents.length + " agents" : "single agent"));
+    if (orch.synthesized) head.appendChild(el("span", "orch-chip good", "synthesised"));
+    head.appendChild(el("span", "orch-time", orch.parallel_ms + " ms parallel · " + orch.latency_ms + " ms total"));
+    panel.appendChild(head);
+    panel.appendChild(el("div", "orch-summary", orch.plan.summary));
+
+    const steps = el("div", "orch-steps");
+    (orch.agents || []).forEach((agent) => {
+      const card = el("div", "orch-step");
+      const top = el("div", "orch-step-head");
+      top.appendChild(el("span", "status-dot " + agentStatusTone(agent.status)));
+      top.appendChild(el("span", "orch-agent", agent.label || agent.agent));
+      top.appendChild(el("span", "orch-status " + agentStatusTone(agent.status), agent.status));
+      top.appendChild(el("span", "orch-ms", (agent.latency_ms || 0) + " ms"));
+      if (agent.model) top.appendChild(el("span", "orch-model", agent.provider + "/" + agent.model));
+      top.addEventListener("click", () => card.classList.toggle("open"));
+      card.appendChild(top);
+
+      const body = el("div", "orch-step-body");
+      if (agent.reason) body.appendChild(el("div", "orch-reason", "why: " + agent.reason));
+      if (agent.task) body.appendChild(el("div", "orch-task", agent.task));
+      const text = agent.status === "failed"
+        ? agent.error + (agent.hint ? "\n\n" + agent.hint : "")
+        : agent.status === "skipped"
+          ? agent.detail || "skipped"
+          : agent.answer || agent.detail || "(no output)";
+      body.appendChild(el("pre", "orch-answer", text));
+      if (agent.sources && agent.sources.length) {
+        body.appendChild(el("div", "orch-sources", "sources: " + agent.sources.join(" · ")));
+      }
+      card.appendChild(body);
+      steps.appendChild(card);
+    });
+    panel.appendChild(steps);
+
+    if (orch.files && orch.files.length) {
+      panel.appendChild(
+        el("div", "orch-files", "files: " + orch.files.map((f) => f.name).join(", "))
+      );
+    }
+    (orch.notes || []).forEach((note) => panel.appendChild(el("div", "orch-note", note)));
+    container.appendChild(panel);
+  }
+
+  function renderAgentsPanel(info) {
+    state.agents = info;
+    const summary = $("agents-summary");
+    const list = $("agents-list");
+    if (!summary || !list) return;
+    if (!info) {
+      summary.textContent = "Agent roster unavailable.";
+      return;
+    }
+    summary.textContent =
+      (info.planner || "heuristic") + " planner · synthesis " +
+      (info.synthesize ? "on" : "off") + " · " + (info.parallel || 4) + " in parallel";
+    summary.className = "diag-summary";
+    list.textContent = "";
+    (info.agents || []).forEach((agent) => {
+      const active = (info.roster || []).includes(agent.name);
+      const row = el("div", "agent-row" + (active ? "" : " disabled"));
+      row.appendChild(el("span", "agent-name", agent.label));
+      row.appendChild(el("span", "agent-kind", agent.name));
+      row.title = agent.description;
+      list.appendChild(row);
+    });
+  }
+
+  async function loadAgents() {
+    const result = await api("/agents");
+    renderAgentsPanel(result.ok ? result.data : null);
   }
 
   /* ──────────────────── search backend sidebar ──────────────── */
@@ -515,13 +705,16 @@
     if (empty) empty.remove();
   }
 
-  function appendUser(text) {
+  function appendUser(text, fileNames) {
     hideEmptyState();
     const message = el("div", "message user");
     const avatar = el("div", "avatar", "You");
     const body = el("div", "body");
     body.appendChild(el("div", "msg-role", "You"));
     body.appendChild(el("div", "msg-text", text));
+    if (fileNames && fileNames.length) {
+      body.appendChild(el("div", "msg-files", "📎 " + fileNames.join(" · ")));
+    }
     message.appendChild(avatar);
     message.appendChild(body);
     $("chat").appendChild(message);
@@ -638,9 +831,23 @@
 
     text.textContent = answer || "(empty answer)";
     body.appendChild(text);
-    renderTimeline(body, data);
+    if (mode === "auto") {
+      renderOrchestration(body, data);
+    } else {
+      renderTimeline(body, data);
+    }
     renderSources(body, data.sources);
-    renderMeta(body, data);
+    if (mode === "auto" && data.orchestration) {
+      const orch = data.orchestration;
+      const bits = [];
+      if (orch.model) bits.push(orch.provider + "/" + orch.model);
+      bits.push(orch.strategy + " planner");
+      bits.push(orch.agents.length + " agent(s)");
+      bits.push(orch.parallel_ms + " ms parallel · " + orch.latency_ms + " ms total");
+      body.appendChild(el("div", "tl-meta", bits.join(" · ")));
+    } else {
+      renderMeta(body, data);
+    }
     scrollChat();
 
     const run = {
@@ -651,7 +858,8 @@
       provider: data.provider || "",
       model: data.model || "",
       latency_ms: data.latency_ms || 0,
-      steps: data.steps || 0,
+      steps: data.steps || (data.orchestration ? data.orchestration.agents.length : 0),
+      agents: data.orchestration ? data.orchestration.plan.agents.join(",") : "",
       payload: data,
     };
     state.runs.unshift(run);
@@ -676,7 +884,8 @@
       const meta = el(
         "span",
         "trace-meta",
-        run.mode + " · " + (run.provider || "search") + " · " + run.latency_ms + " ms"
+        run.mode + (run.agents ? " · " + run.agents : "") +
+          " · " + (run.provider || "search") + " · " + run.latency_ms + " ms"
       );
       item.appendChild(meta);
       item.addEventListener("click", () => {
@@ -703,30 +912,66 @@
     $("btn-send").textContent = "…";
 
     const mode = state.mode;
-    appendUser(text);
+    const hasFiles = state.files.length > 0;
+    appendUser(text, state.files.map((item) => item.name));
     input.value = "";
     const skeleton = appendAssistantSkeleton();
 
     let result;
-    if (mode === "search") {
-      result = await api("/search", {
-        method: "POST",
-        body: JSON.stringify({
-          query: text,
-          max_results: 5,
-          provider: state.pinnedSearch || null,
-        }),
-      });
-    } else {
-      result = await api("/chat", {
-        method: "POST",
-        body: JSON.stringify({
-          message: text,
-          history: historyPayload(),
-          allow_search: mode === "agent",
-          max_steps: 4,
-        }),
-      });
+    try {
+      if (mode === "auto") {
+        let fileIds = [];
+        if (hasFiles) {
+          skeleton.text.textContent = " uploading " + state.files.length + " file(s)…";
+          const uploaded = await uploadAttachments();
+          if (uploaded.error) {
+            result = { ok: false, status: 0, path: "/files", data: { message: uploaded.error } };
+            state.busy = false;
+            $("btn-send").disabled = false;
+            $("btn-send").textContent = sendLabel;
+            finishAssistant(skeleton, result, text, mode);
+            return;
+          }
+          fileIds = uploaded.ids;
+          state.files = [];
+          renderAttachments();
+        }
+        skeleton.text.textContent = " thinking · planning agents…";
+        result = await api("/orchestrate", {
+          method: "POST",
+          body: JSON.stringify({
+            message: text,
+            history: historyPayload(),
+            file_ids: fileIds,
+          }),
+        });
+      } else if (mode === "search") {
+        result = await api("/search", {
+          method: "POST",
+          body: JSON.stringify({
+            query: text,
+            max_results: 5,
+            provider: state.pinnedSearch || null,
+          }),
+        });
+      } else {
+        result = await api("/chat", {
+          method: "POST",
+          body: JSON.stringify({
+            message: text,
+            history: historyPayload(),
+            allow_search: mode === "agent",
+            max_steps: 4,
+          }),
+        });
+      }
+    } catch (error) {
+      result = {
+        ok: false,
+        status: 0,
+        path: mode === "auto" ? "/orchestrate" : "/chat",
+        data: { message: "Request failed: " + (error && error.message ? error.message : error) },
+      };
     }
 
     const run = finishAssistant(skeleton, result, text, mode);
@@ -739,10 +984,13 @@
     state.busy = false;
     $("btn-send").disabled = false;
     $("btn-send").textContent = sendLabel;
+    scrollChat();
   }
 
   function clearSession() {
     state.messages = [];
+    state.files = [];
+    renderAttachments();
     const chat = $("chat");
     chat.textContent = "";
     const empty = el("div", "empty-state");
@@ -769,6 +1017,37 @@
       });
     }
     $("btn-send").addEventListener("click", send);
+
+    // attachments: button, file picker, drag & drop on the whole console
+    const fileInput = $("file-input");
+    if (fileInput) {
+      $("btn-attach").addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", () => {
+        addFiles(fileInput.files);
+        fileInput.value = "";
+      });
+    }
+    const dropTarget = document.body;
+    ["dragenter", "dragover"].forEach((name) =>
+      dropTarget.addEventListener(name, (event) => {
+        if (!event.dataTransfer || !event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+        document.body.classList.add("dragging");
+      })
+    );
+    ["dragleave", "drop"].forEach((name) =>
+      dropTarget.addEventListener(name, (event) => {
+        if (name === "dragleave" && event.relatedTarget) return;
+        document.body.classList.remove("dragging");
+        if (name !== "drop") return;
+        event.preventDefault();
+        if (event.dataTransfer && event.dataTransfer.files.length) {
+          addFiles(event.dataTransfer.files);
+        }
+      })
+    );
+    const refreshAgents = $("btn-refresh-agents");
+    if (refreshAgents) refreshAgents.addEventListener("click", loadAgents);
     $("btn-clear").addEventListener("click", clearSession);
     $("btn-diag").addEventListener("click", runDiagnostics);
     $("btn-diag-top").addEventListener("click", runDiagnostics);
@@ -824,6 +1103,7 @@
 
   async function boot() {
     renderModes();
+    renderAttachments();
     renderHistory();
     wire();
     checkStyles();
@@ -835,9 +1115,11 @@
       $("badge-llm").className = "badge bad";
       $("badge-search").textContent = "Search: offline";
       $("badge-search").className = "badge bad";
+      renderAgentsPanel(null);
     } else {
       loadHealth();
       loadProviders();
+      loadAgents();
     }
 
     if (!state.runs.length) {
@@ -845,7 +1127,10 @@
         {
           hint: "Nothing inspected yet.",
           modes: MODES.map((mode) => mode.id),
-          endpoints: ["/health", "/providers", "/chat", "/search", "/diagnose", "/search/diagnose"],
+          endpoints: [
+            "/health", "/providers", "/agents", "/chat", "/orchestrate",
+            "/files", "/search", "/diagnose", "/search/diagnose",
+          ],
         },
         "Trace inspector — send a prompt or run diagnostics to fill this panel."
       );

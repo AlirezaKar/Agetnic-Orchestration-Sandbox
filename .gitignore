@@ -14,6 +14,8 @@ venv/
 
 # local run artifacts
 artifacts/
+# uploaded attachments (runtime store, never committed)
+.data/
 *.log
 # runtime logs (logs/changelog/*.md are committed, the rest is generated)
 logs/*.log

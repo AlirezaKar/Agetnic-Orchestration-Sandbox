@@ -162,6 +162,29 @@ class Settings(BaseSettings):
     agent_max_search_results: int = 5
     fetch_max_chars: int = 4000
 
+    # ---------------------------------------------------- orchestration
+    # "auto" mode in the UI: a manager plans, specialist agents run in
+    # parallel, the manager writes the final answer.
+    orchestrator_enabled: bool = True
+    # heuristic = rules over the prompt (fast, free, deterministic)
+    # llm       = the model writes the plan (adaptive, costs one extra call)
+    orchestrator_planner: str = "heuristic"
+    # Empty = every agent may be selected. "search,data" restricts the roster.
+    orchestrator_agents: str = ""
+    # The manager's closing summary. Off = deterministic merge of agent answers
+    # (cheaper/faster, less fluent).
+    orchestrator_synthesize: bool = True
+    orchestrator_timeout: float = 120.0
+    orchestrator_max_parallel: int = 4
+    orchestrator_context_chars: int = 6000
+
+    # ------------------------------------------------------ attachments
+    files_dir: str = ".data/files"
+    files_max_mb: float = 10.0
+    files_max_chars: int = 200_000
+    # How much of a document is handed to an agent.
+    files_context_chars: int = 12_000
+
     # ------------------------------------------------------- validators
     @field_validator("custom_extra_headers", "custom_extra_body", mode="before")
     @classmethod
@@ -181,6 +204,15 @@ class Settings(BaseSettings):
         return value
 
     # ----------------------------------------------------------- helpers
+    @property
+    def orchestrator_roster(self) -> list[str]:
+        """Agents allowed to run, in display order."""
+        allowed = split_csv(self.orchestrator_agents)
+        known = ["document", "search", "data", "general"]
+        if not allowed:
+            return known
+        return [name for name in known if name in allowed]
+
     @property
     def is_auto_provider(self) -> bool:
         return (self.llm_provider or "").strip().lower() in ("", "auto")
@@ -222,6 +254,8 @@ class Settings(BaseSettings):
             "max_tokens": self.llm_max_tokens,
             "search_max_results": self.search_max_results,
             "agent_max_steps": self.agent_max_steps,
+            "orchestrator_planner": self.orchestrator_planner,
+            "orchestrator_agents": self.orchestrator_roster,
         }
 
 
