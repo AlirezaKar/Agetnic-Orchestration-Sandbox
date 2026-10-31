@@ -1,0 +1,194 @@
+"""Environment driven configuration.
+
+Everything that can be swapped at runtime (core model provider, custom provider,
+web-search backend) is configured here from the environment / ``.env`` file.
+
+There is intentionally NO mock/offline model: if no provider is configured the
+app refuses to start a model call and tells you exactly which env vars are
+missing, instead of silently answering with canned text.
+"""
+
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from typing import Any
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def split_csv(value: str | None) -> list[str]:
+    """Parse ``"a, b;c"`` into ``["a", "b", "c"]`` (order preserved, deduped)."""
+    if not value:
+        return []
+    parts = [p.strip() for p in value.replace(";", ",").split(",")]
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in parts:
+        if part and part.lower() not in seen:
+            seen.add(part.lower())
+            out.append(part)
+    return out
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # ---------------------------------------------------------------- app
+    app_name: str = "Agetnic Orchestration Sandbox"
+    host: str = "0.0.0.0"
+    port: int = 8000
+    reload: bool = False
+
+    # ------------------------------------------------------- core model
+    # Which provider is the brain of the backend. See app/llm/presets.py
+    llm_provider: str = "groq"
+    # Optional override applied to the *primary* provider only.
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
+    llm_model: str | None = None
+    # Ordered failover list, e.g. "gemini,openrouter". Each entry uses its own
+    # <PROVIDER>_API_KEY / <PROVIDER>_MODEL variables.
+    llm_fallbacks: str = ""
+    llm_temperature: float = 0.2
+    llm_max_tokens: int = 1024
+    llm_timeout: float = 60.0
+
+    # ------------------------------------------------- provider API keys
+    groq_api_key: str | None = None
+    groq_model: str | None = None
+
+    gemini_api_key: str | None = None
+    gemini_model: str | None = None
+
+    openrouter_api_key: str | None = None
+    openrouter_model: str | None = None
+
+    mistral_api_key: str | None = None
+    mistral_model: str | None = None
+
+    cloudflare_api_token: str | None = None
+    cloudflare_account_id: str | None = None
+    cloudflare_model: str | None = None
+
+    nvidia_api_key: str | None = None
+    nvidia_model: str | None = None
+
+    cerebras_api_key: str | None = None
+    cerebras_model: str | None = None
+
+    huggingface_api_key: str | None = None
+    huggingface_model: str | None = None
+
+    # Local, no key, no cloud account
+    ollama_base_url: str = "http://localhost:11434/v1"
+    ollama_model: str | None = None
+    lmstudio_base_url: str = "http://localhost:1234/v1"
+    lmstudio_model: str | None = None
+
+    # Any other OpenAI-compatible endpoint (self hosted vLLM, LiteLLM, a
+    # provider I have not presettled, an internal gateway, ...)
+    custom_label: str = "custom"
+    custom_base_url: str | None = None
+    custom_api_key: str | None = None
+    custom_model: str | None = None
+    # "bearer" (default) | "raw" (key sent as-is) | "none" (no auth header)
+    custom_auth_scheme: str = "bearer"
+    custom_auth_header: str = "Authorization"
+    # JSON objects, merged into headers / request body
+    custom_extra_headers: dict[str, Any] = {}
+    custom_extra_body: dict[str, Any] = {}
+
+    # ---------------------------------------------------------- search
+    # Primary search backend: ddg | wikipedia | tavily | serper | exa |
+    # google_cse | searxng
+    search_provider: str = "ddg"
+    # Optional ordered chain, overrides SEARCH_PROVIDER + SEARCH_FALLBACKS
+    search_providers: str = ""
+    search_fallbacks: str = "wikipedia"
+    search_max_results: int = 5
+    search_timeout: float = 20.0
+    search_user_agent: str = DEFAULT_UA
+    # Drop results whose URL repeats an already-seen host+path
+    search_dedupe: bool = True
+
+    duckduckgo_region: str = "wt-wt"
+    duckduckgo_safe_search: str = "moderate"
+    wikipedia_lang: str = "en"
+
+    tavily_api_key: str | None = None
+    serper_api_key: str | None = None
+    exa_api_key: str | None = None
+    google_cse_api_key: str | None = None
+    google_cse_id: str | None = None
+    searxng_base_urls: str = ""  # comma separated, e.g. http://localhost:8080
+    searxng_api_key: str | None = None
+    jina_api_key: str | None = None
+
+    # ----------------------------------------------------------- agent
+    agent_max_steps: int = 4
+    agent_max_search_results: int = 5
+    fetch_max_chars: int = 4000
+
+    # ------------------------------------------------------- validators
+    @field_validator("custom_extra_headers", "custom_extra_body", mode="before")
+    @classmethod
+    def _parse_json_object(cls, value: Any) -> Any:
+        if value in (None, "", b""):
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:  # pragma: no cover - guard
+                raise ValueError(f"expected a JSON object, got {value!r}: {exc}") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("expected a JSON object")
+            return parsed
+        return value
+
+    # ----------------------------------------------------------- helpers
+    @property
+    def llm_chain(self) -> list[str]:
+        chain = [self.llm_provider, *split_csv(self.llm_fallbacks)]
+        return split_csv(",".join(chain))
+
+    @property
+    def search_chain(self) -> list[str]:
+        if self.search_providers.strip():
+            return split_csv(self.search_providers)
+        return split_csv(",".join([self.search_provider, self.search_fallbacks]))
+
+    def public_summary(self) -> dict[str, Any]:
+        """Config summary safe to expose over HTTP (no secrets)."""
+        return {
+            "llm_chain": self.llm_chain,
+            "search_chain": self.search_chain,
+            "llm_model": self.llm_model,
+            "temperature": self.llm_temperature,
+            "max_tokens": self.llm_max_tokens,
+            "search_max_results": self.search_max_results,
+            "agent_max_steps": self.agent_max_steps,
+        }
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
+
+
+def reset_settings_cache() -> None:
+    """Used by tests after monkeypatching the environment."""
+    get_settings.cache_clear()
