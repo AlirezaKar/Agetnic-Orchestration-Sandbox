@@ -26,6 +26,7 @@ import json
 import sys
 from pathlib import Path
 
+from app import logs
 from app.config import get_settings
 from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
@@ -130,6 +131,7 @@ async def run_query(query: str, provider: str | None, max_results: int, as_json:
 
 
 def main() -> int:
+    logs.setup_logging()
     parser = argparse.ArgumentParser(description="Verify the configured web-search backends.")
     parser.add_argument("-q", "--query", default="python asyncio tutorial")
     parser.add_argument("--provider", help="pin one backend instead of using the chain")

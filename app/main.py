@@ -13,6 +13,7 @@ points at assets from a previous version.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import logs
 from app.agent import WebSearchAgent
 from app.config import get_settings
 from app.llm.base import ProviderError
@@ -36,8 +38,7 @@ from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
 from app.search.registry import build_search_chain, describe_search_providers
-
-VERSION = "0.4.0"
+from app.version import VERSION
 
 STATIC_DIR = Path(__file__).parent / "static"
 ASSETS_DIR = STATIC_DIR / "assets"
@@ -57,11 +58,34 @@ API_ROUTES = [
     "GET  /assets/…                   (css + js)",
 ]
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Start logging for plain `uvicorn app.main:app` too (run.py configures first)."""
+    summary = logs.setup_logging()
+    logs.install_exception_hooks()
+    logs.enable_faulthandler()
+    if not logs.startup_recorded():  # run.py already recorded this start
+        logs.record_startup(VERSION, start="uvicorn app.main:app", port=get_settings().port)
+    logs.get_logger("api").info(
+        "ready version=%s logs=%s writable=%s routes=%d",
+        VERSION,
+        summary["dir"],
+        summary["writable"],
+        len(API_ROUTES),
+    )
+    yield
+    logs.get_logger("api").info("shutdown version=%s", VERSION)
+
+
 app = FastAPI(
     title="Agetnic Orchestration Sandbox",
     version=VERSION,
     description="Pluggable free model providers + web search, no mock model.",
+    lifespan=lifespan,
 )
+
+# every request: one line in logs/requests.log, timings, x-request-id
+app.add_middleware(logs.RequestLoggingMiddleware)
 
 router = APIRouter()
 
@@ -137,7 +161,8 @@ async def version(request: Request) -> dict[str, Any]:
         "version": VERSION,
         "ui_url": str(request.base_url).rstrip("/") + "/",
         "api_prefixes": ["", "/api"],
-        "log": f"log/v{VERSION}.md",
+        "changelog": f"logs/changelog/v{VERSION}.md",
+        "logs": str(logs.log_dir()),
     }
 
 
@@ -206,8 +231,10 @@ async def provider_models(name: str) -> Any:
         except ProviderError:  # pragma: no cover - listing already succeeded
             recommended = []
     except ConfigurationError as exc:
+        logs.get_logger("api").warning("provider %s not configured: %s", name, exc)
         return _error(400, "configuration", exc)
     except ProviderError as exc:
+        logs.get_logger("api").warning("provider %s failed: %s", name, exc)
         return _error(502, "provider", exc)
     return {
         "provider": name.lower(),
@@ -239,6 +266,7 @@ async def search(request: SearchRequest) -> Any:
         chain = build_search_chain(settings)
         response = await chain.search(request.query, request.max_results)
     except SearchError as exc:
+        logs.get_logger("search").warning("search failed [%s]: %s", exc.provider, exc)
         return _error(502, "search", exc)
     return response.to_dict()
 
@@ -298,8 +326,10 @@ async def chat(request: ChatRequest) -> Any:
             allow_search=request.allow_search,
         )
     except ConfigurationError as exc:
+        logs.get_logger("chat").warning("chat rejected, no provider: %s", exc)
         return _error(400, "configuration", exc)
     except ProviderError as exc:
+        logs.get_logger("chat").warning("chat failed [%s]: %s", exc.provider, exc)
         return _error(502, "provider", exc)
     return result.to_dict()
 
@@ -389,6 +419,26 @@ async def api_root(request: Request) -> dict[str, Any]:
         "ui": str(request.base_url).rstrip("/"),
         "routes": API_ROUTES,
     }
+
+
+# ---------------------------------------------------------- crash capture
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> Response:
+    """Never let a traceback disappear into the terminal — it goes to error.log."""
+    request_id = request.headers.get("x-request-id") or "-"
+    logs.get_logger("crash").exception(
+        "unhandled error on %s %s req=%s", request.method, request.url.path, request_id
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal",
+            "message": f"{type(exc).__name__}: {exc}",
+            "request_id": request_id,
+            "hint": "The full traceback is in logs/error.log (python -m scripts.logs errors).",
+        },
+        headers={"x-request-id": request_id},
+    )
 
 
 # ------------------------------------------------------- helpful 404s

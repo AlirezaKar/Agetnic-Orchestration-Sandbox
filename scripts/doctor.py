@@ -21,6 +21,7 @@ import os
 import sys
 from pathlib import Path
 
+from app import logs
 from app.agent import WebSearchAgent
 from app.config import get_settings
 from app.llm.base import ProviderError
@@ -29,6 +30,7 @@ from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
 from app.search.registry import build_search_chain
+from app.version import VERSION
 
 ARTIFACTS = Path("artifacts")
 OK, BAD, SKIP = "PASS", "FAIL", "SKIP"
@@ -122,6 +124,11 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
+    logs.setup_logging()
+    logs.install_exception_hooks()
+    logs.record_startup(VERSION, start="scripts.doctor", argv=sys.argv)
+    log = logs.get_logger("doctor")
+
     settings = get_settings()
     print("Agetnic Orchestration Sandbox — doctor")
     print("=" * 72)
@@ -161,6 +168,13 @@ def main() -> int:
     if not args.search_only and not model_ok:
         print("Model failed. Fill LLM_PROVIDER + key in .env "
               "(python -m scripts.check_providers --links shows every free option).")
+
+    log.info("doctor finished model_ok=%s search_ok=%s agent_ok=%s", model_ok, search_ok, agent_ok)
+    if not model_ok:
+        log.warning("doctor: model check failed — see logs/error.log and `python -m scripts.logs errors`")
+    if not search_ok:
+        log.warning("doctor: search check failed")
+    print(f"  logs: {logs.log_dir()}  (python -m scripts.logs errors)")
 
     ARTIFACTS.mkdir(exist_ok=True)
     (ARTIFACTS / "doctor.json").write_text(json.dumps(results, indent=2), encoding="utf-8")

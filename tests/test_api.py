@@ -39,10 +39,16 @@ class ApiTests(unittest.TestCase):
             self.assertIn(marker, response.text, path)
 
     def test_version_endpoint_matches_the_page(self):
+        from pathlib import Path
+
         for path in ("/version", "/api/version"):
             payload = self.client.get(path).json()
             self.assertEqual(payload["version"], VERSION, path)
-            self.assertTrue(payload["log"].endswith(f"v{VERSION}.md"), path)
+            self.assertTrue(payload["changelog"].endswith(f"v{VERSION}.md"), path)
+            self.assertTrue(payload["logs"].endswith("logs"), path)
+            # the advertised changelog must exist, not just look right
+            root = Path(__file__).resolve().parents[1]
+            self.assertTrue((root / payload["changelog"]).is_file(), payload["changelog"])
         self.assertIn(f'content="{VERSION}"', self.client.get("/").text)
 
     def test_index_is_never_cached(self):
@@ -192,6 +198,13 @@ class FrontendContractTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         cls.index = (root / "app/static/index.html").read_text(encoding="utf-8")
         cls.app_js = (root / "app/static/assets/js/app.js").read_text(encoding="utf-8")
+
+    def test_version_module_is_the_only_source(self):
+        from app.version import VERSION as CANONICAL
+
+        self.assertEqual(CANONICAL, VERSION)
+        self.assertIn(f'content="{CANONICAL}"', self.index)
+        self.assertNotIn("0.4.", self.index)
 
     def test_assets_are_referenced_relatively(self):
         # absolute "/assets/..." breaks under any proxy prefix -> unstyled page

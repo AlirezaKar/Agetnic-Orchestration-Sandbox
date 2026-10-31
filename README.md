@@ -38,8 +38,9 @@ python3 run.py                    # UI + API on http://localhost:8000  (add --re
 
 `run.py` is the supported entry point: it starts **one** process that serves both the page
 and the API, prints the URLs/routes, warns about a missing `.env` or missing assets, and
-appends a startup line to `log/runtime/v<version>.log`. Plain
-`uvicorn app.main:app --port 8000` works too.
+starts the logs described in §8 (`logs/agetnic.log`, `error.log`, `requests.log`,
+`terminal.log`, `process.log`). Plain `uvicorn app.main:app --port 8000` works too — it
+configures the same files on startup.
 
 Open <http://localhost:8000> — the **test harness** (the original PR #1 UI, rebuilt on this
 API): mode selector (Agent / Answer only / Search only), search-backend list, diagnostics
@@ -346,12 +347,13 @@ app/
     base.py            SearchResult / SearchResponse / SearchError
   agent.py             tool-calling loop + trace + sources
   main.py              FastAPI routes (served at / and /api)
-  applog.py            per-version runtime log helper (log/runtime/v<version>.log)
+  logs.py              LOGGING: rotating files, redaction, request lines, crash capture
   static/index.html    test harness (modes, diagnostics, history, inspector)
   static/assets/       the original dark console CSS + app.js
-run.py                 launcher: preflight + banner + startup log line
-log/                   one changelog per version (v0.4.0.md, …) + runtime/ logs
+run.py                 launcher: preflight + banner + terminal mirror + startup record
+logs/                  runtime logs (git-ignored) + logs/changelog/ release notes
 scripts/
+  logs.py              read them: list | tail -f | errors | requests | process
   doctor.py            model + search + optional agent, one command
   check_providers.py   table, links, --ping, --models
   check_search.py      diagnose backends, run a real query
@@ -372,24 +374,56 @@ tests/                 offline tests (MockTransport, no keys)
 | `all search backends failed` | No network / all keys missing. `python -m scripts.check_search --all` |
 | `SearXNG did not return JSON` | Enable `search.formats: [html, json]` in `settings.yml` |
 | Ollama `network error` | `ollama serve` is not running, or `OLLAMA_BASE_URL` is wrong |
-| `{"detail":"Not Found"}` on send | You were on an older page that posted to a path this app did not serve. Reload: the composer must read `· v0.4.0`. Both `/chat` and `/api/chat` answer now |
+| `{"detail":"Not Found"}` on send | You were on an older page that posted to a path this app did not serve. Reload: the composer must read `· v0.5.0`. Both `/chat` and `/api/chat` answer now |
 | Buttons dead, modes stacked inline | CSS/JS did not load (stale `/assets/...` URLs). Hard-reload; a red banner now says so when it happens |
-| Composer shows no `· v0.4.0` | The browser cached an old page. `Ctrl+Shift+R`, and check the server sends `Cache-Control: no-store` |
+| Composer shows no `· v0.5.0` | The browser cached an old page. `Ctrl+Shift+R`; the server sends `Cache-Control: no-store` |
+| Anything else | `python -m scripts.logs errors` (tracebacks), `... requests --status 5xx`, `... tail -f` |
 
 ## 8. Logs
 
-- `log/v<version>.md` — one changelog per version (what broke, what changed, how to verify),
-  indexed in [`log/README.md`](log/README.md). Versions that were superseded inside a
-  working tree still get a file, so the series has no silent gaps.
-- `log/runtime/v<version>.log` — one file per version, appended by `run.py`:
-  UTC timestamp, version, bind address, pid, and preflight problem count.
-- `tests/test_logs.py` fails if the current `VERSION` has no changelog or the index
-  forgets a release.
+Everything goes to `logs/` (override with `LOG_DIR`). Files are created on start, rotate at
+5 MB × 5, and are git-ignored — only `logs/README.md` and `logs/changelog/` are committed.
+
+| File | What it holds |
+|---|---|
+| `agetnic.log` | everything at `LOG_LEVEL`+, every line carries the `pid` and logger name |
+| `error.log` | warnings, errors and **full tracebacks** — start here when something breaks |
+| `requests.log` | one line per HTTP call: method, path, status, ms, request id, client, bytes |
+| `terminal.log` | mirror of stdout/stderr — what the terminal window printed, uvicorn included |
+| `process.log` | one JSON line per start: pid, ppid, cwd, argv, python, platform, git commit, port, preflight problems |
+| `crash.log` | `faulthandler` dump for a segfault or hard abort |
+| `archive/` | rotated files (`agetnic.log.1`, `terminal-20261031-141702.log`, …) |
 
 ```bash
-ls log/ log/runtime/
-cat log/runtime/v0.4.0.log
+python3 run.py                       # writes the files above
+python -m scripts.logs list          # files, sizes, last write
+python -m scripts.logs tail -f       # follow the app log
+python -m scripts.logs tail error -n 100
+python -m scripts.logs errors        # records with tracebacks
+python -m scripts.logs requests --status 5xx --slowest 5
+python -m scripts.logs process       # every start: pid, port, cwd, git
 ```
+
+A line looks like:
+
+```
+2026-10-31 14:27:19 WARNING  pid=1803 agetnic.chat: chat rejected, no provider: No model provider is configured. …
+2026-10-31 14:27:19 WARNING  pid=1803 agetnic.requests: POST /api/chat -> 400 7.9ms req=970f99412b client=127.0.0.1:52144 bytes=245
+```
+
+The `req=` id is returned in the `x-request-id` response header and in every JSON 500, so a
+number from the browser leads straight to its lines. An unhandled exception answers
+`500 {"error":"internal", "request_id": …}` and writes the traceback to `error.log`.
+
+**Secrets are redacted** before writing: env values matching `*_API_KEY`, `*_TOKEN`,
+`*_SECRET`, `*_PASSWORD`, plus `sk-…`, `gsk_…`, `AIza…`, `Bearer …` and `api_key=…` shapes
+become `«redacted»` (tracebacks included). Prompts/answers are not logged at `INFO`.
+
+Tuning: `LOG_LEVEL` (default `INFO`), `LOG_ROTATE_MB` (5), `LOG_BACKUPS` (5), `LOG_DIR`.
+One run can override everything: `python3 run.py --log-level DEBUG --log-dir /tmp/agetnic`.
+
+`logs/changelog/` holds release notes, one markdown file per version, indexed in
+[`logs/changelog/README.md`](logs/changelog/README.md) — those are notes, not logs.
 
 ## 9. Design notes
 
@@ -402,3 +436,6 @@ cat log/runtime/v0.4.0.log
   caller (`errors[]`, `attempts[]`), so the agent can report a failed search truthfully.
 - **Docs are tested.** `tests/test_docs.py` asserts every provider in code appears in
   `.env.example` with its env vars and links, and that no secret-looking value is committed.
+- **Logs are part of the product.** A request that fails must leave a line you can find:
+  status, duration, request id, client, and a traceback in `error.log` when it was a crash.
+  Redaction runs on the way out, so debugging never means pasting a key into a chat.
