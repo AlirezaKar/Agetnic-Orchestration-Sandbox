@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="agetnic-version" content="0.6.0" />
+  <meta name="agetnic-version" content="0.7.0" />
   <title>Agetnic Orchestration Sandbox — Test Harness</title>
   <!-- Relative asset URLs: the harness keeps working when the app is mounted
        under a sub-path (/ui/, /sandbox/, a proxy prefix). The ?v= query busts
        stale caches after an upgrade. -->
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.6.0" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.6.0" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.7.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.7.0" />
   <style>
     /* Inline fallback: the connection banner must be readable even if the
        stylesheets 404 (that is exactly when it matters). */
@@ -72,6 +72,12 @@
       </section>
 
       <section class="panel">
+        <h2>Orchestrator <button id="btn-refresh-agents" class="ghost-btn" title="Refresh">⟳</button></h2>
+        <div id="agents-summary" class="diag-summary muted">Loading agent roster…</div>
+        <div id="agents-list" class="agent-list"></div>
+      </section>
+
+      <section class="panel">
         <h2>Diagnostics <button id="btn-diag" class="ghost-btn">Run</button></h2>
         <div id="diag-summary" class="diag-summary muted">Model ping + every search backend. Not run yet.</div>
       </section>
@@ -97,30 +103,37 @@
         <div class="empty-state" id="empty-state">
           <h2>Orchestration test console</h2>
           <p>
-            Ask anything. In <strong>Agent</strong> mode the model decides when to call
-            <code>web_search</code> or <code>fetch_url</code>, and every step is traced.
-            <strong>Answer only</strong> disables tools; <strong>Search only</strong> runs the
-            search chain without a model.
+            <strong>Auto</strong> is the full architecture: a manager reads the request, a
+            planner picks the agents (document · web search · data · general), they run
+            <strong>in parallel</strong>, and the manager writes one answer from their reports.
+            Attach a file and the document agent joins in.
           </p>
           <p class="muted">
-            Switch the brain with <code>LLM_PROVIDER</code> in <code>.env</code> (free providers
-            only) and the search chain with <code>SEARCH_PROVIDERS</code>. Model ids resolve
-            automatically, so retired ids stop breaking the backend.
+            <strong>Agent</strong> is the single-model tool loop, <strong>Answer only</strong>
+            disables tools, <strong>Search only</strong> runs the search chain without a model.
+            Switch the brain and the planning style with <code>LLM_PROVIDER</code> /
+            <code>ORCHESTRATOR_PLANNER</code> in <code>.env</code>.
           </p>
           <div class="suggestions">
+            <button class="chip" data-prompt="Average revenue per month in the attached CSV, and which month grew fastest?">📊 Analyse a CSV</button>
             <button class="chip" data-prompt="What changed in the latest Python release? Cite your sources.">🐍 Latest Python + sources</button>
             <button class="chip" data-prompt="Search for the newest free LLM APIs and compare their rate limits.">🔎 Research + compare</button>
             <button class="chip" data-prompt="Explain how retrieval-augmented generation works, in simple terms.">💬 General knowledge</button>
-            <button class="chip" data-prompt="Which search backends in this project need a server? Answer from your knowledge.">🧭 Backend knowledge</button>
           </div>
         </div>
       </div>
 
       <!-- Composer -->
-      <footer class="composer">
-        <textarea id="prompt" rows="2" placeholder="Ask anything… (Enter to send · Shift+Enter for a new line)"></textarea>
+      <footer class="composer" id="composer">
+        <div id="attachments" class="attachments" hidden>
+          <span class="att-label">Attached</span>
+          <div id="att-list" class="att-list"></div>
+        </div>
+        <textarea id="prompt" rows="2" placeholder="Ask anything… (Enter to send · Shift+Enter for a new line · drop a file for the document agent)"></textarea>
         <div class="composer-actions">
-          <span class="muted" id="composer-mode-label">Mode: Agent</span>
+          <span class="muted" id="composer-mode-label">Mode: Auto</span>
+          <input type="file" id="file-input" multiple hidden />
+          <button id="btn-attach" class="ghost-btn" title="Attach a document, CSV, JSON, DOCX or PDF">📎 Attach</button>
           <button id="btn-clear" class="ghost-btn">Clear session</button>
           <button id="btn-send" class="primary-btn">Send ▸</button>
         </div>
@@ -153,8 +166,8 @@
         <div>
           <h2>Providers — free options with links</h2>
           <p class="modal-sub">
-            Set <code>LLM_PROVIDER</code> + its key in <code>.env</code>. Model ids resolve
-            automatically (<code>LLM_MODEL=auto</code>); pin one only if you need to.
+            Set <code>LLM_PROVIDER</code> (or <code>auto</code>) + its key and model in
+            <code>.env</code>. The model you write is the model that is called.
           </p>
         </div>
         <button id="btn-close-providers" class="ghost-btn">✕</button>
@@ -163,6 +176,6 @@
     </div>
   </div>
 
-  <script src="assets/js/app.js?v=0.6.0" defer></script>
+  <script src="assets/js/app.js?v=0.7.0" defer></script>
 </body>
 </html>

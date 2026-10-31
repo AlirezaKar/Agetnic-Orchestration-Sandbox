@@ -11,6 +11,9 @@ A small backend skeleton where **the model is pluggable** (free providers only) 
 - Web search: keyless backends that need **no background server** (DuckDuckGo, Wikipedia),
   free-key backends that need no server either (Tavily, Serper, Exa, Google CSE), and
   SearXNG only as an opt-in self-hosted option.
+- **Auto mode**: a manager plans the request, runs the needed agents (document ·
+  web search · data · general) **in parallel**, and writes one answer from their
+  reports. Attach a file and the document agent reads it.
 - Built-in way to **verify** all of it: `python -m scripts.doctor`, `GET /diagnose`,
   `GET /search/diagnose`, plus an offline test suite.
 
@@ -39,6 +42,9 @@ python -m scripts.start           # checks, then the server on http://localhost:
 | 2 | `python -m scripts.doctor` | does the model actually answer, does search actually answer |
 | 3 | `python run.py` | uvicorn serving the UI **and** the API on one port |
 
+`--agent` and `--orchestrate` add optional round trips to the doctor step:
+the single-agent loop, and the manager (plan → parallel agents → wrap-up).
+
 If a check fails it stops before starting the server (add `--force` to start anyway,
 `--check-only` to stop after the checks, `--no-checks` to skip them).
 The individual commands still work on their own:
@@ -47,19 +53,22 @@ The individual commands still work on their own:
 python -m scripts.check_providers                            # table + what is missing
 python -m scripts.check_providers --provider groq --models    # live ids, best first
 python -m scripts.doctor --agent                              # include a full agent round trip
+python -m scripts.doctor --orchestrate                        # include a manager run (plan + agents)
 python -m scripts.check_search -q "python 3.13 release notes"
 python3 run.py --reload                                       # server only
 ```
 
 `run.py` is the supported entry point: it starts **one** process that serves both the page
 and the API, prints the URLs/routes, warns about a missing `.env` or missing assets, and
-starts the logs described in §8 (`logs/agetnic.log`, `error.log`, `requests.log`,
+starts the logs described in §9 (`logs/agetnic.log`, `error.log`, `requests.log`,
 `terminal.log`, `process.log`). Plain `uvicorn app.main:app --port 8000` works too — it
 configures the same files on startup.
 
 Open <http://localhost:8000> — the **test harness** (the original PR #1 UI, rebuilt on this
-API): mode selector (Agent / Answer only / Search only), search-backend list, diagnostics
-panel, run history, trace inspector, and a providers modal with every key/model link.
+API): mode selector (**Auto** / Agent / Answer only / Search only), 📎 attach (or drop a
+file) for the document agent, a manager-plan panel with one card per agent, search-backend
+list, diagnostics panel, run history, trace inspector, and a providers modal with every
+key/model link. Auto mode is described in §5.
 
 ```bash
 python -m unittest discover -s tests -v     # offline, no keys, no network
@@ -325,7 +334,97 @@ which is the intended, non-silent behaviour.
 
 ---
 
-## 5. HTTP API
+## 5. Manager orchestration (Auto mode)
+
+The single-agent loop in §6 is one model with two tools. Auto mode adds a lead:
+
+```
+                     ┌── Document analyst ── attachments, quotes ──┐
+prompt ─► MANAGER ─► PLANNER ─┼── Web researcher ──── URLs, sources ─┼─► MANAGER ─► answer
+                     ├── Data analyst ────── exact figures ──────┤   (synthesis)
+                     └── Generalist ──────── own knowledge ──────┘
+                              all selected agents run in parallel
+```
+
+| Piece | Where | What it decides |
+|---|---|---|
+| Manager | `app/orchestrator/manager.py` | plan → parallel run → one answer (+ sources, errors, timings) |
+| Planner | `app/orchestrator/planner.py` | which agents, what each is told, and why |
+| Executor | `app/orchestrator/executor.py` | `asyncio.gather` + semaphore + per-agent timeout; failures stay isolated |
+| Agents | `app/orchestrator/agents.py` | document / search / data / general, one signature, one result type |
+| Attachments | `app/orchestrator/files.py` | upload decoding, extraction, on-disk store |
+
+### What a plan looks like
+
+```bash
+curl -s -X POST localhost:8000/orchestrate -H 'content-type: application/json' \
+  -d '{"message":"Average revenue per month in the attached CSV, and what changed in the latest Python release?"}' \
+  | python -m json.tool
+```
+
+```json
+{
+  "answer": "…the manager's written answer…",
+  "mode": "auto",
+  "orchestration": {
+    "strategy": "heuristic", "synthesized": true, "parallel_ms": 2140, "latency_ms": 3900,
+    "plan": {
+      "intent": "research-analysis",
+      "summary": "Document analyst, Data analyst, Web researcher work in parallel (1 file(s)), then the manager merges their answers.",
+      "steps": [{"agent": "document", "task": "…", "reason": "1 attachment(s) provided"}, "…"],
+      "agents": ["document", "data", "search"], "parallel": true
+    },
+    "agents": [{"agent": "data", "status": "ok", "answer": "…", "data": {"tables": ["…"]}, "latency_ms": 900}]
+  },
+  "sources": ["https://…"]
+}
+```
+
+### Adaptive, not LLM-only
+
+The user-visible trade-off is cost and latency, so a model is used only where it
+earns its keep:
+
+| Stage | Default | Optional |
+|---|---|---|
+| plan | heuristic rules over wording, attachments, numbers — free, ~0 ms | `ORCHESTRATOR_PLANNER=llm` → one JSON plan from the model, with automatic fallback if it is unusable |
+| agents | one call each, **in parallel** (wall clock ≈ the slowest, not the sum) | `ORCHESTRATOR_MAX_PARALLEL`, `ORCHESTRATOR_TIMEOUT` |
+| wrap-up | one synthesis call | `ORCHESTRATOR_SYNTHESIZE=false` → deterministic labelled merge |
+
+Rules of thumb in the heuristic planner:
+
+- any attachment → **document**; a tabular attachment, analysis wording, or ≥3 numbers → **data**
+- freshness/source wording ("latest", "news", "price", "cite", "source") → **search**
+- nothing applies, or the request asks to explain/compare/design → **general**
+- specialists present *and* reasoning asked for → generalist joins; a plain lookup stays one agent
+- `ORCHESTRATOR_AGENTS` is the roster; an agent missing from it is never planned
+
+Nothing breaks without a model: the document agent returns the retrieved
+excerpts, the data agent returns the computed figures, and the manager merges
+them with a note saying synthesis was skipped. `/chat` still fails loudly when
+no provider is configured, since it has nothing to fall back on.
+
+### Attachments
+
+`POST /files {"name", "data_b64"}` (the UI base64-encodes what the browser
+already has, so no multipart dependency) or `{"name", "text"}`.
+
+| Type | How |
+|---|---|
+| `.txt .md .csv .tsv .json .yaml .xml .html` + code | decoded as text; CSV/TSV/JSON also parsed into rows + header |
+| `.docx` | Word is a zip → `word/document.xml` |
+| `.xlsx` | `xl/worksheets` + `xl/sharedStrings` |
+| `.pdf` | needs `pip install pypdf`; otherwise **415 with that instruction** |
+| `.doc` | rejected: save as `.docx` or `.txt` |
+
+Stored under `FILES_DIR` (`.data/files`, git-ignored): text + JSON sidecar, so an
+upload survives a restart. `GET /files` lists, `DELETE /files/{id}` removes.
+Limits: `FILES_MAX_MB=10`, `FILES_MAX_CHARS=200000` (truncation is reported),
+`FILES_CONTEXT_CHARS=12000` of excerpts per document prompt.
+
+---
+
+## 6. HTTP API
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -337,6 +436,11 @@ which is the intended, non-silent behaviour.
 | `POST` | `/search` | direct search (no model), optional `provider` |
 | `GET` | `/search/diagnose?q=&all=` | ping each backend, per-backend pass/fail + latency |
 | `POST` | `/chat` | agent loop: model + `web_search`/`fetch_url` tools, returns trace |
+| `POST` | `/orchestrate` | **Auto mode**: manager plans, agents run in parallel, manager synthesises (§5) |
+| `POST` | `/files` | upload an attachment (`{name, data_b64}` or `{name, text}`), returns its summary |
+| `GET` | `/files` | attachments currently in the store |
+| `DELETE` | `/files/{id}` | remove one attachment |
+| `GET` | `/agents` | agent roster, planner mode, synthesis flag, readiness |
 | `GET` | `/diagnose` | model ping + search pings + hints |
 | `GET` | `/version` | app version (also in `/health` and in the page `<meta>`) |
 
@@ -352,11 +456,13 @@ curl -s -X POST localhost:8000/chat -H 'content-type: application/json' \
 ```
 
 Errors are structured, never silent: `400 configuration` (missing env, with `missing` list),
-`502 provider` (HTTP status + hint), `502 search` (per-backend error + hint), `422` validation.
+`502 provider` (HTTP status + hint), `502 search` (per-backend error + hint), `415/413` for an
+unreadable or oversized attachment (with a `hint`), `503` when the orchestrator is disabled,
+`422` validation.
 
 ---
 
-## 6. Layout
+## 7. Layout
 
 ```
 app/
@@ -373,11 +479,18 @@ app/
     registry.py        ordered chain, dedupe, empty-vs-error semantics
     base.py            SearchResult / SearchResponse / SearchError
   agent.py             tool-calling loop + trace + sources
+  orchestrator/
+    manager.py         plan -> parallel agents -> synthesis, totals, errors
+    planner.py         heuristic + optional LLM planner, the agent registry
+    executor.py        asyncio.gather + semaphore + timeout, failures isolated
+    agents.py          document / search / data / general workers + retrieval
+    files.py           upload decoding, extraction (txt/csv/json/docx/xlsx/pdf), store
   main.py              FastAPI routes (served at / and /api)
   logs.py              LOGGING: rotating files, redaction, request lines, crash capture
   static/index.html    test harness (modes, diagnostics, history, inspector)
   static/assets/       the original dark console CSS + app.js
 run.py                 server launcher: preflight + banner + logs + startup record
+.data/files/           uploaded attachments (runtime, git-ignored)
 logs/                  runtime logs (git-ignored) + logs/changelog/ release notes
 scripts/
   start.py             checks then server: the one command to run
@@ -388,7 +501,7 @@ scripts/
 tests/                 offline tests (MockTransport, no keys)
 ```
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -409,7 +522,7 @@ tests/                 offline tests (MockTransport, no keys)
 | Composer shows no `· v0.5.0` | The browser cached an old page. `Ctrl+Shift+R`; the server sends `Cache-Control: no-store` |
 | Anything else | `python -m scripts.logs errors` (tracebacks), `... requests --status 5xx`, `... tail -f` |
 
-## 8. Logs
+## 9. Logs
 
 Everything goes to `logs/` (override with `LOG_DIR`). Files are created on start, rotate at
 5 MB × 5, and are git-ignored — only `logs/README.md` and `logs/changelog/` are committed.
@@ -460,7 +573,7 @@ skips the model ping the same way.
 `logs/changelog/` holds release notes, one markdown file per version, indexed in
 [`logs/changelog/README.md`](logs/changelog/README.md) — those are notes, not logs.
 
-## 9. Design notes
+## 10. Design notes
 
 - **One dialect, many vendors.** OpenAI-compatible chat completions is the narrow waist;
   presets only carry endpoint/auth/model/link differences. Adding a provider is a dict

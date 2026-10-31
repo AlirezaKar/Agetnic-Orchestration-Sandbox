@@ -6,10 +6,12 @@ Checks, in order:
   2. does the core model answer (tiny completion)
   3. does every search backend answer (real query)
   4. optionally: a full agent run (model + web search + citations)
+  5. optionally: a manager orchestration run (planner + agents in parallel)
 
     python -m scripts.doctor
     python -m scripts.doctor --search-only
     python -m scripts.doctor --agent -q "latest python release" --json
+    python -m scripts.doctor --orchestrate
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from app.agent import WebSearchAgent
 from app.config import get_settings
 from app.llm.base import ProviderError
 from app.llm.registry import ConfigurationError, build_chain, describe_providers
+from app.orchestrator import Manager
 from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
@@ -122,11 +125,51 @@ async def check_agent(settings, question: str) -> tuple[bool, dict]:
     return bool(result.answer), result.to_dict()
 
 
+async def check_orchestrator(settings, question: str) -> tuple[bool, dict]:
+    print("\n4) manager orchestration")
+    if not settings.orchestrator_enabled:
+        line(SKIP, "orchestrator", "disabled (ORCHESTRATOR_ENABLED=false)")
+        return "skipped", skipped("the orchestrator is disabled")
+    manager = Manager(
+        settings=settings,
+        model_chain=build_chain(settings),
+        search_chain=build_search_chain(settings),
+    )
+    try:
+        result = await manager.run(question)
+    except (ConfigurationError, ProviderError) as exc:
+        line(BAD, "orchestrator", str(exc))
+        return False, {}
+    plan = result.plan
+    line(OK if result.results else BAD, "plan", f"{plan.intent} · {', '.join(plan.agents) or 'none'}")
+    for outcome in result.results:
+        tone = OK if outcome.status == "ok" else (SKIP if outcome.status == "skipped" else BAD)
+        detail = f"{outcome.status} · {outcome.latency_ms} ms"
+        if outcome.status == "failed" and outcome.error:
+            detail = outcome.error
+        line(tone, outcome.agent, detail)
+    line(
+        OK if result.synthesized else SKIP,
+        "wrap-up",
+        f"synthesised by {result.provider}/{result.model}" if result.synthesized
+        else "deterministic merge (no model, or ORCHESTRATOR_SYNTHESIZE=false)",
+    )
+    line(OK if result.latency_ms else SKIP, "timing", f"{result.parallel_ms} ms parallel · {result.latency_ms} ms total")
+    print("\n  answer:\n")
+    print("    " + (result.answer or "(empty)").replace("\n", "\n    ")[:1500])
+    return bool(result.answer), result.to_dict()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify model + search configuration end to end.")
     parser.add_argument("-q", "--query", default="python asyncio tutorial", help="search query for the checks")
     parser.add_argument("--search-only", action="store_true")
     parser.add_argument("--agent", action="store_true", help="also run the full agent loop")
+    parser.add_argument(
+        "--orchestrate",
+        action="store_true",
+        help="also run the manager: plan, agents in parallel, wrap-up",
+    )
     parser.add_argument("--question", default=None, help="question for the agent run")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -159,6 +202,7 @@ def main() -> int:
         "model": skipped("not requested (--search-only)"),
         "search": [],
         "agent": skipped("not requested; pass --agent for a full model+search round trip"),
+        "orchestrator": skipped("not requested; pass --orchestrate for a manager run"),
     }
     model_ok = True
     if not args.search_only:
@@ -176,6 +220,13 @@ def main() -> int:
         )
         results["agent"] = agent_data
 
+    orchestrator_ok = "skipped"
+    if args.orchestrate:
+        orchestrator_ok, orchestrator_data = asyncio.run(
+            check_orchestrator(settings, args.question or "What is the latest Python release? Cite sources.")
+        )
+        results["orchestrator"] = orchestrator_data
+
     print("\n" + "=" * 72)
     # An empty chain means the model check cannot pass, even under --search-only.
     model_ok = model_ok if not args.search_only else (bool(build_chain(settings)) or "skipped")
@@ -183,6 +234,7 @@ def main() -> int:
         "model_ok": model_ok,
         "search_ok": search_ok,
         "agent_ok": agent_ok,
+        "orchestrator_ok": orchestrator_ok,
     }
     print(f"summary: {json.dumps(summary)}")
     if agent_ok == "skipped":
@@ -198,7 +250,13 @@ def main() -> int:
         print("    GROQ_API_KEY=gsk_…   GROQ_MODEL=openai/gpt-oss-120b")
         print("    (model ids: python -m scripts.check_providers --provider groq --models)")
 
-    log.info("doctor finished model_ok=%s search_ok=%s agent_ok=%s", model_ok, search_ok, agent_ok)
+    log.info(
+        "doctor finished model_ok=%s search_ok=%s agent_ok=%s orchestrator_ok=%s",
+        model_ok,
+        search_ok,
+        agent_ok,
+        orchestrator_ok,
+    )
     if not model_ok:
         log.warning("doctor: model check failed — see logs/error.log and `python -m scripts.logs errors`")
     if not search_ok:
@@ -210,7 +268,12 @@ def main() -> int:
     if args.json:
         print(json.dumps(results, indent=2))
 
-    ok = search_ok and (args.search_only or model_ok) and (agent_ok is not False)
+    ok = (
+        search_ok
+        and (args.search_only or model_ok)
+        and (agent_ok is not False)
+        and (orchestrator_ok is not False)
+    )
     return 0 if ok else 1
 
 

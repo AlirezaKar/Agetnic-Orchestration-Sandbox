@@ -4,4 +4,4 @@
 page's ``?v=`` cache-bust and the changelog file names all come from here.
 """
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"

@@ -37,6 +37,14 @@ from app.llm.registry import (
 from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
+from app.orchestrator import (
+    AttachmentStore,
+    FileError,
+    Manager,
+    agent_catalogue,
+    catalogue as agent_catalogue_list,
+    decode_payload,
+)
 from app.search.registry import build_search_chain, describe_search_providers
 from app.version import VERSION
 
@@ -53,6 +61,10 @@ API_ROUTES = [
     "POST /search",
     "GET  /search/diagnose",
     "POST /chat",
+    "POST /orchestrate                (manager + parallel agents)",
+    "POST /files                      (attachment upload)",
+    "GET  /files                      (attachments in the store)",
+    "GET  /agents                     (agent catalogue + planner mode)",
     "GET  /diagnose",
     "GET  /                           (test harness UI)",
     "GET  /assets/…                   (css + js)",
@@ -98,13 +110,54 @@ class ChatRequest(BaseModel):
     allow_search: bool = True
 
 
+class FileUploadRequest(BaseModel):
+    name: str = Field(default="pasted.txt", max_length=200)
+    text: str | None = None
+    data_b64: str | None = None
+
+
+class OrchestrateRequest(BaseModel):
+    message: str = Field(min_length=1)
+    history: list[dict[str, Any]] = []
+    file_ids: list[str] = []
+    # Optional per-request overrides of the .env defaults.
+    agents: list[str] | None = None
+    planner: str | None = Field(default=None, pattern="^(heuristic|llm)$")
+    synthesize: bool | None = None
+
+
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     max_results: int = Field(default=5, ge=1, le=10)
     provider: str | None = None
 
 
+# ------------------------------------------------------------ attachments
+_STORE: AttachmentStore | None = None
+
+
+def get_store() -> AttachmentStore:
+    """One attachment store per process, rooted at settings.files_dir."""
+    global _STORE
+    if _STORE is None:
+        _STORE = AttachmentStore(get_settings().files_dir)
+    return _STORE
+
+
+def reset_store() -> None:
+    """Tests (and a changed FILES_DIR) get a fresh store."""
+    global _STORE
+    _STORE = None
+
+
 # ---------------------------------------------------------------- helpers
+def _file_error(exc: FileError) -> JSONResponse:
+    body: dict[str, Any] = {"error": "file", "message": str(exc)}
+    if exc.hint:
+        body["hint"] = exc.hint
+    return JSONResponse(status_code=exc.status, content=body)
+
+
 def _error(status: int, kind: str, exc: Exception, **extra: Any) -> JSONResponse:
     body: dict[str, Any] = {"error": kind, "message": str(exc)}
     if isinstance(exc, ProviderError):
@@ -180,6 +233,13 @@ async def health(request: Request) -> dict[str, Any]:
         "search_chain": [p.name for p in search.providers],
         "skipped": {"models": chain.skipped, "search": search.skipped},
         "env_file": Path(".env").exists(),
+        "orchestrator": {
+            "enabled": settings.orchestrator_enabled,
+            "planner": settings.orchestrator_planner,
+            "synthesize": settings.orchestrator_synthesize,
+            "agents": settings.orchestrator_roster,
+        },
+        "files": {"count": len(get_store().list())},
         "ui": {
             "index": INDEX_FILE.exists(),
             "assets": ASSETS_DIR.exists(),
@@ -335,6 +395,116 @@ async def chat(request: ChatRequest) -> Any:
     return result.to_dict()
 
 
+@router.post("/files")
+async def upload_file(payload: FileUploadRequest) -> Any:
+    """Accept one attachment (base64 or plain text) and return its parsed summary."""
+    settings = get_settings()
+    try:
+        attachment = decode_payload(
+            payload.model_dump(),
+            max_chars=settings.files_max_chars,
+            max_mb=settings.files_max_mb,
+        )
+    except FileError as exc:
+        return _file_error(exc)
+    get_store().save(attachment)
+    logs.get_logger("files").info(
+        "upload %s kind=%s chars=%s truncated=%s",
+        attachment.name,
+        attachment.kind,
+        attachment.chars,
+        attachment.truncated,
+    )
+    return attachment.summary()
+
+
+@router.get("/files")
+async def list_files() -> dict[str, Any]:
+    items = get_store().list()
+    return {"count": len(items), "files": [item.summary() for item in items]}
+
+
+@router.delete("/files/{file_id}")
+async def delete_file(file_id: str) -> Any:
+    if not get_store().delete(file_id):
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "message": f"no attachment '{file_id}'"},
+        )
+    return {"deleted": file_id}
+
+
+@router.get("/agents")
+async def agents() -> dict[str, Any]:
+    """What the orchestrator can do — used by the UI to explain Auto mode."""
+    settings = get_settings()
+    return {
+        **agent_catalogue(settings),
+        "all_agents": agent_catalogue_list(),
+        "model_ready": bool(build_chain(settings)),
+        "search_ready": bool(build_search_chain(settings)),
+    }
+
+
+@router.post("/orchestrate")
+async def orchestrate(payload: OrchestrateRequest) -> Any:
+    """Auto mode: manager plans, agents run in parallel, manager writes the answer."""
+    settings = get_settings()
+    if not settings.orchestrator_enabled:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "disabled",
+                "message": "The orchestrator is disabled (ORCHESTRATOR_ENABLED=false).",
+                "hint": "Use /chat instead, or re-enable it in .env.",
+            },
+        )
+
+    store = get_store()
+    attachments = []
+    for file_id in payload.file_ids[:12]:
+        attachment = store.get(file_id)
+        if attachment is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "file_not_found",
+                    "message": f"attachment '{file_id}' is not in the store",
+                    "hint": "Upload it again with POST /files; the page does this automatically.",
+                },
+            )
+        attachments.append(attachment)
+
+    chain = build_chain(settings)
+    search_chain = build_search_chain(settings)
+    manager = Manager(settings=settings, model_chain=chain, search_chain=search_chain)
+    try:
+        result = await manager.run(
+            payload.message,
+            attachments=attachments,
+            history=payload.history,
+            agents=payload.agents,
+            planner=payload.planner,
+            synthesize=payload.synthesize,
+        )
+    except ConfigurationError as exc:
+        logs.get_logger("orchestrator").warning("configuration error: %s", exc)
+        return _error(400, "configuration", exc)
+    except ProviderError as exc:
+        logs.get_logger("orchestrator").warning("provider error [%s]: %s", exc.provider, exc)
+        return _error(502, "provider", exc)
+
+    logs.get_logger("orchestrator").info(
+        "request done intent=%s agents=%s parallel_ms=%s total_ms=%s synthesized=%s",
+        result.plan.intent,
+        ",".join(result.plan.agents),
+        result.parallel_ms,
+        result.latency_ms,
+        result.synthesized,
+    )
+    return result.to_dict()
+
+
 @router.get("/diagnose")
 async def diagnose(
     provider: str | None = None,
@@ -356,9 +526,10 @@ async def diagnose(
         if ping_target is not None:
             model_report = await ping_target.ping()
     except (ConfigurationError, ProviderError) as exc:
+        as_dict = getattr(exc, "to_dict", None)
         model_report = {
             "ok": False,
-            "error": getattr(exc, "to_dict", lambda: {"message": str(exc)})(),
+            "error": as_dict() if callable(as_dict) else {"message": str(exc)},
         }
 
     search_chain = build_search_chain(settings)
