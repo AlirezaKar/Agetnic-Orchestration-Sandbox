@@ -1,5 +1,13 @@
 """Planner: read the request, decide which agents run and what each one does.
 
+Three planner strategies, same output shape:
+
+* **auto** (default) — the *selection* is rules (cheap, deterministic), then one
+  small completion rewrites each selected agent's task and decides who must wait
+  for whom. Falls back to the rule-written tasks if the model misbehaves.
+* **heuristic** — rules only, no model call at all.
+* **llm** — the model both selects the agents and writes their tasks.
+
 Two planners, same output:
 
 * **heuristic** (default) — rules over the prompt and the attachments. Free,
@@ -107,6 +115,10 @@ class PlanStep:
     task: str
     reason: str
     inputs: dict[str, Any] = field(default_factory=dict)
+    # Agents that must finish first: their results are handed to this agent.
+    depends_on: list[str] = field(default_factory=list)
+    # Filled in by the executor: which parallel wave this step belongs to.
+    wave: int = 0
 
     @property
     def label(self) -> str:
@@ -119,6 +131,8 @@ class PlanStep:
             "task": self.task,
             "reason": self.reason,
             "inputs": self.inputs,
+            "depends_on": self.depends_on,
+            "wave": self.wave,
         }
 
 
@@ -127,7 +141,8 @@ class Plan:
     intent: str
     summary: str
     steps: list[PlanStep]
-    strategy: str = "heuristic"
+    strategy: str = "heuristic"  # heuristic | auto | llm
+    detail_source: str = "rules"  # rules | llm — who wrote the per-agent tasks
     signals: dict[str, list[str]] = field(default_factory=dict)
     files: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -136,11 +151,21 @@ class Plan:
     def agents(self) -> list[str]:
         return [step.agent for step in self.steps]
 
+    @property
+    def waves(self) -> list[list[str]]:
+        """Agents grouped by the parallel wave they run in."""
+        grouped: dict[int, list[str]] = {}
+        for index, step in enumerate(self.steps):
+            grouped.setdefault(step.wave or 1, []).append(step.agent)
+        return [grouped[key] for key in sorted(grouped)]
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "intent": self.intent,
             "summary": self.summary,
             "strategy": self.strategy,
+            "detail_source": self.detail_source,
+            "waves": self.waves,
             "signals": self.signals,
             "steps": [step.to_dict() for step in self.steps],
             "agents": self.agents,
@@ -268,6 +293,9 @@ def heuristic_plan(
                     f"{text[:600]!r}. State your uncertainty where it matters."
                 ),
                 reason=reason,
+                # With specialists present the generalist explains *their* findings,
+                # so it must run after them instead of beside them.
+                depends_on=[step.agent for step in steps] if steps else [],
             )
         )
 
@@ -318,11 +346,22 @@ def _intent(
 
 
 def _summary(steps: list[PlanStep], attachments: list[Attachment]) -> str:
-    labels = ", ".join(step.label for step in steps)
     files = f"{len(attachments)} file(s)" if attachments else "no files"
     if len(steps) == 1:
-        return f"{labels} handles this alone ({files}), then the manager writes the answer."
-    return f"{labels} work in parallel ({files}), then the manager merges their answers."
+        return f"{steps[0].label} handles this alone ({files}), then the manager writes the answer."
+    waiting = [step for step in steps if step.depends_on]
+    parallel = [step for step in steps if not step.depends_on]
+    if not waiting:
+        labels = ", ".join(step.label for step in steps)
+        return f"{labels} work in parallel ({files}), then the manager merges their answers."
+    first = ", ".join(step.label for step in parallel) or "the first wave"
+    later = "; ".join(
+        f"{step.label} waits for {', '.join(step.depends_on)}" for step in waiting
+    )
+    return (
+        f"{first} start in parallel ({files}); then {later}. "
+        "The manager merges the results into the final answer."
+    )
 
 
 # --------------------------------------------------------------- llm planner
@@ -380,6 +419,7 @@ async def llm_plan(
     model_chain: Any,
     settings: Any,
     roster: list[str] | None = None,
+    trace: Any = None,
 ) -> Plan | None:
     """Ask the model for a plan. ``None`` means "use the heuristic instead"."""
     roster = roster or list(AGENTS)
@@ -396,6 +436,9 @@ async def llm_plan(
             "content": f"Attached files:\n{files_block}\n\nRequest:\n{message[:2000]}",
         },
     ]
+    if trace is not None:
+        trace.add_prompt("planner", "planner", "Planner prompt (selects agents and writes briefs)",
+                         messages, strategy="llm")
     try:
         response = await model_chain.complete(
             messages,
@@ -403,8 +446,13 @@ async def llm_plan(
             temperature=0.0,
             max_tokens=min(600, settings.llm_max_tokens),
         )
-    except Exception:
+    except Exception as exc:
+        if trace is not None:
+            trace.add("planner", "planner", "Planner model failed — using the rules",
+                      error=f"{type(exc).__name__}: {exc}")
         return None
+    if trace is not None:
+        trace.add_response("planner", "planner", "Planner reply", response, strategy="llm")
     steps = _parse_llm_plan(getattr(response, "content", ""), roster)
     if not steps:
         return None
@@ -417,6 +465,150 @@ async def llm_plan(
     )
 
 
+DETAIL_PROMPT = (
+    "You are the planner of a small agent team. The manager has already decided which "
+    "specialists run. Your job: write the brief each specialist receives, and say who "
+    "must wait for whom.\n"
+    "Rules:\n"
+    "- One entry per selected agent, same agents, no additions.\n"
+    "- 'task' = a concrete instruction (what to do, which part of the request it owns, "
+    "what shape the answer takes). 1–3 sentences.\n"
+    "- 'depends_on' = agents whose *results* this agent needs as input (empty list when "
+    "it can start immediately). Only use names from the selected agents. No cycles.\n"
+    "- 'summary' = one sentence the user can read, describing the plan.\n"
+    "Answer with JSON only:\n"
+    '{"summary": "...", '
+    '"steps": [{"agent": "search", "task": "...", "reason": "...", "depends_on": []}]}'
+)
+
+
+def _parse_detail_plan(raw: str, selected: list[str]) -> dict[str, Any] | None:
+    """Validate a detail plan: only selected agents, no cycles, no self-dependency."""
+    match = re.search(r"\{.*\}", raw or "", re.DOTALL)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        return None
+
+    found: dict[str, dict[str, Any]] = {}
+    for item in raw_steps:
+        if not isinstance(item, dict):
+            continue
+        agent = str(item.get("agent") or "").strip().lower()
+        if agent not in selected or agent in found:
+            continue
+        task = str(item.get("task") or "").strip()
+        if not task:
+            continue
+        deps = item.get("depends_on") or item.get("depends") or []
+        if isinstance(deps, str):
+            deps = [deps]
+        clean: list[str] = []
+        for dep in deps if isinstance(deps, list) else []:
+            name = str(dep).strip().lower()
+            if name in selected and name != agent and name not in clean:
+                clean.append(name)
+        found[agent] = {
+            "task": task[:1200],
+            "reason": str(item.get("reason") or "written by the planner model")[:300],
+            "depends_on": clean,
+        }
+    if set(found) != set(selected):
+        return None
+    if _has_cycle(found):
+        return None
+    return {
+        "summary": str(payload.get("summary") or "").strip()[:400],
+        "steps": found,
+    }
+
+
+def _has_cycle(steps: dict[str, dict[str, Any]]) -> bool:
+    state: dict[str, int] = {}
+
+    def visit(agent: str) -> bool:
+        if state.get(agent) == 1:
+            return True  # back edge → cycle
+        if state.get(agent) == 2:
+            return False
+        state[agent] = 1
+        for dep in steps.get(agent, {}).get("depends_on", []):
+            if visit(dep):
+                return True
+        state[agent] = 2
+        return False
+
+    return any(visit(agent) for agent in list(steps))
+
+
+async def detail_plan(
+    message: str,
+    attachments: list[Attachment],
+    steps: list[PlanStep],
+    model_chain: Any,
+    settings: Any,
+    *,
+    trace: Any = None,
+) -> dict[str, Any] | None:
+    """One small completion: sharper tasks + dependencies. ``None`` = keep the rules."""
+    if not steps or model_chain is None or settings is None:
+        return None
+    files_block = "\n".join(
+        f"- {item.name} ({item.kind}, {item.chars} chars"
+        + (f", {len(item.rows) - 1} rows" if item.rows else "")
+        + f"): {item.preview(200)}"
+        for item in attachments
+    ) or "(none)"
+    roster_block = "\n".join(
+        f"- {step.agent} ({step.label}): first idea — {step.task[:400]}\n"
+        f"  why selected: {step.reason}"
+        for step in steps
+    )
+    messages = [
+        {"role": "system", "content": DETAIL_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Selected agents:\n{roster_block}\n\n"
+                f"Attached files:\n{files_block}\n\n"
+                f"User request:\n{message[:2400]}"
+            ),
+        },
+    ]
+    if trace is not None:
+        trace.add_prompt("planner", "planner", "Planner prompt (writes each agent's brief)", messages,
+                         strategy="auto", agents=[step.agent for step in steps])
+    try:
+        response = await model_chain.complete(
+            messages,
+            None,
+            temperature=0.0,
+            max_tokens=min(900, settings.llm_max_tokens),
+        )
+    except Exception as exc:
+        if trace is not None:
+            trace.add("planner", "planner", "Planner model failed — keeping the rule-written briefs",
+                      error=f"{type(exc).__name__}: {exc}")
+        return None
+    if trace is not None:
+        trace.add_response("planner", "planner", "Planner reply", response, strategy="auto")
+    parsed = _parse_detail_plan(getattr(response, "content", ""), [step.agent for step in steps])
+    if trace is not None:
+        trace.add(
+            "planner",
+            "planner",
+            "Plan accepted" if parsed else "Plan rejected — keeping the rule-written briefs",
+            parsed=parsed is not None,
+            reason="" if parsed else "the model did not return one valid step per selected agent",
+        )
+    return parsed
+
+
 async def make_plan(
     message: str,
     attachments: list[Attachment] | None = None,
@@ -425,19 +617,50 @@ async def make_plan(
     settings: Any = None,
     roster: list[str] | None = None,
     strategy: str | None = None,
+    trace: Any = None,
 ) -> Plan:
-    """Pick the planner from settings, falling back to the heuristic plan."""
+    """Build the plan.
+
+    ``auto``    rules select the agents, then the model writes their briefs.
+    ``llm``     the model selects and writes everything.
+    ``heuristic`` rules only — no planner completion at all.
+    """
     attachments = attachments or []
     roster = roster or list(AGENTS)
-    strategy = (strategy or getattr(settings, "orchestrator_planner", "heuristic") or "").lower()
+    strategy = (
+        strategy or getattr(settings, "orchestrator_planner", "auto") or ""
+    ).strip().lower()
+    if strategy not in ("auto", "heuristic", "llm"):
+        strategy = "auto"
+
     base = heuristic_plan(message, attachments, roster=roster)
-    if strategy == "llm" and model_chain is not None and settings is not None:
-        planned = await llm_plan(message, attachments, model_chain, settings, roster)
+    base.strategy = "heuristic"
+    if trace is not None:
+        trace.add(
+            "planner",
+            "planner",
+            "Selected the agents by rule",
+            requested_strategy=strategy,
+            selected=[
+                {"agent": step.agent, "reason": step.reason} for step in base.steps
+            ],
+            signals=base.signals,
+            intent=base.intent,
+        )
+
+    if model_chain is None or settings is None or strategy == "heuristic":
+        return base
+
+    if strategy == "llm":
+        planned = await llm_plan(message, attachments, model_chain, settings, roster, trace=trace)
         if planned is not None:
+            planned.detail_source = "llm"
             merged = heuristic_plan(message, attachments, roster=roster)
             covered = set(planned.agents)
             planned.notes = [
-                note for note in merged.notes if note not in {"Generalist skipped: the specialists cover this request."}
+                note
+                for note in merged.notes
+                if note != "Generalist skipped: the specialists cover this request."
             ]
             for step in merged.steps:
                 if step.agent in covered:
@@ -447,4 +670,49 @@ async def make_plan(
                 )
             return planned
         base.notes.append("Planner model returned no usable plan; used the heuristic plan.")
-    return base
+        return base
+
+    # strategy == "auto": keep the rule-based selection, let the model write the briefs
+    detail = await detail_plan(
+        message, attachments, base.steps, model_chain, settings, trace=trace
+    )
+    if detail is None:
+        base.notes.append(
+            "Planner model returned no usable brief; kept the rule-written tasks."
+        )
+        return base
+
+    steps: list[PlanStep] = []
+    for step in base.steps:
+        written = detail["steps"].get(step.agent, {})
+        steps.append(
+            PlanStep(
+                agent=step.agent,
+                task=written.get("task") or step.task,
+                reason=written.get("reason") or step.reason,
+                inputs=step.inputs,
+                depends_on=written.get("depends_on") or [],
+            )
+        )
+    plan = Plan(
+        intent=base.intent,
+        summary=detail.get("summary") or _summary(steps, attachments),
+        steps=steps,
+        strategy="auto",
+        detail_source="llm",
+        signals=base.signals,
+        files=base.files,
+        notes=base.notes,
+    )
+    if trace is not None:
+        trace.add(
+            "planner",
+            "planner",
+            "Plan written by the model",
+            summary=plan.summary,
+            steps=[step.to_dict() for step in plan.steps],
+            dependencies={
+                step.agent: step.depends_on for step in plan.steps if step.depends_on
+            },
+        )
+    return plan

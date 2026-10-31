@@ -166,9 +166,17 @@ class Settings(BaseSettings):
     # "auto" mode in the UI: a manager plans, specialist agents run in
     # parallel, the manager writes the final answer.
     orchestrator_enabled: bool = True
-    # heuristic = rules over the prompt (fast, free, deterministic)
-    # llm       = the model writes the plan (adaptive, costs one extra call)
-    orchestrator_planner: str = "heuristic"
+    # auto      = rules pick the agents, the model writes each agent's brief (+1 call)
+    # heuristic = rules only, no planner call at all
+    # llm       = the model picks the agents and writes their briefs
+    orchestrator_planner: str = "auto"
+    # After the agents report, let the manager ask for more work (one small call,
+    # only when more than one agent ran) before it writes the final answer.
+    orchestrator_review: bool = True
+    # Longest string the browser receives per trace entry; the log file keeps it all.
+    orchestrator_trace_chars: int = 4000
+    # Keep a JSON record of every run in logs/orchestrator/.
+    orchestrator_log_runs: bool = True
     # Empty = every agent may be selected. "search,data" restricts the roster.
     orchestrator_agents: str = ""
     # The manager's closing summary. Off = deterministic merge of agent answers
@@ -256,6 +264,7 @@ class Settings(BaseSettings):
             "agent_max_steps": self.agent_max_steps,
             "orchestrator_planner": self.orchestrator_planner,
             "orchestrator_agents": self.orchestrator_roster,
+            "orchestrator_review": self.orchestrator_review,
         }
 
 

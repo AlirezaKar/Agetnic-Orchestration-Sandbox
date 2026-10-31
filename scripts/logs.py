@@ -9,6 +9,8 @@
     python -m scripts.logs requests             # HTTP lines, slowest/failing last
     python -m scripts.logs requests --status 4xx
     python -m scripts.logs process              # last starts: pid, port, cwd, git
+    python -m scripts.logs runs                 # orchestration runs: plan, agents, timing
+    python -m scripts.logs runs --run <id>      # every step of one run (prompts, tools, answers)
     python -m scripts.logs path                 # print the log directory
 
 Exit codes: 0 ok, 1 nothing found / log dir missing.
@@ -22,6 +24,7 @@ import re
 import sys
 
 from app import logs
+from app.orchestrator import runlog
 
 
 def _human(size: int) -> str:
@@ -148,6 +151,50 @@ def cmd_process(args) -> int:
     return 0
 
 
+def cmd_runs(args) -> int:
+    if args.run:
+        record = runlog.get_run(args.run, log_dir=args.log_dir)
+        if record is None:
+            print(f"no run '{args.run}' in {runlog.runs_dir(args.log_dir)}")
+            return 1
+        orchestration = record.get("orchestration") or {}
+        plan = orchestration.get("plan") or {}
+        print(f"run      : {record.get('run_id')}")
+        print(f"at       : {record.get('at')}")
+        print(f"request  : {record.get('message')}")
+        print(f"plan     : {plan.get('intent')} via {plan.get('strategy')}/{plan.get('detail_source')}"
+              f" — {', '.join(plan.get('agents') or [])}")
+        print(f"waves    : {[w.get('agents') for w in orchestration.get('waves') or []]}")
+        print(f"answer   : {(record.get('answer') or '')[:400]}")
+        print("-" * 78)
+        for event in orchestration.get("trace") or []:
+            detail = event.get("detail") or {}
+            print(f"[{event.get('seq'):>2}] {event.get('offset_ms'):>6}ms "
+                  f"{event.get('stage'):<9} {event.get('actor'):<9} {event.get('title')}")
+            if args.full:
+                print("     " + json.dumps(detail, ensure_ascii=False, indent=2).replace("\n", "\n     "))
+            else:
+                for key in ("messages", "content", "arguments", "results", "computed", "error", "note"):
+                    if key in detail:
+                        preview = json.dumps(detail[key], ensure_ascii=False)
+                        print(f"     {key}: {preview[:200]}")
+        return 0
+
+    runs = runlog.list_runs(args.limit, log_dir=args.log_dir)
+    if not runs:
+        print(f"no orchestration runs in {runlog.runs_dir(args.log_dir)}")
+        return 1
+    print(f"{'run id':<30} {'intent':<20} {'agents':<34} {'calls':>5} {'ms':>7}  answer")
+    for run in runs:
+        print(
+            f"{run['run_id']:<30} {run['intent'][:19]:<20} "
+            f"{','.join(run['agents'])[:33]:<34} {run['model_calls']:>5} {run['latency_ms']:>7}  "
+            f"{(run['answer'] or '').replace(chr(10), ' ')[:48]}"
+        )
+    print(f"\n{len(runs)} run(s) — full trace: python -m scripts.logs runs --run <id>")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m scripts.logs",
@@ -181,6 +228,12 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("-c", "--count", type=int, default=200)
     process.add_argument("-l", "--limit", type=int, default=5)
     process.set_defaults(func=cmd_process)
+
+    runs = sub.add_parser("runs", help="orchestration runs and their traces")
+    runs.add_argument("--run", default=None, help="print every step of this run id")
+    runs.add_argument("-l", "--limit", type=int, default=20, help="how many runs to list")
+    runs.add_argument("--full", action="store_true", help="dump full event details with --run")
+    runs.set_defaults(func=cmd_runs)
     return parser
 
 

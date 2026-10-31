@@ -130,6 +130,17 @@ async function scenarioNormalHost() {
   const body = answer ? answer.textContent : '';
   check('a prompt produces an answer bubble', !!answer);
   check('the reply is a real answer or a configuration error — never Not Found', !!answer && !/Not Found/.test(body), body.slice(0, 100));
+  const orchPanel = w.document.querySelector('.orch-panel');
+  const traceRows = w.document.querySelectorAll('.trace-row');
+  check('auto mode renders the step-by-step trace', !!orchPanel && traceRows.length > 0, `${traceRows.length} rows`);
+  check('the trace names the manager and the planner',
+    /manager/i.test(orchPanel ? orchPanel.textContent : '') && /planner/i.test(orchPanel ? orchPanel.textContent : ''));
+  const expandAll = w.document.querySelector('.orch-toolbar .ghost-btn');
+  if (expandAll) {
+    expandAll.click();
+    check('expand all opens every step', w.document.querySelectorAll('.trace-row.open').length === traceRows.length);
+  }
+  check('the run log panel is populated', w.document.querySelectorAll('#runs-list .run-row').length > 0);
 
   w.document.getElementById('btn-diag').click();
   await sleep(1200);

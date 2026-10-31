@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="agetnic-version" content="0.7.0" />
+  <meta name="agetnic-version" content="0.8.0" />
   <title>Agetnic Orchestration Sandbox — Test Harness</title>
   <!-- Relative asset URLs: the harness keeps working when the app is mounted
        under a sub-path (/ui/, /sandbox/, a proxy prefix). The ?v= query busts
        stale caches after an upgrade. -->
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.7.0" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.7.0" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.8.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.8.0" />
   <style>
     /* Inline fallback: the connection banner must be readable even if the
        stylesheets 404 (that is exactly when it matters). */
@@ -78,6 +78,14 @@
       </section>
 
       <section class="panel">
+        <h2>Run log <button id="btn-refresh-runs" class="ghost-btn" title="Refresh">⟳</button></h2>
+        <div id="runs-summary" class="diag-summary muted">Loading runs…</div>
+        <div id="runs-list" class="run-list"></div>
+        <p class="muted small">Every Auto run is written to <code>logs/orchestrator/</code>.
+          Click a run to read its full trace in the inspector.</p>
+      </section>
+
+      <section class="panel">
         <h2>Diagnostics <button id="btn-diag" class="ghost-btn">Run</button></h2>
         <div id="diag-summary" class="diag-summary muted">Model ping + every search backend. Not run yet.</div>
       </section>
@@ -104,9 +112,11 @@
           <h2>Orchestration test console</h2>
           <p>
             <strong>Auto</strong> is the full architecture: a manager reads the request, a
-            planner picks the agents (document · web search · data · general), they run
-            <strong>in parallel</strong>, and the manager writes one answer from their reports.
-            Attach a file and the document agent joins in.
+            planner picks the agents (document · web search · data · general) and writes each
+            one's brief, they run <strong>in parallel waves</strong>, the manager can ask for a
+            follow-up, and then it writes one answer. Under every reply you can open
+            <strong>every step</strong>: the prompts, the tool calls, the tool results, what each
+            agent returned and how it reached the manager.
           </p>
           <p class="muted">
             <strong>Agent</strong> is the single-model tool loop, <strong>Answer only</strong>
@@ -176,6 +186,6 @@
     </div>
   </div>
 
-  <script src="assets/js/app.js?v=0.7.0" defer></script>
+  <script src="assets/js/app.js?v=0.8.0" defer></script>
 </body>
 </html>
