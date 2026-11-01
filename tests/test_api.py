@@ -214,8 +214,23 @@ class FrontendContractTests(unittest.TestCase):
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1]
+        cls.root = root
         cls.index = (root / "app/static/index.html").read_text(encoding="utf-8")
         cls.app_js = (root / "app/static/assets/js/app.js").read_text(encoding="utf-8")
+        cls.styles = (root / "app/static/assets/css/styles.css").read_text(encoding="utf-8")
+        cls.extra = (root / "app/static/assets/css/extra.css").read_text(encoding="utf-8")
+
+    def rules(self, css: str, selector: str) -> list[str]:
+        """Every declaration block for one selector, comments removed."""
+        import re
+
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        out = []
+        for selectors, body in re.findall(r"([^{}]*)\{([^{}]*)\}", css):
+            names = [" ".join(part.split()) for part in selectors.split(",")]
+            if selector in names:
+                out.append(body)
+        return out
 
     def test_version_module_is_the_only_source(self):
         from app.version import VERSION as CANONICAL
@@ -249,3 +264,45 @@ class FrontendContractTests(unittest.TestCase):
     def test_frontend_surfaces_connection_problems(self):
         self.assertIn("Backend not reachable", self.app_js)
         self.assertIn("Styles failed to load", self.app_js)
+
+    def test_sidebar_is_one_tidy_column(self):
+        # diagnostics moved to the top bar: one button, no sidebar panel
+        self.assertNotIn('id="btn-diag"', self.index)
+        self.assertIn('id="btn-diag-top"', self.index)
+        # one Runs panel with two tabs instead of two panels of prose
+        self.assertIn('id="runs-tabs"', self.index)
+        self.assertIn('data-runs="saved"', self.index)
+        self.assertIn('data-runs="local"', self.index)
+        # the paragraphs that made memory/runs wordy are gone
+        for gone in (
+            "Every conversation is stored in",
+            "Click one to reopen it and keep chatting",
+            "Every Auto run is written to",
+            "Click a run to read its full trace",
+            "Model ping + every search backend. Not run yet.",
+        ):
+            self.assertNotIn(gone, self.index, gone)
+        # the diagnostics report moved into the inspector
+        self.assertIn('id="diag-summary"', self.index)
+        self.assertRegex(self.index, r"id=\"inspector\"[\s\S]{0,1200}id=\"diag-summary\"")
+
+    def test_the_columns_scroll_inside_the_screen(self):
+        layout = " ".join(self.rules(self.styles, ".layout"))
+        self.assertIn("overflow", layout)
+        self.assertIn("hidden", layout)
+        self.assertNotIn("height: calc(100vh", layout)
+        # a tall inspector must not stretch the row (the "chat runs to the end" bug)
+        children = " ".join(
+            self.rules(self.styles, ".layout > *")
+            + self.rules(self.styles, ".inspector")
+            + self.rules(self.styles, ".chat")
+            + self.rules(self.styles, ".trace-json")
+        )
+        self.assertIn("min-height: 0", children)
+        trace = " ".join(self.rules(self.styles, ".trace-json"))
+        self.assertIn("overflow: auto", trace)
+        inspector = " ".join(self.rules(self.styles, ".inspector"))
+        self.assertIn("overflow: hidden", inspector)
+        # the runs panel scrolls its own list
+        runs = " ".join(self.rules(self.extra, ".panel.grow > #runs-list"))
+        self.assertIn("overflow-y: auto", runs)

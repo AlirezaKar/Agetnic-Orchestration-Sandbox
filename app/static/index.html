@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="agetnic-version" content="0.11.0" />
+  <meta name="agetnic-version" content="0.11.1" />
   <title>Agetnic Orchestration Sandbox — Test Harness</title>
   <!-- Relative asset URLs: the harness keeps working when the app is mounted
        under a sub-path (/ui/, /sandbox/, a proxy prefix). The ?v= query busts
        stale caches after an upgrade. -->
   <!-- A data: icon keeps the browser from asking /favicon.ico at all. -->
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.11.0" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.11.0" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.11.1" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.11.1" />
   <style>
     /* Inline fallback: the connection banner must be readable even if the
        stylesheets 404 (that is exactly when it matters). */
@@ -65,7 +65,9 @@
 
   <div class="layout">
     <!-- ═════════════════════════════════════════════════════════
-         Left sidebar: mode + diagnostics + search backends + history
+         Left sidebar: mode · agents · memory · runs · search
+         Diagnostics live in the top bar (button + badge) and report
+         into the inspector, so they are not repeated here.
          ═════════════════════════════════════════════════════════ -->
     <aside class="sidebar">
       <section class="panel">
@@ -74,45 +76,47 @@
       </section>
 
       <section class="panel">
-        <h2>Orchestrator <button id="btn-refresh-agents" class="ghost-btn" title="Refresh">⟳</button></h2>
-        <div id="agents-summary" class="diag-summary muted">Loading agent roster…</div>
+        <h2>Agents
+          <button id="btn-refresh-agents" class="ghost-btn" title="Refresh the roster">⟳</button>
+        </h2>
+        <div id="agents-summary" class="panel-meta muted">Loading roster…</div>
         <div id="agents-list" class="agent-list"></div>
       </section>
 
       <section class="panel">
         <h2>Memory
-          <button id="btn-new-session" class="ghost-btn" title="Start a new conversation">+ New</button>
-          <button id="btn-refresh-sessions" class="ghost-btn" title="Refresh">⟳</button>
+          <span class="panel-actions">
+            <button id="btn-new-session" class="ghost-btn" title="Start a new conversation">+</button>
+            <button id="btn-refresh-sessions" class="ghost-btn" title="Refresh">⟳</button>
+          </span>
         </h2>
-        <div id="sessions-summary" class="diag-summary muted">Loading memory…</div>
+        <div id="sessions-summary" class="panel-meta muted">Loading…</div>
         <ul id="sessions-list" class="session-list"></ul>
-        <p class="muted small">Every conversation is stored in <code>memory/</code>.
-          Click one to reopen it and keep chatting — the model gets the earlier turns back.</p>
-      </section>
-
-      <section class="panel">
-        <h2>Run log <button id="btn-refresh-runs" class="ghost-btn" title="Refresh">⟳</button></h2>
-        <div id="runs-summary" class="diag-summary muted">Loading runs…</div>
-        <div id="runs-list" class="run-list"></div>
-        <p class="muted small">Every Auto run is written to <code>logs/orchestrator/</code>.
-          Click a run to read its full trace in the inspector.</p>
-      </section>
-
-      <section class="panel">
-        <h2>Diagnostics <button id="btn-diag" class="ghost-btn">Run</button></h2>
-        <div id="diag-summary" class="diag-summary muted">Model ping + every search backend. Not run yet.</div>
-      </section>
-
-      <section class="panel">
-        <h2>Search backends <button id="btn-refresh-search" class="ghost-btn" title="Refresh">⟳</button></h2>
-        <div id="search-list" class="provider-list">
-          <span class="muted" style="font-size:12px">loading…</span>
-        </div>
       </section>
 
       <section class="panel grow">
-        <h2>Run history <button id="btn-clear-history" class="ghost-btn" title="Clear history">⟳</button></h2>
-        <ul id="trace-list" class="trace-list"><li class="muted">No runs yet.</li></ul>
+        <h2>Runs
+          <span class="panel-actions">
+            <button id="btn-refresh-runs" class="ghost-btn" title="Reload the saved runs">⟳</button>
+            <button id="btn-clear-history" class="ghost-btn" title="Clear this tab's history">⌫</button>
+          </span>
+        </h2>
+        <div class="seg" id="runs-tabs" role="tablist" aria-label="Run source">
+          <button class="seg-btn active" type="button" role="tab" data-runs="saved">Saved</button>
+          <button class="seg-btn" type="button" role="tab" data-runs="local">This tab</button>
+        </div>
+        <div id="runs-summary" class="panel-meta muted">Loading…</div>
+        <div id="runs-list" class="run-list"></div>
+        <ul id="trace-list" class="trace-list" hidden></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Search
+          <button id="btn-refresh-search" class="ghost-btn" title="Refresh">⟳</button>
+        </h2>
+        <div id="search-list" class="provider-list">
+          <span class="muted" style="font-size:12px">loading…</span>
+        </div>
       </section>
     </aside>
 
@@ -188,17 +192,16 @@
          ═════════════════════════════════════════════════════════ -->
     <aside class="inspector" id="inspector">
       <div class="inspector-head">
-        <h2>Trace inspector</h2>
+        <h2>Inspector</h2>
         <div>
           <button id="btn-copy-trace" class="ghost-btn">Copy JSON</button>
           <button id="btn-close-inspector" class="ghost-btn">✕</button>
         </div>
       </div>
-      <p class="muted inspector-note" id="inspector-note">
-        The complete run record (request · trace · sources · errors) or the last
-        diagnostics report.
-      </p>
-      <pre id="trace-json" class="trace-json">Select a run from the history — or send a prompt — to inspect its trace.</pre>
+      <p class="muted inspector-note" id="inspector-note">A run record, or the diagnostics report.</p>
+      <!-- readable diagnostics rows (the JSON report follows below) -->
+      <div id="diag-summary" class="diag-summary" hidden></div>
+      <pre id="trace-json" class="trace-json">Select a run — or send a prompt — to inspect its trace.</pre>
     </aside>
   </div>
 
@@ -219,6 +222,6 @@
     </div>
   </div>
 
-  <script src="assets/js/app.js?v=0.11.0" defer></script>
+  <script src="assets/js/app.js?v=0.11.1" defer></script>
 </body>
 </html>

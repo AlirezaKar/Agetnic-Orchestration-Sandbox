@@ -24,6 +24,9 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const HTML = fs.readFileSync(path.join(ROOT, 'app/static/index.html'), 'utf8');
 const JS = fs.readFileSync(path.join(ROOT, 'app/static/assets/js/app.js'), 'utf8');
+const CSS =
+  fs.readFileSync(path.join(ROOT, 'app/static/assets/css/styles.css'), 'utf8') +
+  fs.readFileSync(path.join(ROOT, 'app/static/assets/css/extra.css'), 'utf8');
 const liveBase = (process.argv[2] || '').replace(/\/+$/, '');
 
 let JSDOM;
@@ -152,9 +155,32 @@ async function scenarioNormalHost() {
   const pill = text(w, 'session-pill');
   check('the composer names the active session', /memory: \d+ turn/.test(pill), pill);
 
-  w.document.getElementById('btn-diag').click();
+  // ── sidebar: one Runs panel with two tabs, diagnostics only in the top bar
+  check('the sidebar owns no diagnostics panel', !w.document.getElementById('btn-diag'));
+  check('the top bar still has the diagnostics button', !!w.document.getElementById('btn-diag-top'));
+  const savedTab = w.document.querySelector('#runs-tabs .seg-btn[data-runs="saved"]');
+  const localTab = w.document.querySelector('#runs-tabs .seg-btn[data-runs="local"]');
+  const runsList = w.document.getElementById('runs-list');
+  const traceList = w.document.getElementById('trace-list');
+  check('the runs panel has both tabs', !!savedTab && !!localTab);
+  check('saved runs are shown by default', !runsList.hidden && traceList.hidden);
+  localTab.click();
+  await sleep(60);
+  check('"This tab" shows the local history', runsList.hidden && !traceList.hidden);
+  check('the local tab lists this tab\'s run', w.document.querySelectorAll('#trace-list li').length > 0);
+  savedTab.click();
+  await sleep(200);
+  check('"Saved" switches back to the server log', !runsList.hidden && traceList.hidden);
+
+  // diagnostics still work, from the top bar, into the inspector
+  w.document.getElementById('btn-diag-top').click();
   await sleep(1200);
   check('diagnostics produce rows', w.document.querySelectorAll('#diag-summary .diag-row').length > 0);
+  check('the diagnostics block is visible in the inspector', w.document.getElementById('diag-summary').hidden === false);
+  check(
+    'the diagnostics block sits inside the inspector',
+    !!w.document.querySelector('#inspector #diag-summary')
+  );
 
   // ── D: reload. A brand-new window with the same remembered session id
   // must redraw the conversation exactly as it was, with no model call.
@@ -193,8 +219,47 @@ async function scenarioNormalHost() {
   check('a fresh browser starts with an empty conversation', !w3.document.querySelector('.message'));
 }
 
+/**
+ * E: the frame. No layout engine in jsdom, but the cascade is real, so this
+ * proves each rule reaches the element it was written for — which is exactly how
+ * the "inspector grows past the screen" bug came back if a selector is renamed.
+ */
+async function scenarioLayout() {
+  console.log('E  frame: every panel scrolls inside the screen');
+  const notFound = async () => ({ ok: false, status: 404, json: async () => ({ detail: 'Not Found' }) });
+  const w = mount(notFound, 'http://localhost:8000/');
+  const style = w.document.createElement('style');
+  style.textContent = CSS;
+  w.document.head.appendChild(style);
+  await sleep(80);
+
+  const css = (selector, prop) => {
+    const node = w.document.querySelector(selector);
+    return node ? w.getComputedStyle(node)[prop] : `(no ${selector})`;
+  };
+
+  check('the page itself never scrolls', css('body', 'overflow') === 'hidden', css('body', 'overflow'));
+  check('the layout clips its columns', css('.layout', 'overflow') === 'hidden', css('.layout', 'overflow'));
+  check('the layout no longer guesses the header height', !/calc\(100vh/.test(CSS));
+  check('the inspector may shrink below its content', css('.inspector', 'minHeight') === '0px', css('.inspector', 'minHeight'));
+  check('the inspector clips and its JSON scrolls',
+    css('.inspector', 'overflow') === 'hidden' && css('.trace-json', 'overflow') === 'auto',
+    `${css('.inspector', 'overflow')} / ${css('.trace-json', 'overflow')}`);
+  check('the JSON keeps a scroll area', css('.trace-json', 'minHeight') === '0px', css('.trace-json', 'minHeight'));
+  check('the chat column scrolls on its own',
+    css('.chat', 'overflowY') === 'auto' && css('.chat', 'minHeight') === '0px');
+  check('the sidebar scrolls on its own', css('.sidebar', 'overflowY') === 'auto', css('.sidebar', 'overflowY'));
+
+  const panels = w.document.querySelectorAll('.sidebar .panel');
+  check('the sidebar is five tidy panels', panels.length === 5, `${panels.length} panels`);
+  check('the sidebar carries no prose', w.document.querySelectorAll('.sidebar p').length === 0);
+  check('no diagnostics panel in the sidebar', !w.document.getElementById('btn-diag'));
+}
+
 (async () => {
   await scenarioStaticHost();
+  console.log('');
+  await scenarioLayout();
   if (liveBase) {
     console.log('');
     await scenarioApiPrefix();

@@ -65,10 +65,16 @@ starts the logs described in §9 (`logs/agetnic.log`, `error.log`, `requests.log
 configures the same files on startup.
 
 Open <http://localhost:8000> — the **test harness** (the original PR #1 UI, rebuilt on this
-API): mode selector (**Auto** / Agent / Answer only / Search only), 📎 attach (or drop a
-file) for the document agent, a manager-plan panel with one card per agent, search-backend
-list, diagnostics panel, run history, trace inspector, and a providers modal with every
-key/model link. Auto mode is described in §5.
+API). Three columns, each scrolling on its own inside the screen:
+
+| Column | What is in it |
+|---|---|
+| sidebar | **Mode** (Auto / Agent / Answer only / Search only) · **Agents** (the live roster) · **Memory** (conversations in `memory/`, click to reopen) · **Runs** (`Saved` = `logs/orchestrator/`, `This tab` = your own runs) · **Search** (backends, click to pin) |
+| chat | the conversation, the plan panel with one card per agent, and every step of the run under the answer |
+| inspector | the full JSON record of whatever you clicked, plus the readable diagnostics rows |
+
+**Run diagnostics**, **Providers** and the connection badges live in the top bar.
+Auto mode is described in §5.
 
 ```bash
 python -m unittest discover -s tests -v     # offline, no keys, no network
@@ -281,9 +287,9 @@ Open <http://localhost:8000>:
 2. **Agent** mode → press Send. The answer carries a clickable timeline: model step → tool
    step (arguments, latency, ok/failed) → final answer, plus the `sources` list. That is the
    search call happening, not prose you have to trust.
-3. **Run diagnostics** (top bar) → the model ping and every configured backend appear in the
-   sidebar with pass/fail + latency, the badge turns green, and the raw report opens in the
-   trace inspector.
+3. **Run diagnostics** (top bar) → the model ping and every configured backend appear with
+   pass/fail + latency, the badge turns green, and the rows plus the raw report open in the
+   inspector (the sidebar keeps no diagnostics panel of its own).
 4. **Providers** (top bar) → every free provider with its *Get API key* and *See models*
    links, plus whether it is configured and whether a search backend needs a server.
 
@@ -522,9 +528,11 @@ python -m scripts.logs runs --run <id> --full  # full JSON details
 curl -s localhost:8000/runs | python -m json.tool
 ```
 
-The sidebar's **Run log** panel lists the same runs; clicking one loads the
-stored record into the inspector, so a run can be audited after the page has
-been reloaded.
+The sidebar's **Runs** panel lists the same runs — `Saved` for
+`logs/orchestrator/`, `This tab` for the ones this browser remembers; clicking
+one loads the stored record into the inspector, so a run can be audited after the
+page has been reloaded. The inspector scrolls inside its column: a 20 000-line
+record never stretches the page.
 
 ### Attachments
 
