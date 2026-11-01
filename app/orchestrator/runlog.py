@@ -23,13 +23,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from app import logs
+from app.orchestrator import host
 
 RUN_LOG_NAME = "runs.jsonl"
 
 
 def runs_dir(log_dir: str | os.PathLike[str] | None = None) -> Path:
-    path = Path(logs.log_dir(log_dir)) / "orchestrator"
+    path = Path(host.log_dir(log_dir)) / "orchestrator"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -78,7 +78,7 @@ def save_run(record: dict[str, Any], *, log_dir: str | os.PathLike[str] | None =
         target.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
         return target
     except OSError as exc:  # pragma: no cover - read-only checkouts still work
-        logs.get_logger("orchestrator").warning("could not write the run log: %s", exc)
+        host.get_logger("orchestrator").warning("could not write the run log: %s", exc)
         return None
 
 

@@ -15,7 +15,7 @@ import asyncio
 import time
 from typing import Any
 
-from app import logs
+from app.orchestrator import host
 from app.orchestrator.agents import AGENT_RUNNERS, AgentContext, AgentOutcome
 from app.orchestrator.planner import Plan, PlanStep
 
@@ -119,7 +119,7 @@ async def run_plan(
     already happened, so the trace keeps a single, increasing wave numbering.
     """
     settings = settings or ctx.settings
-    log = logs.get_logger("orchestrator")
+    log = host.get_logger("orchestrator")
     timeout = float(getattr(settings, "orchestrator_timeout", 120.0))
     parallel = max(int(getattr(settings, "orchestrator_max_parallel", 4)), 1)
     semaphore = asyncio.Semaphore(parallel)

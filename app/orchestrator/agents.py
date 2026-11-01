@@ -24,8 +24,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from app.agent import WebSearchAgent
-from app.config import Settings
+from app.orchestrator import host
+from app.orchestrator.contracts import AgentLoopFactory, OrchestratorSettings
 from app.orchestrator.files import Attachment
 from app.orchestrator.planner import AGENTS, PlanStep
 
@@ -85,10 +85,12 @@ class AgentContext:
     attachments: list[Attachment]
     model_chain: Any
     search_chain: Any
-    settings: Settings
+    settings: OrchestratorSettings
     history: list[dict[str, Any]] = field(default_factory=list)
     trace: Any = None
     upstream: dict[str, "AgentOutcome"] = field(default_factory=dict)
+    # injected by the service/manager: the single-agent tool loop for `search`
+    agent_loop: AgentLoopFactory | None = None
 
     @property
     def has_model(self) -> bool:
@@ -379,7 +381,8 @@ async def run_search(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         from_agents=used,
         max_steps=ctx.settings.agent_max_steps,
     )
-    agent = WebSearchAgent(ctx.model_chain, ctx.search_chain, ctx.settings, observer=observe)
+    factory = ctx.agent_loop or host.agent_loop()
+    agent = factory(ctx.model_chain, ctx.search_chain, ctx.settings, observer=observe)
     extra = ""
     if ctx.attachments:
         names = ", ".join(item.name for item in ctx.attachments)

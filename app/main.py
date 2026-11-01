@@ -40,12 +40,11 @@ from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
 from app.orchestrator import (
     AttachmentStore,
-    runlog,
     FileError,
-    Manager,
-    agent_catalogue,
-    catalogue as agent_catalogue_list,
+    OrchestrationRequest,
+    OrchestratorService,
     decode_payload,
+    runlog,
 )
 from app.search.registry import build_search_chain, describe_search_providers
 from app.version import VERSION
@@ -590,16 +589,20 @@ async def delete_file(file_id: str) -> Any:
     return {"deleted": file_id}
 
 
+def _orchestrator(settings) -> OrchestratorService:
+    """Wire the orchestrator service with this host's ports (the only place that does)."""
+    return OrchestratorService(
+        settings,
+        models=build_chain(settings),
+        search=build_search_chain(settings),
+        agent_loop=WebSearchAgent,
+    )
+
+
 @router.get("/agents")
 async def agents() -> dict[str, Any]:
     """What the orchestrator can do — used by the UI to explain Auto mode."""
-    settings = get_settings()
-    return {
-        **agent_catalogue(settings),
-        "all_agents": agent_catalogue_list(),
-        "model_ready": bool(build_chain(settings)),
-        "search_ready": bool(build_search_chain(settings)),
-    }
+    return _orchestrator(get_settings()).describe()
 
 
 @router.post("/orchestrate")
@@ -631,21 +634,20 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
             )
         attachments.append(attachment)
 
-    chain = build_chain(settings)
-    search_chain = build_search_chain(settings)
     sessions = get_memory()
     files = _file_refs(attachments)
-    manager = Manager(settings=settings, model_chain=chain, search_chain=search_chain)
+    service = _orchestrator(settings)
+    request = OrchestrationRequest(
+        message=payload.message,
+        history=_history_for(payload, sessions),
+        attachments=attachments,
+        agents=payload.agents,
+        planner=payload.planner,
+        synthesize=payload.synthesize,
+        review=payload.review,
+    )
     try:
-        result = await manager.run(
-            payload.message,
-            attachments=attachments,
-            history=_history_for(payload, sessions),
-            agents=payload.agents,
-            planner=payload.planner,
-            synthesize=payload.synthesize,
-            review=payload.review,
-        )
+        result = await service.run(request)
     except ConfigurationError as exc:
         logs.get_logger("orchestrator").warning("configuration error: %s", exc)
         return _remembered_error(
@@ -669,7 +671,7 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
         result.synthesized,
         result.model_calls,
     )
-    body = result.to_dict(trace_limit=settings.orchestrator_trace_chars)
+    body = service.payload(result)
     body["session"] = _remember(
         sessions,
         payload,
