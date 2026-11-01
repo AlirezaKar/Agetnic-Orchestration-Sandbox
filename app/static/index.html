@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="agetnic-version" content="0.8.0" />
+  <meta name="agetnic-version" content="0.9.0" />
   <title>Agetnic Orchestration Sandbox — Test Harness</title>
   <!-- Relative asset URLs: the harness keeps working when the app is mounted
        under a sub-path (/ui/, /sandbox/, a proxy prefix). The ?v= query busts
        stale caches after an upgrade. -->
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.8.0" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.8.0" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.9.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.9.0" />
   <style>
     /* Inline fallback: the connection banner must be readable even if the
        stylesheets 404 (that is exactly when it matters). */
@@ -78,6 +78,17 @@
       </section>
 
       <section class="panel">
+        <h2>Memory
+          <button id="btn-new-session" class="ghost-btn" title="Start a new conversation">+ New</button>
+          <button id="btn-refresh-sessions" class="ghost-btn" title="Refresh">⟳</button>
+        </h2>
+        <div id="sessions-summary" class="diag-summary muted">Loading memory…</div>
+        <ul id="sessions-list" class="session-list"></ul>
+        <p class="muted small">Every conversation is stored in <code>memory/</code>.
+          Click one to reopen it and keep chatting — the model gets the earlier turns back.</p>
+      </section>
+
+      <section class="panel">
         <h2>Run log <button id="btn-refresh-runs" class="ghost-btn" title="Refresh">⟳</button></h2>
         <div id="runs-summary" class="diag-summary muted">Loading runs…</div>
         <div id="runs-list" class="run-list"></div>
@@ -123,6 +134,8 @@
             disables tools, <strong>Search only</strong> runs the search chain without a model.
             Switch the brain and the planning style with <code>LLM_PROVIDER</code> /
             <code>ORCHESTRATOR_PLANNER</code> in <code>.env</code>.
+            Every conversation is kept in the harness memory: reopen one from
+            <strong>Memory</strong> and keep going.
           </p>
           <div class="suggestions">
             <button class="chip" data-prompt="Average revenue per month in the attached CSV, and which month grew fastest?">📊 Analyse a CSV</button>
@@ -142,9 +155,10 @@
         <textarea id="prompt" rows="2" placeholder="Ask anything… (Enter to send · Shift+Enter for a new line · drop a file for the document agent)"></textarea>
         <div class="composer-actions">
           <span class="muted" id="composer-mode-label">Mode: Auto</span>
+          <span class="session-pill" id="session-pill" title="The conversation currently in memory">new conversation</span>
           <input type="file" id="file-input" multiple hidden />
           <button id="btn-attach" class="ghost-btn" title="Attach a document, CSV, JSON, DOCX or PDF">📎 Attach</button>
-          <button id="btn-clear" class="ghost-btn">Clear session</button>
+          <button id="btn-clear" class="ghost-btn" title="Start a new conversation (this one stays in memory)">New chat</button>
           <button id="btn-send" class="primary-btn">Send ▸</button>
         </div>
       </footer>
@@ -186,6 +200,6 @@
     </div>
   </div>
 
-  <script src="assets/js/app.js?v=0.8.0" defer></script>
+  <script src="assets/js/app.js?v=0.9.0" defer></script>
 </body>
 </html>

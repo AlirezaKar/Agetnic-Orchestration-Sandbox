@@ -363,6 +363,7 @@ prompt ─► MANAGER ─► PLANNER ─┼── Web researcher ──── UR
 | Agents | `app/orchestrator/agents.py` | document / search / data / general, one signature, one result type |
 | Trace | `app/orchestrator/trace.py` | every step of the run: prompts, tool calls, tool results, replies |
 | Run log | `app/orchestrator/runlog.py` | one unclipped JSON record per run in `logs/orchestrator/` |
+| Memory | `app/memory.py` | the conversation itself: every user turn + answer in `memory/`, replayable |
 | Attachments | `app/orchestrator/files.py` | upload decoding, extraction, on-disk store |
 
 ### What a plan looks like
@@ -499,6 +500,66 @@ upload survives a restart. `GET /files` lists, `DELETE /files/{id}` removes.
 Limits: `FILES_MAX_MB=10`, `FILES_MAX_CHARS=200000` (truncation is reported),
 `FILES_CONTEXT_CHARS=12000` of excerpts per document prompt.
 
+### Harness memory: the conversation, not the log
+
+The orchestrator, the agents and the tools make up the harness; memory is what
+lets it pick a conversation back up. It is a **separate base** from the logs:
+
+| Base | Question it answers | Lifetime | Holds |
+|---|---|---|---|
+| `logs/` | what did the process do? | rotated | log lines, tracebacks, requests |
+| `logs/orchestrator/` | what did the machine do in one run? | one JSON per run | prompts, tool calls, timings, unclipped |
+| `memory/` | **what did we say to each other?** | until you forget it | every turn, both sides, exactly as rendered |
+| `.data/files/` | what was uploaded? | kept | attachment text + metadata |
+
+```
+memory/
+  index.jsonl                 append-only index (newest state per session)
+  sessions/<session-id>.json  the conversation: every turn, both sides
+  sessions/<session-id>.md    the same conversation as readable markdown
+```
+
+A turn keeps the request **and** the JSON payload the page rendered, so
+reopening a session is a re-render, not a regeneration — same bubble, same
+*How this answer was built* panel, same trace, **zero** model calls.
+
+```bash
+# continue a conversation from anywhere (the server owns the context)
+curl -s -X POST localhost:8000/orchestrate -H 'content-type: application/json' \
+  -d '{"message":"and the refunds?","session_id":"s-20261101-091403-a1b2c3"}' | python -m json.tool
+
+python3 -m scripts.memory list                     # conversations in memory/
+python3 -m scripts.memory show <session-id>        # you │ ai, turn by turn
+python3 -m scripts.memory search refund            # grep every conversation
+python3 -m scripts.memory export <id> -o chat.md   # markdown transcript
+python3 -m scripts.memory forget --all             # clear memory
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `HARNESS_MEMORY` | `true` | store conversations at all |
+| `MEMORY_DIR` | `memory` | where they live (git-ignored) |
+| `MEMORY_HISTORY_TURNS` | `6` | earlier turns handed back to the model |
+| `MEMORY_HISTORY_CHARS` | `3000` | clip per remembered message |
+| `MEMORY_MAX_TURNS` | `200` | oldest turns dropped past this |
+
+`POST /orchestrate`, `/chat` and `/search` take `session_id` (created when
+unknown, returned in `session`) and `remember` (`false` = do not store this
+exchange). When the session has turns, the model context is rebuilt from
+memory and the `history` array a browser sends is **ignored** — one source of
+truth, and a reloaded tab still continues properly.
+
+In the UI the **Memory** panel lists the conversations; clicking one re-renders
+it with its traces and you keep chatting. The pill in the composer shows which
+session you are in, `+ New` starts a fresh one, and the page reopens your last
+session on reload.
+
+JSON rather than SQLite on purpose: a conversation is a small self-contained
+document — greppable, diffable, backup-able with `cp`, readable without the app.
+The layout mirrors the run log (index for listing, one file per item for the
+detail), so both bases work the same way. An unwritable `MEMORY_DIR` degrades to
+in-process memory and reports `writable: false` in `/health`.
+
 ---
 
 ## 6. HTTP API
@@ -520,6 +581,11 @@ Limits: `FILES_MAX_MB=10`, `FILES_MAX_CHARS=200000` (truncation is reported),
 | `GET` | `/agents` | agent roster, planner mode, review/synthesis flags, readiness |
 | `GET` | `/runs` | recent orchestration runs from `logs/orchestrator/` (plan, agents, model calls, timing) |
 | `GET` | `/runs/{run_id}` | one run, full unclipped trace (prompts, tool calls, results) |
+| `GET` | `/sessions` | conversations in memory (title, turns, last message, `?q=` filter) |
+| `POST` | `/sessions` | start an empty conversation (`{title, mode}`) |
+| `GET` | `/sessions/{id}` | every turn of a conversation, with the payload to replay it |
+| `PATCH` | `/sessions/{id}` | rename a conversation |
+| `DELETE` | `/sessions/{id}` | forget a conversation |
 | `GET` | `/diagnose` | model ping + search pings + hints |
 | `GET` | `/version` | app version (also in `/health` and in the page `<meta>`) |
 
@@ -558,6 +624,7 @@ app/
     registry.py        ordered chain, dedupe, empty-vs-error semantics
     base.py            SearchResult / SearchResponse / SearchError
   agent.py             tool-calling loop + trace + sources
+  memory.py            harness memory: conversations in memory/ (store, replay, CLI)
   orchestrator/
     manager.py         classify -> plan -> waves -> review -> synthesis, totals, errors
     planner.py         rules + LLM planner, per-agent briefs, dependency graph
@@ -574,9 +641,11 @@ run.py                 server launcher: preflight + banner + logs + startup reco
 .data/files/           uploaded attachments (runtime, git-ignored)
 logs/                  runtime logs (git-ignored) + logs/changelog/ release notes
 logs/orchestrator/     one JSON record per Auto run (trace, prompts, timings)
+memory/                the conversations themselves: sessions/*.json + .md (git-ignored)
 scripts/
   start.py             checks then server: the one command to run
   logs.py              read them: list | tail -f | errors | requests | process
+  memory.py            conversations: list | show | search | export | forget
   doctor.py            model + search + optional agent, one command
   check_providers.py   table, links, --ping, --models
   check_search.py      diagnose backends, run a real query
@@ -595,6 +664,7 @@ tests/                 offline tests (MockTransport, no keys)
 | `[openrouter] … HTTP 400/404` / `No endpoints found` | That `:free` model lost its endpoints. Pick another `:free` id for `OPENROUTER_MODEL` |
 | `502 … endpoint not found` | Wrong base URL path (OpenAI-style ends with `/v1`, Gemini `/v1beta/openai`) |
 | `model rejected tool calling` | Model too small for function calling. Pick a bigger one |
+| chat is empty after a reload / `"session": null` | Memory is off or `MEMORY_DIR` is not writable. Check `GET /health` → `memory`, set `HARNESS_MEMORY=true`, and `python -m scripts.memory list` |
 | `search … bot challenge` | DDG blocking the IP. `SEARCH_PROVIDERS=tavily,ddg` or `wikipedia,ddg` |
 | `all search backends failed` | No network / all keys missing. `python -m scripts.check_search --all` |
 | `SearXNG did not return JSON` | Enable `search.formats: [html, json]` in `settings.yml` |
@@ -608,6 +678,10 @@ tests/                 offline tests (MockTransport, no keys)
 
 Everything goes to `logs/` (override with `LOG_DIR`). Files are created on start, rotate at
 5 MB × 5, and are git-ignored — only `logs/README.md` and `logs/changelog/` are committed.
+
+Logs are diagnostics, not content: the conversation itself lives in `memory/`
+(§5, "Harness memory"). Use `scripts.logs` for "what did the process do?" and
+`scripts.memory` for "what did we say?"
 
 | File | What it holds |
 |---|---|

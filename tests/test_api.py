@@ -3,19 +3,37 @@ app fails loudly (instead of silently answering from a mock)."""
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
 from app.main import VERSION, app
+import app.main as main_module
 
 
 class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # The harness memory is real in this app: keep it out of the repository.
+        cls._memory_tmp = tempfile.TemporaryDirectory()
+        cls._memory_env = os.environ.get("MEMORY_DIR")
+        os.environ["MEMORY_DIR"] = cls._memory_tmp.name
         get_settings.cache_clear()
+        main_module.reset_memory()
         cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._memory_env is None:
+            os.environ.pop("MEMORY_DIR", None)
+        else:
+            os.environ["MEMORY_DIR"] = cls._memory_env
+        main_module.reset_memory()
+        get_settings.cache_clear()
+        cls._memory_tmp.cleanup()
 
     # ------------------------------------------------------------- basics
     def test_index_serves_test_harness(self):

@@ -21,6 +21,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from app import logs
@@ -28,6 +29,7 @@ from app.agent import WebSearchAgent
 from app.config import get_settings
 from app.llm.base import ProviderError
 from app.llm.registry import ConfigurationError, build_chain, describe_providers
+from app.memory import SessionMemory
 from app.orchestrator import Manager
 from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
@@ -164,6 +166,36 @@ async def check_orchestrator(settings, question: str) -> tuple[bool, dict]:
     return bool(result.answer), result.to_dict()
 
 
+def check_memory(settings) -> tuple[bool, dict]:
+    print("\n5) harness memory")
+    if not settings.harness_memory:
+        line(SKIP, "memory", "disabled (HARNESS_MEMORY=false)")
+        return "skipped", skipped("memory is disabled")
+    store = SessionMemory(
+        settings.memory_dir,
+        max_turns=settings.memory_max_turns,
+        history_turns=settings.memory_history_turns,
+        history_chars=settings.memory_history_chars,
+    )
+    stats = store.stats()
+    line(
+        OK if stats["writable"] else BAD,
+        "store",
+        f"{stats['dir']} · {stats['sessions']} session(s) · {stats['turns']} turn(s)",
+    )
+    with tempfile.TemporaryDirectory() as probe_dir:
+        probe = SessionMemory(probe_dir)
+        info = probe.append(
+            None, mode="auto", user_text="doctor probe", response={"answer": "probe answer"}
+        )
+        loaded = probe.get(info["session_id"]) if info else None
+        round_trip = bool(loaded and loaded.get("turns") and probe.history(info["session_id"]))
+        line(OK if round_trip else BAD, "round trip", "stored, reloaded and replayed from disk" if round_trip else "could not read back a probe session")
+    for item in store.list(3):
+        line(OK, item["session_id"], f"{item['turns']} turn(s) · {(item.get('title') or '')[:60]}")
+    return bool(stats["writable"] and round_trip), stats
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify model + search configuration end to end.")
     parser.add_argument("-q", "--query", default="python asyncio tutorial", help="search query for the checks")
@@ -207,6 +239,7 @@ def main() -> int:
         "search": [],
         "agent": skipped("not requested; pass --agent for a full model+search round trip"),
         "orchestrator": skipped("not requested; pass --orchestrate for a manager run"),
+        "memory": {},
     }
     model_ok = True
     if not args.search_only:
@@ -224,6 +257,9 @@ def main() -> int:
         )
         results["agent"] = agent_data
 
+    memory_ok, memory_stats = check_memory(settings)
+    results["memory"] = memory_stats
+
     orchestrator_ok = "skipped"
     if args.orchestrate:
         orchestrator_ok, orchestrator_data = asyncio.run(
@@ -239,6 +275,7 @@ def main() -> int:
         "search_ok": search_ok,
         "agent_ok": agent_ok,
         "orchestrator_ok": orchestrator_ok,
+        "memory_ok": memory_ok,
     }
     print(f"summary: {json.dumps(summary)}")
     if agent_ok == "skipped":
@@ -255,11 +292,12 @@ def main() -> int:
         print("    (model ids: python -m scripts.check_providers --provider groq --models)")
 
     log.info(
-        "doctor finished model_ok=%s search_ok=%s agent_ok=%s orchestrator_ok=%s",
+        "doctor finished model_ok=%s search_ok=%s agent_ok=%s orchestrator_ok=%s memory_ok=%s",
         model_ok,
         search_ok,
         agent_ok,
         orchestrator_ok,
+        memory_ok,
     )
     if not model_ok:
         log.warning("doctor: model check failed — see logs/error.log and `python -m scripts.logs errors`")
@@ -277,6 +315,7 @@ def main() -> int:
         and (args.search_only or model_ok)
         and (agent_ok is not False)
         and (orchestrator_ok is not False)
+        and (memory_ok is not False)
     )
     return 0 if ok else 1
 

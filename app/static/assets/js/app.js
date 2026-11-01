@@ -2,7 +2,8 @@
    Agetnic Orchestration Sandbox — test-harness frontend
    Talks to the FastAPI backend on the same origin:
      GET  /health /providers /providers/{name}/models /diagnose
-     POST /chat /search
+     GET  /sessions /sessions/{id}   (harness memory)
+     POST /chat /search /orchestrate
    No build step, no dependencies.
    ═══════════════════════════════════════════════════════════════ */
 
@@ -34,7 +35,11 @@
     },
   ];
 
-  const STORAGE = { runs: "agetnic.runs.v1", mode: "agetnic.mode.v1" };
+  const STORAGE = {
+    runs: "agetnic.runs.v1",
+    mode: "agetnic.mode.v1",
+    session: "agetnic.session.v1",
+  };
   const UI_VERSION =
     document.querySelector('meta[name="agetnic-version"]')?.content || "dev";
 
@@ -69,6 +74,10 @@
     diagnostics: null,
     providers: null,
     messages: [],
+    sessions: [],
+    sessionId: null,
+    session: null,
+    sessionTurns: 0,
     busy: false,
   };
 
@@ -312,6 +321,7 @@
       (state.mode === "search" ? pinned : "") +
       files +
       " · v" + UI_VERSION;
+    updateSessionPill();
   }
 
   /* ──────────────────────── attachments ─────────────────────── */
@@ -1004,6 +1014,129 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
+  // The text of one answer. Search-only turns are formatted here and mirrored
+  // by app/memory.py, so a stored turn replays with exactly the same words.
+  function answerText(data, mode) {
+    if (mode === "search") {
+      if (data.answer) return data.answer; // restored turns carry their text
+      const lines = (data.results || []).map(
+        (item, index) =>
+          index + 1 + ". " + item.title + "\n   " + item.url + "\n   " + (item.snippet || "")
+      );
+      return (
+        "Search backend: " + data.provider + " · " + data.count + " result(s) · " +
+        data.latency_ms + " ms\n\n" +
+        (lines.length ? lines.join("\n\n") : "No results.")
+      );
+    }
+    return data.answer || "";
+  }
+
+  // One renderer for a live answer and for one read back out of memory:
+  // same bubble, same "How this answer was built" panel, same meta line.
+  function renderAnswerInto(body, data, mode, existingText) {
+    const text = existingText || el("div", "msg-text");
+    text.textContent = answerText(data, mode) || "(empty answer)";
+    if (text.parentNode !== body) body.appendChild(text);
+
+    if (mode === "auto" && data.orchestration) {
+      renderOrchestration(body, data);
+    } else {
+      renderTimeline(body, data);
+    }
+    renderSources(body, data.sources);
+
+    if (mode === "auto" && data.orchestration) {
+      const orch = data.orchestration;
+      const bits = [];
+      if (orch.model) bits.push(orch.provider + "/" + orch.model);
+      bits.push(orch.strategy + " planner / " + (orch.plan.detail_source || "rules") + " briefs");
+      bits.push((orch.plan.agents || []).length + " agent(s) in " + (orch.waves || []).length + " wave(s)");
+      if (orch.model_calls) bits.push(orch.model_calls + " model call(s)");
+      bits.push(orch.parallel_ms + " ms agents · " + orch.latency_ms + " ms total");
+      body.appendChild(el("div", "tl-meta", bits.join(" · ")));
+    } else {
+      renderMeta(body, data);
+    }
+    return text;
+  }
+
+  function errorStub(turn) {
+    const error = (turn.assistant || {}).error || {};
+    const body = error.body || {};
+    const mode = turn.mode || "auto";
+    return {
+      ok: false,
+      status: error.status || body.status || 0,
+      path: mode === "auto" ? "/orchestrate" : mode === "search" ? "/search" : "/chat",
+      data: Object.keys(body).length ? body : { message: "This turn failed when it was sent." },
+    };
+  }
+
+  // One stored turn: the user bubble, then the assistant bubble rendered from
+  // the payload that was saved — no network, no regeneration.
+  function appendStoredTurn(turn) {
+    const user = turn.user || {};
+    const files = (user.files || []).map((file) => file.name).filter(Boolean);
+    appendUser(user.text || "", files);
+
+    const message = el("div", "message assistant");
+    const avatar = el("div", "avatar", "AI");
+    const body = el("div", "body");
+    body.appendChild(el("div", "msg-role", "Assistant"));
+    message.appendChild(avatar);
+    message.appendChild(body);
+    $("chat").appendChild(message);
+
+    const assistant = turn.assistant || {};
+    if (assistant.ok === false) {
+      body.appendChild(el("div", "msg-text", errorText(errorStub(turn))));
+    } else {
+      const data = assistant.response || {
+        answer: assistant.text || assistant.answer || "",
+        sources: [],
+      };
+      renderAnswerInto(body, data, turn.mode || "auto");
+    }
+    return message;
+  }
+
+  function renderEmptyState(text) {
+    const chat = $("chat");
+    chat.textContent = "";
+    const empty = el("div", "empty-state");
+    empty.id = "empty-state";
+    empty.appendChild(el("h2", null, text ? "New conversation" : "Orchestration test console"));
+    empty.appendChild(
+      el(
+        "p",
+        null,
+        text ||
+          "Auto is the full architecture: a manager plans, the agents run in parallel waves and the manager writes the answer — every step stays open under the reply."
+      )
+    );
+    empty.appendChild(
+      el(
+        "p",
+        "muted",
+        "This conversation is remembered in memory/ as you go. Reopen it later from the Memory panel and the model gets the earlier turns back."
+      )
+    );
+    chat.appendChild(empty);
+  }
+
+  function formatWhen(iso) {
+    if (!iso) return "";
+    const when = new Date(iso);
+    if (isNaN(when.getTime())) return iso;
+    const seconds = Math.round((Date.now() - when.getTime()) / 1000);
+    if (seconds < 60) return "just now";
+    if (seconds < 3600) return Math.round(seconds / 60) + " min ago";
+    if (seconds < 86400) return Math.round(seconds / 3600) + " h ago";
+    if (seconds < 86400 * 7) return Math.round(seconds / 86400) + " d ago";
+    return when.toISOString().slice(0, 10);
+  }
+
   function renderTimeline(container, run) {
     const trace = run.trace || [];
     if (!trace.length) return;
@@ -1079,37 +1212,7 @@
     }
 
     const data = result.data;
-    let answer = data.answer;
-    if (mode === "search") {
-      const lines = (data.results || []).map(
-        (item, index) =>
-          (index + 1) + ". " + item.title + "\n   " + item.url + "\n   " + (item.snippet || "")
-      );
-      answer =
-        "Search backend: " + data.provider + " · " + data.count + " result(s) · " + data.latency_ms + " ms\n\n" +
-        (lines.length ? lines.join("\n\n") : "No results.");
-    }
-
-    text.textContent = answer || "(empty answer)";
-    body.appendChild(text);
-    if (mode === "auto") {
-      renderOrchestration(body, data);
-    } else {
-      renderTimeline(body, data);
-    }
-    renderSources(body, data.sources);
-    if (mode === "auto" && data.orchestration) {
-      const orch = data.orchestration;
-      const bits = [];
-      if (orch.model) bits.push(orch.provider + "/" + orch.model);
-      bits.push(orch.strategy + " planner / " + (orch.plan.detail_source || "rules") + " briefs");
-      bits.push((orch.plan.agents || []).length + " agent(s) in " + (orch.waves || []).length + " wave(s)");
-      if (orch.model_calls) bits.push(orch.model_calls + " model call(s)");
-      bits.push(orch.parallel_ms + " ms agents · " + orch.latency_ms + " ms total");
-      body.appendChild(el("div", "tl-meta", bits.join(" · ")));
-    } else {
-      renderMeta(body, data);
-    }
+    renderAnswerInto(body, data, mode, text);
     scrollChat();
 
     const run = {
@@ -1155,6 +1258,183 @@
       });
       list.appendChild(item);
     });
+  }
+
+  /* ─────────────────────── harness memory ──────────────────── */
+  // The conversation lives on the server (memory/), not only in this tab:
+  // reopening a session re-renders every turn from the stored payload.
+  function updateSessionPill() {
+    const pill = $("session-pill");
+    if (!pill) return;
+    if (!state.sessionId) {
+      pill.textContent = "new conversation";
+      pill.className = "session-pill";
+      pill.title = "The next message starts a conversation in memory/";
+      return;
+    }
+    pill.textContent =
+      "memory: " + (state.sessionTurns || 0) + " turn(s) · " + state.sessionId;
+    pill.className = "session-pill live";
+    pill.title =
+      "Session " + state.sessionId +
+      " — stored in memory/, restored on reload, and sent as context with the next message";
+  }
+
+  function saveSessionId(sessionId) {
+    try {
+      if (sessionId) store.setItem(STORAGE.session, sessionId);
+      else store.removeItem(STORAGE.session);
+    } catch (_) {
+      /* storage may be disabled — the session still lives on the server */
+    }
+  }
+
+  async function loadSessions() {
+    const summary = $("sessions-summary");
+    const list = $("sessions-list");
+    if (!list) return;
+    const { ok, data } = await api("/sessions?limit=25");
+    if (!ok) {
+      if (summary) summary.textContent = "Memory unavailable — " + (data.message || "backend down");
+      return;
+    }
+    state.sessions = data.sessions || [];
+    if (summary) {
+      if (data.enabled === false) {
+        summary.textContent = "Memory is off (HARNESS_MEMORY=false)";
+      } else {
+        const turns = state.sessions.reduce((sum, item) => sum + (item.turns || 0), 0);
+        summary.textContent =
+          state.sessions.length + " session(s) · " + turns + " turn(s) · " + (data.dir || "memory/");
+        summary.className = "diag-summary";
+      }
+    }
+    renderSessions();
+  }
+
+  function renderSessions() {
+    const list = $("sessions-list");
+    if (!list) return;
+    list.textContent = "";
+    if (!state.sessions.length) {
+      list.appendChild(el("li", "muted small", "No conversations in memory yet."));
+      return;
+    }
+    state.sessions.forEach((item) => {
+      const row = el("li", "session-item" + (item.session_id === state.sessionId ? " active" : ""));
+      const main = el("div", "session-main");
+      main.appendChild(el("div", "session-title", item.title || item.session_id));
+      const bits = [(item.turns || 0) + " turn(s)", formatWhen(item.updated_at)];
+      if (item.agents && item.agents.length) bits.push(item.agents.join(" → "));
+      else if (item.modes && item.modes.length) bits.push(item.modes.join(" · "));
+      main.appendChild(el("div", "session-meta", bits.join(" · ")));
+      row.appendChild(main);
+      row.title = (item.last_user || "") + (item.last_answer ? "\n→ " + item.last_answer : "");
+      main.addEventListener("click", () => openSession(item.session_id));
+
+      const forget = el("button", "session-forget", "✕");
+      forget.type = "button";
+      forget.title = "Forget this conversation (deletes it from memory/)";
+      let armed = false;
+      forget.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (!armed) {
+          armed = true;
+          forget.textContent = "delete?";
+          forget.classList.add("armed");
+          setTimeout(() => {
+            armed = false;
+            forget.textContent = "✕";
+            forget.classList.remove("armed");
+          }, 4000);
+          return;
+        }
+        deleteSession(item.session_id);
+      });
+      row.appendChild(forget);
+      list.appendChild(row);
+    });
+  }
+
+  function restoreSession(record) {
+    if (!record || !record.session_id) return false;
+    const turns = record.turns || [];
+    state.sessionId = record.session_id;
+    state.session = record;
+    state.sessionTurns = turns.length;
+    state.messages = [];
+    state.files = [];
+    saveSessionId(record.session_id);
+    renderAttachments();
+
+    hideEmptyState();
+    const chat = $("chat");
+    chat.textContent = "";
+    if (!turns.length) {
+      renderEmptyState("This conversation is stored but has no messages yet — send the first one.");
+    }
+    turns.forEach((turn) => {
+      appendStoredTurn(turn);
+      // keep the local replay too: it is what gets sent if memory is switched off
+      const question = (turn.user || {}).text || "";
+      if (question) state.messages.push({ role: "user", content: question });
+      const answer =
+        (turn.assistant || {}).answer ||
+        (turn.assistant || {}).text ||
+        ((turn.assistant || {}).response || {}).answer ||
+        "";
+      if (answer) state.messages.push({ role: "assistant", content: String(answer).slice(0, 4000) });
+    });
+    state.messages = state.messages.slice(-12);
+
+    updateSessionPill();
+    renderSessions();
+    scrollChat();
+    showInspector(
+      record,
+      "Session " + record.session_id + " — " + turns.length + " turn(s) restored from memory, ready to continue."
+    );
+    return true;
+  }
+
+  async function openSession(sessionId) {
+    if (!sessionId) return false;
+    const { ok, data } = await api("/sessions/" + encodeURIComponent(sessionId));
+    if (!ok) {
+      saveSessionId(null);
+      state.sessionId = null;
+      state.sessionTurns = 0;
+      updateSessionPill();
+      return false;
+    }
+    return restoreSession(data);
+  }
+
+  async function deleteSession(sessionId) {
+    if (!sessionId) return;
+    const { ok } = await api("/sessions/" + encodeURIComponent(sessionId), { method: "DELETE" });
+    if (!ok) return;
+    if (state.sessionId === sessionId) newSession();
+    loadSessions();
+  }
+
+  function newSession() {
+    state.sessionId = null;
+    state.session = null;
+    state.sessionTurns = 0;
+    state.messages = [];
+    state.files = [];
+    saveSessionId(null);
+    renderAttachments();
+    renderEmptyState();
+    updateSessionPill();
+    renderSessions();
+    showInspector(
+      "New conversation — memory starts with your first message (the previous one stays in memory/).",
+      "Harness memory"
+    );
+    const prompt = $("prompt");
+    if (prompt) prompt.focus();
   }
 
   /* ──────────────────────────── sending ────────────────────── */
@@ -1205,6 +1485,8 @@
             message: text,
             history: historyPayload(),
             file_ids: fileIds,
+            // continue the conversation that is in memory (created when null)
+            session_id: state.sessionId,
           }),
         });
       } else if (mode === "search") {
@@ -1214,6 +1496,7 @@
             query: text,
             max_results: 5,
             provider: state.pinnedSearch || null,
+            session_id: state.sessionId,
           }),
         });
       } else {
@@ -1224,6 +1507,7 @@
             history: historyPayload(),
             allow_search: mode === "agent",
             max_steps: 4,
+            session_id: state.sessionId,
           }),
         });
       }
@@ -1243,27 +1527,22 @@
       state.messages = state.messages.slice(-12);
     }
 
+    // The server stored this turn in the harness memory and tells us which
+    // session it belongs to — adopt it so the next message continues it.
+    const stored = result && result.data && result.data.session;
+    if (stored && stored.session_id) {
+      state.sessionId = stored.session_id;
+      state.sessionTurns = stored.turns || state.sessionTurns + 1;
+      saveSessionId(stored.session_id);
+      updateSessionPill();
+      loadSessions();
+    }
+
     state.busy = false;
     $("btn-send").disabled = false;
     $("btn-send").textContent = sendLabel;
     if (mode === "auto" && result && result.ok) loadRunLog();
     scrollChat();
-  }
-
-  function clearSession() {
-    state.messages = [];
-    state.files = [];
-    renderAttachments();
-    const chat = $("chat");
-    chat.textContent = "";
-    const empty = el("div", "empty-state");
-    empty.id = "empty-state";
-    empty.appendChild(el("h2", null, "Orchestration test console"));
-    const p = el("p");
-    p.appendChild(document.createTextNode("Conversation cleared. Pick a mode and send a prompt."));
-    empty.appendChild(p);
-    chat.appendChild(empty);
-    showInspector("Session cleared — no active trace.", "Trace inspector");
   }
 
   /* ────────────────────────────── wire up ──────────────────── */
@@ -1313,7 +1592,11 @@
     if (refreshAgents) refreshAgents.addEventListener("click", loadAgents);
     const refreshRuns = $("btn-refresh-runs");
     if (refreshRuns) refreshRuns.addEventListener("click", loadRunLog);
-    $("btn-clear").addEventListener("click", clearSession);
+    $("btn-clear").addEventListener("click", newSession);
+    const newSessionBtn = $("btn-new-session");
+    if (newSessionBtn) newSessionBtn.addEventListener("click", newSession);
+    const refreshSessions = $("btn-refresh-sessions");
+    if (refreshSessions) refreshSessions.addEventListener("click", loadSessions);
     $("btn-diag").addEventListener("click", runDiagnostics);
     $("btn-diag-top").addEventListener("click", runDiagnostics);
     $("btn-providers").addEventListener("click", openProviders);
@@ -1386,6 +1669,11 @@
       loadProviders();
       loadAgents();
       loadRunLog();
+      loadSessions().then(async () => {
+        const last = store.getItem(STORAGE.session);
+        if (last) await openSession(last);
+        updateSessionPill();
+      });
     }
 
     if (!state.runs.length) {
@@ -1396,6 +1684,7 @@
           endpoints: [
             "/health", "/providers", "/agents", "/chat", "/orchestrate",
             "/files", "/search", "/diagnose", "/search/diagnose",
+            "/sessions", "/sessions/{id}",
           ],
         },
         "Trace inspector — send a prompt or run diagnostics to fill this panel."

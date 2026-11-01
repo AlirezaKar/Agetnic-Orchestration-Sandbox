@@ -186,6 +186,17 @@ class Settings(BaseSettings):
     orchestrator_max_parallel: int = 4
     orchestrator_context_chars: int = 6000
 
+    # ---------------------------------------------------- harness memory
+    # The conversation itself (not the run log): every user turn and every
+    # answer is written to memory/ so a session can be reopened and continued.
+    harness_memory: bool = True
+    memory_dir: str = "memory"
+    # How many earlier turns are handed back to the model as context.
+    memory_history_turns: int = 6
+    memory_history_chars: int = 3000
+    # Oldest turns are dropped from a session file past this many.
+    memory_max_turns: int = 200
+
     # ------------------------------------------------------ attachments
     files_dir: str = ".data/files"
     files_max_mb: float = 10.0
@@ -265,6 +276,9 @@ class Settings(BaseSettings):
             "orchestrator_planner": self.orchestrator_planner,
             "orchestrator_agents": self.orchestrator_roster,
             "orchestrator_review": self.orchestrator_review,
+            "harness_memory": self.harness_memory,
+            "memory_dir": self.memory_dir,
+            "memory_history_turns": self.memory_history_turns,
         }
 
 
