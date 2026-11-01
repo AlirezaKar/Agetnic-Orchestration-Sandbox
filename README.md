@@ -64,17 +64,20 @@ starts the logs described in §9 (`logs/agetnic.log`, `error.log`, `requests.log
 `terminal.log`, `process.log`). Plain `uvicorn app.main:app --port 8000` works too — it
 configures the same files on startup.
 
-Open <http://localhost:8000> — the **test harness** (the original PR #1 UI, rebuilt on this
-API). Three columns, each scrolling on its own inside the screen:
+Open <http://localhost:8000> — the **Agentic Orchestration Studio** (design reference:
+[`docs/redesign/`](docs/redesign/README.md)). Three columns, each scrolling on its own inside
+the screen:
 
 | Column | What is in it |
 |---|---|
-| sidebar | **Mode** (Auto / Agent / Answer only / Search only) · **Agents** (the live roster) · **Memory** (conversations in `memory/`, click to reopen) · **Runs** (`Saved` = `logs/orchestrator/`, `This tab` = your own runs) · **Search** (backends, click to pin) |
-| chat | the conversation, the plan panel with one card per agent, and every step of the run under the answer |
-| inspector | the full JSON record of whatever you clicked, plus the readable diagnostics rows |
+| top bar | brand, `LLM` / `SEARCH` / `Diag` status pills, **Providers**, **Run diagnostics** |
+| sidebar | workspace switcher · nav (Overview · Run history · Memory · Provider settings) · current session + the conversations in `memory/` (click to reopen) · **Runs** (`Saved` = `logs/orchestrator/`, `This tab` = your own runs) · **Agents** (live roster) · **Search backends** (click to pin) · health card (model + search latency) |
+| chat | the conversation as a reading surface — Markdown answers (tables, code, callouts), source chips, and the run panel with one chip per agent and every step of the run underneath |
+| inspector | three tabs — **Trace** (run summary, numbered timeline with durations, tool activity, readable diagnostics), **Context**, **JSON** |
 
-**Run diagnostics**, **Providers** and the connection badges live in the top bar.
-Auto mode is described in §5.
+The composer carries the mode control (**Auto** / **Agent** / **Answer** / **Search**),
+**Attach**, **New chat** and **Run prompt**; `Enter` runs, `Shift+Enter` adds a line. Auto mode
+is described in §5.
 
 ```bash
 python -m unittest discover -s tests -v     # offline, no keys, no network
@@ -717,8 +720,8 @@ app/
     files.py           upload decoding, extraction (txt/csv/json/docx/xlsx/pdf), store
   main.py              FastAPI routes (served at / and /api)
   logs.py              LOGGING: rotating files, redaction, request lines, crash capture
-  static/index.html    test harness (modes, diagnostics, history, inspector)
-  static/assets/       the original dark console CSS + app.js
+  static/index.html    the studio page: top bar, sidebar, chat, inspector, modals
+  static/assets/       styles.css (design system) + extra.css (app components) + app.js
 run.py                 server launcher: preflight + banner + logs + startup record
 .data/files/           uploaded attachments (runtime, git-ignored)
 logs/                  runtime logs (git-ignored) + logs/changelog/ release notes
@@ -732,6 +735,7 @@ scripts/
   check_providers.py   table, links, --ping, --models
   check_search.py      diagnose backends, run a real query
 tests/                 offline tests (MockTransport, no keys)
+docs/redesign/         the design reference the UI was built on (preview.png + prototype)
 ```
 
 ## 8. Troubleshooting
@@ -826,6 +830,11 @@ skips the model ping the same way.
   caller (`errors[]`, `attempts[]`), so the agent can report a failed search truthfully.
 - **Docs are tested.** `tests/test_docs.py` asserts every provider in code appears in
   `.env.example` with its env vars and links, and that no secret-looking value is committed.
+- **The page is a view of the record, not a story about it.** The chat surface, the plan
+  chips and the inspector render the same payload the log file holds: if a step happened, it
+  is on screen; if it did not, nothing is drawn. Markdown is parsed locally into DOM nodes
+  (no CDN, no `innerHTML`), so an offline sandbox still reads correctly and model output
+  cannot inject markup.
 - **Logs are part of the product.** A request that fails must leave a line you can find:
   status, duration, request id, client, and a traceback in `error.log` when it was a crash.
   Redaction runs on the way out, so debugging never means pasting a key into a chat.

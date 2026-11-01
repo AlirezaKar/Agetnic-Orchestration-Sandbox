@@ -112,7 +112,7 @@ async function scenarioApiPrefix() {
   await sleep(1400);
 
   check('negotiation found the prefixed API', text(w, 'badge-llm') !== 'LLM: backend down' && !bannerShown(w), text(w, 'badge-llm'));
-  check('search backends loaded through the prefix', w.document.querySelectorAll('#search-list .provider-item').length > 0);
+  check('search backends loaded through the prefix', w.document.querySelectorAll('#search-list .provider-row').length > 0);
 }
 
 async function scenarioNormalHost() {
@@ -126,7 +126,7 @@ async function scenarioNormalHost() {
   check('auto mode is first and default', (w.document.querySelector('.mode-btn.active') || {}).dataset?.mode === 'auto');
   check('attachment control is present', !!attachButton(w));
   check('orchestrator panel is online', /planner/.test(text(w, 'agents-summary')));
-  check('search backends listed', w.document.querySelectorAll('#search-list .provider-item').length > 0);
+  check('search backends listed', w.document.querySelectorAll('#search-list .provider-row').length > 0);
 
   w.document.getElementById('prompt').value = 'hello';
   w.document.getElementById('btn-send').click();
@@ -202,7 +202,7 @@ async function scenarioNormalHost() {
   check('the assistant turn is back', !!w2.document.querySelector('.message.assistant .msg-text'));
   check(
     'the restored session is the active one',
-    !!w2.document.querySelector('#sessions-list .session-item.active')
+    !!w2.document.querySelector('#sessions-list .session-item.selected')
   );
   if (hadOrch) {
     check('the step-by-step trace survives the reload', w2.document.querySelectorAll('.trace-row').length > 0);
@@ -239,25 +239,179 @@ async function scenarioLayout() {
   };
 
   check('the page itself never scrolls', css('body', 'overflow') === 'hidden', css('body', 'overflow'));
-  check('the layout clips its columns', css('.layout', 'overflow') === 'hidden', css('.layout', 'overflow'));
-  check('the layout no longer guesses the header height', !/calc\(100vh/.test(CSS));
+  const shell = css('.app-shell', 'height');
+  check('the shell fills the viewport', shell === '100%', shell);
+  check('the workspace clips its columns', css('.workspace', 'overflow') === 'hidden', css('.workspace', 'overflow'));
+  check('the workspace keeps a flexible middle column', /minmax\(0/.test(w.getComputedStyle(w.document.querySelector('.workspace')).gridTemplateColumns || '') || /minmax\(0, 1fr\)/.test(CSS));
+  check('the shell no longer guesses the header height', !/calc\(100vh/.test(CSS));
   check('the inspector may shrink below its content', css('.inspector', 'minHeight') === '0px', css('.inspector', 'minHeight'));
   check('the inspector clips and its JSON scrolls',
-    css('.inspector', 'overflow') === 'hidden' && css('.trace-json', 'overflow') === 'auto',
-    `${css('.inspector', 'overflow')} / ${css('.trace-json', 'overflow')}`);
-  check('the JSON keeps a scroll area', css('.trace-json', 'minHeight') === '0px', css('.trace-json', 'minHeight'));
+    css('.inspector', 'overflow') === 'hidden' && css('.json-view', 'overflow') === 'auto',
+    `${css('.inspector', 'overflow')} / ${css('.json-view', 'overflow')}`);
+  check('the JSON keeps a scroll area', css('.json-view', 'minHeight') === '0px', css('.json-view', 'minHeight'));
   check('the chat column scrolls on its own',
-    css('.chat', 'overflowY') === 'auto' && css('.chat', 'minHeight') === '0px');
+    css('.chat-scroll', 'overflow') === 'auto' && css('.chat-scroll', 'minHeight') === '0px',
+    `${css('.chat-scroll', 'overflow')} / ${css('.chat-scroll', 'minHeight')}`);
   check('the sidebar scrolls on its own', css('.sidebar', 'overflowY') === 'auto', css('.sidebar', 'overflowY'));
 
-  const panels = w.document.querySelectorAll('.sidebar .panel');
+  const panels = w.document.querySelectorAll('.sidebar section');
   check('the sidebar is five tidy panels', panels.length === 5, `${panels.length} panels`);
+  check('the sidebar keeps runs, memory, agents and search', ['section-sessions', 'section-runs', 'section-agents', 'section-search']
+    .every((id) => !!w.document.getElementById(id)));
   check('the sidebar carries no prose', w.document.querySelectorAll('.sidebar p').length === 0);
   check('no diagnostics panel in the sidebar', !w.document.getElementById('btn-diag'));
 }
 
+
+/* ── F: the rich answer surface (stub backend) ───────────────────────────
+   The redesign turns the answer bubble into a reading surface: headings,
+   tables, lists, callouts, code blocks and inline formatting, with the
+   orchestration panel and the inspector timeline underneath. The live
+   backend cannot answer without a key, so this scenario stubs /orchestrate. */
+const MARKDOWN_ANSWER = [
+  '## Findings',
+  '',
+  'The manager split this into **three** tasks and ran them in _parallel waves_.',
+  '',
+  '| Area | Result |',
+  '| --- | --- |',
+  '| Planning | 3 agents, 2 waves |',
+  '| Search | ddg → wikipedia |',
+  '',
+  '- The planner wrote a brief per agent.',
+  '- Agents ran with tools.',
+  '',
+  '> Guardrail: no provider key means no answer, never an invented one.',
+  '',
+  '```python',
+  'result = await orchestrate(message="hi")',
+  '```',
+  '',
+  'Inline `code` and a [source](https://example.com/doc).',
+].join('\n');
+
+function richPayload() {
+  return {
+    ok: true,
+    answer: MARKDOWN_ANSWER,
+    sources: ['https://example.com/doc'],
+    latency_ms: 2450,
+    provider: 'groq',
+    model: 'llama-3.3-70b',
+    session: { session_id: 'sess-rich', turns: 1 },
+    orchestration: {
+      run_id: 'run-rich', provider: 'groq', model: 'llama-3.3-70b', strategy: 'heuristic',
+      model_calls: 5, parallel_ms: 1800, latency_ms: 2450, synthesized: true,
+      log_path: 'logs/orchestrator/run-rich.json',
+      plan: {
+        intent: 'research', strategy: 'heuristic', detail_source: 'llm',
+        summary: 'Manager picked two specialists.',
+        agents: ['search', 'document'],
+        steps: [
+          { agent: 'search', label: 'Search agent', wave: 1, task: 'find sources' },
+          { agent: 'document', label: 'Document agent', wave: 1, task: 'extract facts' },
+        ],
+      },
+      waves: [{ wave: 1, agents: ['search', 'document'] }],
+      trace: [
+        { seq: 1, stage: 'manager', actor: 'manager', title: 'Manager chose 2 specialists', offset_ms: 0, detail: { note: 'planner=llm' } },
+        { seq: 2, stage: 'tool', actor: 'search', title: 'web_search', offset_ms: 300, detail: { query: 'orchestration', latency_ms: 620, output: { count: 5 } } },
+        { seq: 3, stage: 'synthesis', actor: 'manager', title: 'Synthesized final answer', offset_ms: 2400, detail: { latency_ms: 1500 } },
+      ],
+      review: { asked: true, note: 'enough evidence', follow_up: [] },
+    },
+  };
+}
+
+async function scenarioRichAnswer() {
+  console.log('F  rich answer rendering (stub backend)');
+  const routes = {
+    '/health': { status: 'ok', version: '0.12.0', model_chain: ['groq'], search_chain: ['ddg'] },
+    '/providers': { providers: [], search: { providers: [] } },
+    '/agents': { planner: 'llm', synthesize: true, parallel: 4, roster: ['search'], agents: [] },
+    '/runs': { runs: [] },
+    '/sessions': { sessions: [] },
+    '/orchestrate': richPayload(),
+    '/chat': {
+      ok: true,
+      answer: 'Two steps: one model turn and one tool call.',
+      provider: 'groq', model: 'llama-3.3-70b', latency_ms: 900, steps: 2,
+      sources: ['https://example.com/a'],
+      trace: [
+        { type: 'model', provider: 'groq', model: 'llama-3.3-70b', latency_ms: 400,
+          content: 'I should search for this.',
+          tool_calls: [{ name: 'web_search', arguments: { query: 'orchestration' } }] },
+        { type: 'tool', name: 'web_search', latency_ms: 500, ok: true,
+          arguments: { query: 'orchestration' }, preview: { count: 3 } },
+      ],
+    },
+  };
+  const stub = async (target) => {
+    let clean = String(target).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+    if (!clean.startsWith('/')) clean = '/' + clean;
+    const body = routes[clean] || {};
+    return { ok: true, status: 200, json: async () => body };
+  };
+  const w = mount(stub, 'http://localhost:8000/');
+  await sleep(900);
+  w.document.getElementById('prompt').value = 'research orchestration';
+  w.document.getElementById('btn-send').click();
+  await sleep(600);
+
+  const bubble = w.document.querySelector('.message.assistant .msg-text');
+  const q = (sel) => (bubble ? !!bubble.querySelector(sel) : false);
+  check('the answer bubble is a markdown surface', !!bubble && bubble.classList.contains('markdown-body'));
+  check('headings render', q('h2'));
+  check('bold and italic render', q('strong') && q('em'));
+  check('tables render as a scrollable table', q('.table-wrap table.markdown-table'));
+  check('lists render', (bubble ? bubble.querySelectorAll('ul li').length : 0) === 2);
+  check('callouts render', q('.callout'));
+  check('fenced code keeps its language', q('.code-block pre code'));
+  check('inline code and links render', q('p code') && q('a[href]'));
+  check('sources become chips', w.document.querySelectorAll('.sources .source-link').length === 1);
+  check('the orchestration panel is attached', !!w.document.querySelector('.orch-panel'));
+  check('the plan lists one chip per agent', w.document.querySelectorAll('.plan-agents .agent-chip').length === 2);
+  check('the trace rows keep every event', w.document.querySelectorAll('.orch-panel .trace-row').length === 3);
+  check('the answer carries a meta line and actions',
+    !!w.document.querySelector('.answer-meta') && w.document.querySelectorAll('.message-actions button').length >= 2);
+
+  check('the inspector shows a run summary', !!w.document.querySelector('#inspector-trace .run-summary'));
+  check('the inspector shows a numbered timeline', w.document.querySelectorAll('#inspector-trace .trace-item').length === 3);
+  check('the inspector shows tool activity', w.document.querySelectorAll('#inspector-trace .trace-card').length === 1);
+  check('the context tab lists the run context', w.document.querySelectorAll('#inspector-context .context-item').length > 5);
+
+  w.document.querySelector('.inspector-tab[data-tab="json"]').click();
+  const json = w.document.getElementById('trace-json');
+  check('the JSON tab shows the payload', !json.hidden && /run-rich/.test(json.textContent));
+  check('opening a tab hides the others', w.document.getElementById('inspector-trace').hidden);
+  w.document.querySelector('.inspector-tab[data-tab="context"]').click();
+  check('the context tab becomes visible', !w.document.getElementById('inspector-context').hidden);
+
+  w.document.getElementById('btn-close-inspector').click();
+  check('closing the inspector collapses the column',
+    w.document.querySelector('.workspace').classList.contains('inspector-collapsed'));
+  w.document.getElementById('btn-toggle-inspector').click();
+  check('the toggle brings it back',
+    !w.document.querySelector('.workspace').classList.contains('inspector-collapsed'));
+
+  // Agent mode: the single-model trace keeps its steps and tool payloads.
+  w.document.querySelector('.mode-btn[data-mode="agent"]').click();
+  w.document.getElementById('prompt').value = 'search for orchestration';
+  w.document.getElementById('btn-send').click();
+  await sleep(600);
+  const lastPanel = [...w.document.querySelectorAll('.orch-panel')].pop();
+  check('agent mode draws its own trace panel', !!lastPanel);
+  check('agent mode keeps one row per step', lastPanel ? lastPanel.querySelectorAll('.trace-row').length === 2 : false);
+  check('a tool step can be expanded to its result',
+    !!(lastPanel && lastPanel.querySelector('.trace-json-block pre')));
+  check('the tool step lists its arguments',
+    !!(lastPanel && /orchestration/.test(lastPanel.textContent)));
+}
+
 (async () => {
   await scenarioStaticHost();
+  console.log('');
+  await scenarioRichAnswer();
   console.log('');
   await scenarioLayout();
   if (liveBase) {
