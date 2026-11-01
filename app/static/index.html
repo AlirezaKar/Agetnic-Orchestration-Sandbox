@@ -3,13 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="agetnic-version" content="0.10.0" />
+  <meta name="agetnic-version" content="0.11.0" />
   <title>Agetnic Orchestration Sandbox — Test Harness</title>
   <!-- Relative asset URLs: the harness keeps working when the app is mounted
        under a sub-path (/ui/, /sandbox/, a proxy prefix). The ?v= query busts
        stale caches after an upgrade. -->
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.10.0" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.10.0" />
+  <!-- A data: icon keeps the browser from asking /favicon.ico at all. -->
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.11.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.11.0" />
   <style>
     /* Inline fallback: the connection banner must be readable even if the
        stylesheets 404 (that is exactly when it matters). */
@@ -152,6 +154,23 @@
           <span class="att-label">Attached</span>
           <div id="att-list" class="att-list"></div>
         </div>
+        <!-- Permission prompt. Only shown when FILES_PERMISSION_PROMPT=true:
+             the agent reads a file after "Allow", never before. -->
+        <div id="consent" class="consent" role="group" aria-label="File permission" hidden>
+          <div class="consent-head">
+            <span class="consent-title" id="consent-count">Permission needed</span>
+            <span class="consent-buttons">
+              <button id="consent-allow-all" class="consent-allow" type="button">Allow all</button>
+              <button id="consent-deny-all" class="consent-deny" type="button">Don't allow any</button>
+            </span>
+          </div>
+          <p class="consent-sub">
+            An agent may read an attached file only after you allow it — nothing is uploaded
+            until you answer. <code>FILES_PERMISSION_PROMPT=false</code> in <code>.env</code>
+            skips this prompt and allows every file.
+          </p>
+          <div id="consent-list" class="consent-list"></div>
+        </div>
         <textarea id="prompt" rows="2" placeholder="Ask anything… (Enter to send · Shift+Enter for a new line · drop a file for the document agent)"></textarea>
         <div class="composer-actions">
           <span class="muted" id="composer-mode-label">Mode: Auto</span>
@@ -200,6 +219,6 @@
     </div>
   </div>
 
-  <script src="assets/js/app.js?v=0.10.0" defer></script>
+  <script src="assets/js/app.js?v=0.11.0" defer></script>
 </body>
 </html>

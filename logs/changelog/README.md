@@ -12,7 +12,7 @@ Release notes, one file per version. Runtime logs are **not** here — they live
 The version string is the single source of truth in `app/main.py`
 (`app/version.py`, re-exported as `app.main.VERSION`) and is mirrored into the page as `<meta name="agetnic-version">`,
 into the `?v=` cache-bust on every asset, and into the composer label
-(`· v0.10.0`). If those disagree, the browser is showing a cached page.
+(`· v0.11.0`). If those disagree, the browser is showing a cached page.
 
 ## Index
 
@@ -28,6 +28,7 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.8.0 | 2026-10-31 | merged (PR #12, `c19ab7f`) | [v0.8.0.md](v0.8.0.md) | Full step trace (prompts, tools, replies), LLM-written briefs, dependency waves, manager review, `logs/orchestrator/` |
 | 0.9.0 | 2026-11-01 | merged (PR #14, `f2c52d7`) | [v0.9.0.md](v0.9.0.md) | Harness memory: conversations stored in `memory/`, reopened and continued with their traces, `/sessions` API + Memory panel |
 | 0.10.0 | 2026-11-01 | merged (PR #16, `db10169`) | [v0.10.0.md](v0.10.0.md) | Orchestrator reorganised as a portable service: `service.py` + `contracts.py` (ports) + `host.py` (single seam), boundary enforced by tests |
+| 0.11.0 | 2026-11-01 | merged (PR #18) | [v0.11.0.md](v0.11.0.md) | Run records always serialise (`PlanStep` 500 fixed), `/favicon.ico` 204, file permission prompt (`FILES_PERMISSION_PROMPT`, allow/deny endpoint, 403 guard) |
 
 ## Adding a version
 

@@ -18,6 +18,7 @@ Read it with:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,37 @@ from typing import Any
 from app.orchestrator import host
 
 RUN_LOG_NAME = "runs.jsonl"
+
+
+def to_plain(value: Any) -> Any:
+    """Make any part of a run record JSON-safe.
+
+    Records are assembled from live objects (``PlanStep``, ``Plan``,
+    ``AgentOutcome``…), and one of them reaching ``json.dumps`` used to turn a
+    finished run into a 500. Anything with ``to_dict()`` is asked for its dict,
+    dataclasses are converted, and whatever is left is stringified instead of
+    raising.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): to_plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_plain(item) for item in value]
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return to_plain(to_dict())
+        except Exception:  # noqa: BLE001 - a broken to_dict() must not break the log
+            return str(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return to_plain(dataclasses.asdict(value))
+    return str(value)
+
+
+def _fallback(value: Any) -> Any:
+    """``json.dumps(default=…)`` hook: last line of defence for the run log."""
+    return to_plain(value)
 
 
 def runs_dir(log_dir: str | os.PathLike[str] | None = None) -> Path:
@@ -71,13 +103,18 @@ def save_run(record: dict[str, Any], *, log_dir: str | os.PathLike[str] | None =
     run_id = str(record.get("run_id") or "run-unknown")
     try:
         _rotate(directory / RUN_LOG_NAME, float(os.environ.get("LOG_ROTATE_MB", "5")))
-        line = json.dumps(record, ensure_ascii=False)
+        # default=_fallback: a stray object becomes a string, never a TypeError
+        line = json.dumps(record, ensure_ascii=False, default=_fallback)
         with (directory / RUN_LOG_NAME).open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
         target = directory / f"{run_id}.json"
-        target.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+        target.write_text(
+            json.dumps(record, indent=2, ensure_ascii=False, default=_fallback),
+            encoding="utf-8",
+        )
         return target
-    except OSError as exc:  # pragma: no cover - read-only checkouts still work
+    except (OSError, TypeError, ValueError) as exc:
+        # read-only checkouts, weird payloads: logging never fails a request
         host.get_logger("orchestrator").warning("could not write the run log: %s", exc)
         return None
 

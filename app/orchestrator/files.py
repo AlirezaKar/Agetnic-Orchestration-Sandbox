@@ -61,6 +61,10 @@ class Attachment:
     pages: int | None = None
     meta: dict[str, Any] = field(default_factory=dict)
     created: str = ""
+    # The user's answer to "may an agent read this file?" (True = allowed).
+    # A trusted workspace sets this at upload time; with FILES_PERMISSION_PROMPT
+    # the page asks first and the file waits here until the user answers.
+    consent: bool = True
 
     @property
     def chars(self) -> int:
@@ -96,6 +100,7 @@ class Attachment:
             pages=data.get("pages"),
             meta=dict(data.get("meta") or {}),
             created=str(data.get("created") or ""),
+            consent=bool(data.get("consent", True)),
         )
 
     def preview(self, limit: int = 400) -> str:
@@ -117,6 +122,7 @@ class Attachment:
             "columns": self.header or [],
             "rows": len(self.rows) - 1 if self.rows else 0,
             "preview": self.preview(),
+            "consent": self.consent,
         }
 
     def to_dict(self, *, include_text: bool = True) -> dict[str, Any]:
@@ -134,6 +140,7 @@ class Attachment:
             "meta": self.meta,
             "created": self.created,
             "chars": self.chars,
+            "consent": self.consent,
         }
         if include_text:
             payload["text"] = self.text
@@ -408,10 +415,15 @@ class AttachmentStore:
     def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory)
         self._memory: dict[str, Attachment] = {}
+        # False once a write fails (read-only checkout, a directory the process
+        # may not write). The upload still works, in memory, and says so.
+        self.writable = True
+        self.last_error = ""
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            self.writable = False
+            self.last_error = f"{type(exc).__name__}: {exc}"
 
     # ------------------------------------------------------------- internals
     def _text_path(self, file_id: str) -> Path:
@@ -426,19 +438,51 @@ class AttachmentStore:
     # ---------------------------------------------------------------- public
     def save(self, attachment: Attachment) -> Attachment:
         self._memory[attachment.id] = attachment
+        self._write_meta(attachment)
+        return attachment
+
+    def _write_meta(self, attachment: Attachment) -> bool:
+        """Text + sidecar for a fresh upload."""
         try:
             self._text_path(attachment.id).write_text(attachment.text, encoding="utf-8")
-            meta = attachment.summary()
-            meta["created"] = attachment.created
-            meta["has_rows"] = bool(attachment.rows)
-            self._meta_path(attachment.id).write_text(json.dumps(meta), encoding="utf-8")
             if attachment.rows:
                 self._rows_path(attachment.id).write_text(
                     json.dumps(attachment.rows), encoding="utf-8"
                 )
-        except OSError:
-            pass  # memory-only
+        except OSError as exc:
+            self._failed(exc)
+            return False
+        return self._write_sidecar(attachment)
+
+    def _write_sidecar(self, attachment: Attachment) -> bool:
+        """Just the JSON sidecar (the permission answer lives there)."""
+        try:
+            meta = attachment.summary()
+            meta["created"] = attachment.created
+            meta["has_rows"] = bool(attachment.rows)
+            self._meta_path(attachment.id).write_text(json.dumps(meta), encoding="utf-8")
+        except OSError as exc:  # memory-only
+            self._failed(exc)
+            return False
+        return True
+
+    def _failed(self, exc: OSError) -> None:
+        self.writable = False
+        self.last_error = f"{type(exc).__name__}: {exc}"
+
+    def set_consent(self, file_id: str, granted: bool) -> Attachment | None:
+        """Record the user's answer for one attachment (and persist it)."""
+        attachment = self.get(file_id)
+        if attachment is None:
+            return None
+        attachment.consent = bool(granted)
+        self._memory[attachment.id] = attachment
+        self._write_sidecar(attachment)
         return attachment
+
+    def pending(self) -> list[Attachment]:
+        """Attachments uploaded but not yet allowed by the user."""
+        return [item for item in self.list() if not item.consent]
 
     def get(self, file_id: str) -> Attachment | None:
         if file_id in self._memory:
@@ -461,6 +505,7 @@ class AttachmentStore:
                 header=meta.get("columns") or None,
                 pages=meta.get("pages"),
                 created=meta.get("created", ""),
+                consent=bool(meta.get("consent", True)),
             )
         except (OSError, ValueError):  # pragma: no cover - corrupt store
             return None
