@@ -81,6 +81,10 @@
     busy: false,
     // FILES_PERMISSION_PROMPT: ask before an agent may read an attached file.
     permissionPrompt: false,
+    // Runs panel: "saved" = logs/orchestrator on the server, "local" = this tab.
+    runsTab: "saved",
+    runsSummary: "",
+    historySummary: "",
   };
 
   /* ────────────────────────────── helpers ───────────────────── */
@@ -228,6 +232,9 @@
     $("trace-json").textContent =
       typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
     if (note) $("inspector-note").textContent = note;
+    // the diagnostics rows belong to the diagnostics report only
+    const diag = $("diag-summary");
+    if (diag) diag.hidden = true;
     document.body.classList.add("inspector-open");
   }
 
@@ -783,7 +790,7 @@
     summary.textContent =
       (info.planner || "heuristic") + " planner · synthesis " +
       (info.synthesize ? "on" : "off") + " · " + (info.parallel || 4) + " in parallel";
-    summary.className = "diag-summary";
+    summary.className = "panel-meta muted";
     list.textContent = "";
     (info.agents || []).forEach((agent) => {
       const active = (info.roster || []).includes(agent.name);
@@ -807,16 +814,15 @@
     if (!list) return;
     const result = await api("/runs?limit=8");
     if (!result.ok) {
-      if (summary) summary.textContent = "Run log unavailable (GET /runs).";
+      state.runsSummary = "Run log unavailable (GET /runs).";
+      updateRunsSummary();
       return;
     }
     const runs = result.data.runs || [];
-    if (summary) {
-      summary.textContent = runs.length
-        ? runs.length + " recent run(s) · " + (result.data.dir || "logs/orchestrator")
-        : "No runs yet — send a prompt in Auto mode.";
-      summary.className = "diag-summary";
-    }
+    state.runsSummary = runs.length
+      ? runs.length + " saved · " + (result.data.dir || "logs/orchestrator")
+      : "No saved runs yet — send an Auto prompt.";
+    updateRunsSummary();
     list.textContent = "";
     runs.forEach((run) => {
       const row = el("div", "run-row");
@@ -827,6 +833,25 @@
       row.addEventListener("click", () => openRun(run.run_id));
       list.appendChild(row);
     });
+  }
+
+  function updateRunsSummary() {
+    const summary = $("runs-summary");
+    if (!summary) return;
+    summary.textContent =
+      state.runsTab === "local" ? state.historySummary : state.runsSummary;
+  }
+
+  function setRunsTab(tab) {
+    state.runsTab = tab === "local" ? "local" : "saved";
+    document.querySelectorAll("#runs-tabs .seg-btn").forEach((button) => {
+      button.classList.toggle("active", button.dataset.runs === state.runsTab);
+    });
+    const saved = $("runs-list");
+    const local = $("trace-list");
+    if (saved) saved.hidden = state.runsTab !== "saved";
+    if (local) local.hidden = state.runsTab !== "local";
+    updateRunsSummary();
   }
 
   async function openRun(runId) {
@@ -910,8 +935,11 @@
 
   async function runDiagnostics() {
     setBadge("badge-diag", "Diag: running…", "warn");
-    const summary = $("diag-summary");
+    // The rows live at the top of the inspector; if that block is missing the
+    // report still opens as JSON, so build into a detached node instead.
+    const summary = $("diag-summary") || document.createElement("div");
     summary.className = "diag-summary";
+    summary.hidden = false;
     summary.textContent = "Running model ping + search backends…";
 
     const { ok, data } = await api("/diagnose");
@@ -965,6 +993,7 @@
       modelOk && anySearch ? "ok" : "bad"
     );
     showInspector(data, "Diagnostics report (GET /diagnose)");
+    summary.hidden = false;  // showInspector hides the rows for run records
   }
 
   /* ─────────────────────────── providers modal ─────────────── */
@@ -1317,9 +1346,14 @@
   /* ─────────────────────────── run history ─────────────────── */
   function renderHistory() {
     const list = $("trace-list");
+    if (!list) return;
+    state.historySummary = state.runs.length
+      ? state.runs.length + " in this tab"
+      : "Nothing in this tab yet.";
+    updateRunsSummary();
     list.textContent = "";
     if (!state.runs.length) {
-      list.appendChild(el("li", "muted", "No runs yet."));
+      list.appendChild(el("li", "muted small", "Send a prompt — runs land here."));
       return;
     }
     state.runs.forEach((run) => {
@@ -1385,7 +1419,7 @@
         const turns = state.sessions.reduce((sum, item) => sum + (item.turns || 0), 0);
         summary.textContent =
           state.sessions.length + " session(s) · " + turns + " turn(s) · " + (data.dir || "memory/");
-        summary.className = "diag-summary";
+        summary.className = "panel-meta muted";
       }
     }
     renderSessions();
@@ -1687,14 +1721,28 @@
     const refreshAgents = $("btn-refresh-agents");
     if (refreshAgents) refreshAgents.addEventListener("click", loadAgents);
     const refreshRuns = $("btn-refresh-runs");
-    if (refreshRuns) refreshRuns.addEventListener("click", loadRunLog);
+    if (refreshRuns) {
+      refreshRuns.addEventListener("click", () => {
+        renderHistory();
+        loadRunLog();
+      });
+    }
     $("btn-clear").addEventListener("click", newSession);
     const newSessionBtn = $("btn-new-session");
     if (newSessionBtn) newSessionBtn.addEventListener("click", newSession);
     const refreshSessions = $("btn-refresh-sessions");
     if (refreshSessions) refreshSessions.addEventListener("click", loadSessions);
-    $("btn-diag").addEventListener("click", runDiagnostics);
-    $("btn-diag-top").addEventListener("click", runDiagnostics);
+    const diagBtn = $("btn-diag");  // legacy sidebar button, if a page still has one
+    if (diagBtn) diagBtn.addEventListener("click", runDiagnostics);
+    const diagTop = $("btn-diag-top");
+    if (diagTop) diagTop.addEventListener("click", runDiagnostics);
+    document.querySelectorAll("#runs-tabs .seg-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        setRunsTab(button.dataset.runs);
+        if (state.runsTab === "saved") loadRunLog();
+      });
+    });
+    setRunsTab(state.runsTab);
     $("btn-providers").addEventListener("click", openProviders);
     $("btn-close-providers").addEventListener("click", () =>
       $("providers-modal").classList.remove("open")
@@ -1711,6 +1759,7 @@
       state.runs = [];
       saveRuns();
       renderHistory();
+      setRunsTab("local");
     });
     $("btn-copy-trace").addEventListener("click", async () => {
       try {
@@ -1723,7 +1772,12 @@
     });
     $("btn-close-inspector").addEventListener("click", () => {
       $("trace-json").textContent = "Inspector closed. Select a run or send a prompt.";
-      $("inspector-note").textContent = "The complete run record or the last diagnostics report.";
+      $("inspector-note").textContent = "A run record, or the diagnostics report.";
+      const diag = $("diag-summary");
+      if (diag) {
+        diag.hidden = true;
+        diag.textContent = "";
+      }
     });
 
     $("prompt").addEventListener("keydown", (event) => {

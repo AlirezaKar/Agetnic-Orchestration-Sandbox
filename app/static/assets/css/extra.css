@@ -345,6 +345,48 @@ body.dragging::after {
 p.muted.small { font-size: 10.5px; line-height: 1.5; margin: 8px 0 0; }
 
 /* ══════════════════════════════════════════════════════════════
+   Sidebar, tidied: compact meta lines, no prose, one runs panel
+   ══════════════════════════════════════════════════════════════ */
+/* the frame: these keep their height, the columns take the rest */
+.topbar, #conn-banner { flex: 0 0 auto; }
+.panel-actions { display: inline-flex; gap: 2px; }
+.panel-meta {
+  font-family: var(--mono); font-size: 9.5px; line-height: 1.5;
+  color: var(--muted); margin-bottom: 6px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.panel h2 .ghost-btn { padding: 1px 6px; font-size: 11px; }
+
+/* Saved runs ⇄ this tab: one panel, two lists, no second panel of text */
+.seg {
+  display: inline-flex; gap: 2px; padding: 2px; margin-bottom: 8px;
+  background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+}
+.seg-btn {
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 10.5px; padding: 3px 10px; border-radius: 6px;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--accent-soft); color: var(--accent); }
+
+/* the runs panel grows with the sidebar; its lists scroll inside it */
+.panel.grow { min-height: 150px; }
+.panel.grow > #runs-list,
+.panel.grow > #trace-list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+}
+.panel.grow > [hidden] { display: none; }
+.panel.grow .run-list { margin-top: 0; }
+
+/* Inspector: the readable diagnostics rows sit above the JSON and scroll */
+#diag-summary {
+  flex: 0 1 auto; max-height: 45%; overflow-y: auto;
+  margin: 0 0 8px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft);
+}
+#diag-summary[hidden] { display: none; }
+
+/* ══════════════════════════════════════════════════════════════
    Harness memory: past conversations + the active-session pill
    ══════════════════════════════════════════════════════════════ */
 .session-list {
