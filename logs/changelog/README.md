@@ -27,7 +27,7 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.7.0 | 2026-10-31 | merged (PR #10, `a02e3fa`) | [v0.7.0.md](v0.7.0.md) | Manager orchestration: planner → parallel document/search/data/general agents → synthesis, attachments |
 | 0.8.0 | 2026-10-31 | merged (PR #12, `c19ab7f`) | [v0.8.0.md](v0.8.0.md) | Full step trace (prompts, tools, replies), LLM-written briefs, dependency waves, manager review, `logs/orchestrator/` |
 | 0.9.0 | 2026-11-01 | merged (PR #14, `f2c52d7`) | [v0.9.0.md](v0.9.0.md) | Harness memory: conversations stored in `memory/`, reopened and continued with their traces, `/sessions` API + Memory panel |
-| 0.10.0 | 2026-11-01 | merged (PR #16) | [v0.10.0.md](v0.10.0.md) | Orchestrator reorganised as a portable service: `service.py` + `contracts.py` (ports) + `host.py` (single seam), boundary enforced by tests |
+| 0.10.0 | 2026-11-01 | merged (PR #16, `db10169`) | [v0.10.0.md](v0.10.0.md) | Orchestrator reorganised as a portable service: `service.py` + `contracts.py` (ports) + `host.py` (single seam), boundary enforced by tests |
 
 ## Adding a version
 
