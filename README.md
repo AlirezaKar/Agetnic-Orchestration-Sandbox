@@ -544,6 +544,31 @@ upload survives a restart. `GET /files` lists, `DELETE /files/{id}` removes.
 Limits: `FILES_MAX_MB=10`, `FILES_MAX_CHARS=200000` (truncation is reported),
 `FILES_CONTEXT_CHARS=12000` of excerpts per document prompt.
 
+**Permission.** A file is data the agent reads on your behalf, so there is a
+switch for asking first:
+
+```env
+# show an allow / don't-allow prompt before an agent reads a file (off = allow)
+FILES_PERMISSION_PROMPT=false
+```
+
+- **Off (default)** — this is a trusted workspace, so a file is allowed the
+  moment it is attached. No prompt, no extra click.
+- **On** — attaching a file shows an **Allow / Don't allow** card in the composer,
+  and *Send* waits for your answer. "Don't allow" drops the file; nothing is
+  uploaded or read.
+
+The API enforces it too, so a script cannot skip the prompt: an upload without an
+answer is stored **pending** (`consent: false`, `needs_consent: true`),
+`POST /orchestrate` answers `403 consent_required` while it is pending, and
+`POST /files/{id}/consent {"granted": true|false}` allows it or deletes it.
+
+If the server cannot write `FILES_DIR` (a permission error on Windows is the
+usual case), the upload still works — the file is kept in memory for the session
+— and the response carries `stored: false` plus a `warning` naming the error;
+`/health.files.writable` says the same. That is the "problem relating to the
+permission" message made explicit instead of swallowed.
+
 ### Harness memory: the conversation, not the log
 
 The orchestrator, the agents and the tools make up the harness; memory is what
@@ -619,8 +644,9 @@ in-process memory and reports `writable: false` in `/health`.
 | `GET` | `/search/diagnose?q=&all=` | ping each backend, per-backend pass/fail + latency |
 | `POST` | `/chat` | agent loop: model + `web_search`/`fetch_url` tools, returns trace |
 | `POST` | `/orchestrate` | **Auto mode**: manager plans, agents run in parallel, manager synthesises (§5) |
-| `POST` | `/files` | upload an attachment (`{name, data_b64}` or `{name, text}`), returns its summary |
-| `GET` | `/files` | attachments currently in the store |
+| `POST` | `/files` | upload an attachment (`{name, data_b64}` or `{name, text}`, optional `consent`), returns its summary |
+| `GET` | `/files` | attachments currently in the store (+ how many wait for permission) |
+| `POST` | `/files/{id}/consent` | the user's answer: `{"granted": true}` allows, `false` deletes (§5 Attachments) |
 | `DELETE` | `/files/{id}` | remove one attachment |
 | `GET` | `/agents` | agent roster, planner mode, review/synthesis flags, readiness |
 | `GET` | `/runs` | recent orchestration runs from `logs/orchestrator/` (plan, agents, model calls, timing) |
@@ -647,7 +673,7 @@ curl -s -X POST localhost:8000/chat -H 'content-type: application/json' \
 Errors are structured, never silent: `400 configuration` (missing env, with `missing` list),
 `502 provider` (HTTP status + hint), `502 search` (per-backend error + hint), `415/413` for an
 unreadable or oversized attachment (with a `hint`), `503` when the orchestrator is disabled,
-`422` validation.
+`403 consent_required` when a file waits for permission, `422` validation.
 
 ---
 
@@ -720,6 +746,10 @@ tests/                 offline tests (MockTransport, no keys)
 | `{"detail":"Not Found"}` on send | You were on an older page that posted to a path this app did not serve. Reload: the composer must read `· v0.5.0`. Both `/chat` and `/api/chat` answer now |
 | Buttons dead, modes stacked inline | CSS/JS did not load (stale `/assets/...` URLs). Hard-reload; a red banner now says so when it happens |
 | Composer shows no `· v0.5.0` | The browser cached an old page. `Ctrl+Shift+R`; the server sends `Cache-Control: no-store` |
+| `500 … Object of type PlanStep is not JSON serializable` | Fixed in 0.11.0: the manager's review kept live `PlanStep` objects in the run record and `runlog.save_run` dumped them. Records are coerced now (`runlog.to_plain`), and a log write can never fail a request. Seeing it means the running build is older than 0.11.0 |
+| `500 … Response content longer than Content-Length` on `/favicon.ico` | Fixed in 0.11.0: the route answered `204` with a body. It returns a bodyless `204` now, and the page carries a `data:` icon so the browser stops asking |
+| `500 … PermissionError` on upload | `FILES_DIR` is not writable. The upload still succeeds in memory and the response says so (`stored: false` + `warning`); point `FILES_DIR` at a writable folder to persist it |
+| "Permission needed" card in the composer | `FILES_PERMISSION_PROMPT=true`: allow or refuse each attached file. Set it back to `false` to allow every file at once |
 | Anything else | `python -m scripts.logs errors` (tracebacks), `... requests --status 5xx`, `... tail -f` |
 
 ## 9. Logs

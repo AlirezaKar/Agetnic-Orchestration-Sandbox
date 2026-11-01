@@ -79,6 +79,8 @@
     session: null,
     sessionTurns: 0,
     busy: false,
+    // FILES_PERMISSION_PROMPT: ask before an agent may read an attached file.
+    permissionPrompt: false,
   };
 
   /* ────────────────────────────── helpers ───────────────────── */
@@ -278,6 +280,12 @@
       searches.length ? "ok" : "bad"
     );
     document.body.dataset.modelReady = models.length ? "1" : "0";
+    const permission = Boolean((data.files || {}).permission_prompt);
+    if (permission !== state.permissionPrompt) {
+      state.permissionPrompt = permission;
+      // a file added before the flag was known starts as "waiting to be allowed"
+      renderAttachments();
+    }
   }
 
   /* ──────────────────────────── modes ───────────────────────── */
@@ -315,7 +323,9 @@
   function updateComposerLabel() {
     const mode = MODES.find((item) => item.id === state.mode) || MODES[0];
     const pinned = state.pinnedSearch ? " · backend: " + state.pinnedSearch : "";
-    const files = state.files.length ? " · " + state.files.length + " file(s)" : "";
+    let files = state.files.length ? " · " + state.files.length + " file(s)" : "";
+    const waiting = state.files.filter((item) => item.consent === false).length;
+    if (waiting && state.permissionPrompt) files += " · " + waiting + " awaiting permission";
     $("composer-mode-label").textContent =
       "Mode: " + mode.title +
       (state.mode === "search" ? pinned : "") +
@@ -339,9 +349,10 @@
     if (!box || !list) return;
     list.textContent = "";
     state.files.forEach((item, index) => {
-      const chip = el("span", "att-chip");
+      const chip = el("span", "att-chip" + (item.consent === false ? " att-locked" : ""));
       chip.appendChild(el("span", "att-name", item.name));
       chip.appendChild(el("span", "att-size", humanSize(item.size)));
+      if (item.consent === false) chip.appendChild(el("span", "att-lock", "awaiting permission"));
       const remove = el("button", "att-remove", "✕");
       remove.type = "button";
       remove.title = "Remove";
@@ -354,7 +365,58 @@
       list.appendChild(chip);
     });
     box.hidden = state.files.length === 0;
+    renderConsent();
     updateComposerLabel();
+  }
+
+  /* Permission prompt: the file is only handed to an agent after "Allow".
+     FILES_PERMISSION_PROMPT=false (the default) never shows this panel. */
+  function pendingFiles() {
+    return state.files.filter((item) => item.consent === false);
+  }
+
+  function renderConsent() {
+    const panel = $("consent");
+    const list = $("consent-list");
+    if (!panel || !list) return;
+    const pending = state.permissionPrompt ? pendingFiles() : [];
+    list.textContent = "";
+    panel.hidden = pending.length === 0;
+    if (!pending.length) return;
+    $("consent-count").textContent =
+      pending.length === 1 ? "1 file needs your permission" : pending.length + " files need your permission";
+    pending.forEach((item) => {
+      const row = el("div", "consent-row");
+      const who = el("div", "consent-who");
+      who.appendChild(el("span", "consent-name", item.name));
+      who.appendChild(el("span", "consent-size", humanSize(item.size) + " · the agent cannot read it yet"));
+      row.appendChild(who);
+      const allow = el("button", "consent-allow", "Allow");
+      allow.type = "button";
+      allow.addEventListener("click", () => decideFile(item, true));
+      const deny = el("button", "consent-deny", "Don't allow");
+      deny.type = "button";
+      deny.addEventListener("click", () => decideFile(item, false));
+      row.appendChild(allow);
+      row.appendChild(deny);
+      list.appendChild(row);
+    });
+  }
+
+  function decideFile(item, allowed) {
+    if (allowed) {
+      item.consent = true;
+    } else {
+      state.files = state.files.filter((existing) => existing !== item);
+      showBanner("File not allowed", item.name + " will not be sent.");
+      setTimeout(hideBanner, 5000);
+    }
+    renderAttachments();
+    updateComposerLabel();
+  }
+
+  function decideAll(allowed) {
+    pendingFiles().slice().forEach((item) => decideFile(item, allowed));
   }
 
   function addFiles(fileList) {
@@ -367,7 +429,12 @@
       if (state.files.some((existing) => existing.name === file.name && existing.size === file.size)) {
         return;
       }
-      state.files.push({ file, name: file.name, size: file.size });
+      state.files.push({
+        file,
+        name: file.name,
+        size: file.size,
+        consent: !state.permissionPrompt,
+      });
     });
     renderAttachments();
     if (rejected.length) {
@@ -391,6 +458,7 @@
 
   async function uploadAttachments() {
     const ids = [];
+    const warnings = [];
     for (const item of state.files) {
       let payload;
       try {
@@ -400,14 +468,25 @@
       }
       const result = await api("/files", {
         method: "POST",
-        body: JSON.stringify({ name: item.name, data_b64: payload }),
+        body: JSON.stringify({
+          name: item.name,
+          data_b64: payload,
+          // explicit answer: the server refuses a file nobody allowed
+          consent: item.consent !== false,
+        }),
       });
       if (!result.ok) {
-        return { error: errorText(result) };
+        return { error: item.name + ": " + errorText(result) };
+      }
+      if (result.data && result.data.needs_consent) {
+        return { error: item.name + " is waiting for permission — allow it first" };
+      }
+      if (result.data && result.data.warning) {
+        warnings.push(item.name + ": " + result.data.warning);
       }
       ids.push(result.data.id);
     }
-    return { ids };
+    return { ids, warnings };
   }
 
   /* ───────────────── orchestration rendering ────────────────── */
@@ -1448,6 +1527,17 @@
     const text = input.value.trim();
     if (!text) return;
 
+    const waiting = state.permissionPrompt ? pendingFiles() : [];
+    if (waiting.length) {
+      showBanner(
+        "Permission needed",
+        "Allow or remove " + waiting.map((item) => item.name).join(", ") + " before sending."
+      );
+      setTimeout(hideBanner, 6000);
+      renderConsent();
+      return;
+    }
+
     state.busy = true;
     $("btn-send").disabled = true;
     const sendLabel = $("btn-send").textContent;
@@ -1475,6 +1565,10 @@
             return;
           }
           fileIds = uploaded.ids;
+          if (uploaded.warnings && uploaded.warnings.length) {
+            showBanner("Files kept in memory only", uploaded.warnings.join(" · "));
+            setTimeout(hideBanner, 8000);
+          }
           state.files = [];
           renderAttachments();
         }
@@ -1559,6 +1653,8 @@
       });
     }
     $("btn-send").addEventListener("click", send);
+    if ($("consent-allow-all")) $("consent-allow-all").addEventListener("click", () => decideAll(true));
+    if ($("consent-deny-all")) $("consent-deny-all").addEventListener("click", () => decideAll(false));
 
     // attachments: button, file picker, drag & drop on the whole console
     const fileInput = $("file-input");

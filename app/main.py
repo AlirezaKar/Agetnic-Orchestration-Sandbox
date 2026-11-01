@@ -65,6 +65,7 @@ API_ROUTES = [
     "POST /orchestrate                (manager + parallel agents)",
     "POST /files                      (attachment upload)",
     "GET  /files                      (attachments in the store)",
+    "POST /files/{id}/consent         (allow / refuse an attachment)",
     "GET  /agents                     (agent catalogue + planner mode)",
     "GET  /runs                       (orchestration log: recent runs)",
     "GET  /runs/{run_id}              (full trace of one run)",
@@ -126,6 +127,14 @@ class FileUploadRequest(BaseModel):
     name: str = Field(default="pasted.txt", max_length=200)
     text: str | None = None
     data_b64: str | None = None
+    # The user's answer to the permission prompt. None = not asked yet: the file
+    # is stored but no agent may read it until POST /files/{id}/consent allows it
+    # (only when FILES_PERMISSION_PROMPT=true — otherwise it is allowed at once).
+    consent: bool | None = None
+
+
+class FileConsentRequest(BaseModel):
+    granted: bool = True
 
 
 class OrchestrateRequest(BaseModel):
@@ -332,8 +341,9 @@ async def ui_redirect() -> RedirectResponse:
 
 
 @app.get("/favicon.ico", include_in_schema=False)
-async def favicon() -> JSONResponse:
-    return JSONResponse(status_code=204, content=None)
+async def favicon() -> Response:
+    """Answer the browser quietly: a body here used to collide with Content-Length."""
+    return Response(status_code=204, media_type=None)
 
 
 if ASSETS_DIR.exists():
@@ -365,6 +375,7 @@ async def health(request: Request) -> dict[str, Any]:
     settings = get_settings()
     chain = build_chain(settings)
     search = build_search_chain(settings)
+    store_files = get_store().list()
     return {
         "status": "ok",
         "version": VERSION,
@@ -381,7 +392,12 @@ async def health(request: Request) -> dict[str, Any]:
             "review": settings.orchestrator_review,
             "agents": settings.orchestrator_roster,
         },
-        "files": {"count": len(get_store().list())},
+        "files": {
+            "count": len(store_files),
+            "pending": sum(1 for item in store_files if not item.consent),
+            "permission_prompt": settings.files_permission_prompt,
+            "writable": get_store().writable,
+        },
         "memory": get_memory().stats(),
         "ui": {
             "index": INDEX_FILE.exists(),
@@ -552,7 +568,14 @@ async def chat(request: ChatRequest) -> Any:
 
 @router.post("/files")
 async def upload_file(payload: FileUploadRequest) -> Any:
-    """Accept one attachment (base64 or plain text) and return its parsed summary."""
+    """Accept one attachment (base64 or plain text) and return its parsed summary.
+
+    Permission: with ``FILES_PERMISSION_PROMPT=true`` the page asks first and
+    sends ``consent: true`` for an allowed file. An upload without that answer
+    is stored as *pending* — ``needs_consent: true`` — and ``POST /orchestrate``
+    will refuse to hand it to an agent until ``POST /files/{id}/consent`` says
+    yes. A workspace that does not ask (the default) allows the file here.
+    """
     settings = get_settings()
     try:
         attachment = decode_payload(
@@ -562,21 +585,76 @@ async def upload_file(payload: FileUploadRequest) -> Any:
         )
     except FileError as exc:
         return _file_error(exc)
-    get_store().save(attachment)
+    attachment.consent = (
+        True if not settings.files_permission_prompt else payload.consent is True
+    )
+    store = get_store()
+    store.save(attachment)
     logs.get_logger("files").info(
-        "upload %s kind=%s chars=%s truncated=%s",
+        "upload %s kind=%s chars=%s truncated=%s consent=%s",
         attachment.name,
         attachment.kind,
         attachment.chars,
         attachment.truncated,
+        attachment.consent,
     )
-    return attachment.summary()
+    body = dict(attachment.summary())
+    body["stored"] = store.writable
+    if not store.writable:
+        body["warning"] = (
+            "the server could not write FILES_DIR, so this file is kept in memory "
+            f"for this session only ({store.last_error or 'permission denied'})"
+        )
+    if not attachment.consent:
+        body["needs_consent"] = True
+        body["message"] = (
+            "stored, waiting for permission: allow it with "
+            f"POST /files/{attachment.id}/consent or the prompt on the page"
+        )
+    return body
+
+
+@router.post("/files/{file_id}/consent")
+async def file_consent(file_id: str, payload: FileConsentRequest) -> Any:
+    """The user's answer to the permission prompt: allow the file, or drop it."""
+    store = get_store()
+    if not payload.granted:
+        attachment = store.get(file_id)
+        if attachment is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "not_found", "message": f"no attachment '{file_id}'"},
+            )
+        store.delete(file_id)
+        logs.get_logger("files").info("permission refused for %s — deleted", attachment.name)
+        return {
+            "id": attachment.id,
+            "name": attachment.name,
+            "consent": False,
+            "deleted": True,
+            "message": "the file was not allowed and has been removed",
+        }
+    attachment = store.set_consent(file_id, True)
+    if attachment is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "message": f"no attachment '{file_id}'"},
+        )
+    logs.get_logger("files").info("permission granted for %s", attachment.name)
+    body = dict(attachment.summary())
+    body["allowed"] = True
+    return body
 
 
 @router.get("/files")
 async def list_files() -> dict[str, Any]:
     items = get_store().list()
-    return {"count": len(items), "files": [item.summary() for item in items]}
+    return {
+        "count": len(items),
+        "pending": sum(1 for item in items if not item.consent),
+        "permission_prompt": get_settings().files_permission_prompt,
+        "files": [item.summary() for item in items],
+    }
 
 
 @router.delete("/files/{file_id}")
@@ -633,6 +711,23 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
                 },
             )
         attachments.append(attachment)
+
+    waiting = [item for item in attachments if not item.consent]
+    if waiting:
+        # The user has not allowed these files, so no agent sees a byte of them.
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "consent_required",
+                "message": "permission is still pending for: "
+                + ", ".join(item.name for item in waiting),
+                "files": _file_refs(waiting),
+                "hint": (
+                    'Allow them with POST /files/{id}/consent {"granted": true} '
+                    "(the page shows an allow / don't-allow prompt) or remove them."
+                ),
+            },
+        )
 
     sessions = get_memory()
     files = _file_refs(attachments)

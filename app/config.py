@@ -203,6 +203,9 @@ class Settings(BaseSettings):
     files_max_chars: int = 200_000
     # How much of a document is handed to an agent.
     files_context_chars: int = 12_000
+    # Ask the user (allow / don't allow) before an agent may read a file.
+    # Off by default: this is a trusted workspace, so files are allowed at once.
+    files_permission_prompt: bool = False
 
     # ------------------------------------------------------- validators
     @field_validator("custom_extra_headers", "custom_extra_body", mode="before")
@@ -279,6 +282,8 @@ class Settings(BaseSettings):
             "harness_memory": self.harness_memory,
             "memory_dir": self.memory_dir,
             "memory_history_turns": self.memory_history_turns,
+            "files_permission_prompt": self.files_permission_prompt,
+            "files_max_mb": self.files_max_mb,
         }
 
 
