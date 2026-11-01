@@ -284,25 +284,31 @@ class FrontendContractTests(unittest.TestCase):
             self.assertNotIn(gone, self.index, gone)
         # the diagnostics report moved into the inspector
         self.assertIn('id="diag-summary"', self.index)
-        self.assertRegex(self.index, r"id=\"inspector\"[\s\S]{0,1200}id=\"diag-summary\"")
+        self.assertRegex(self.index, r"id=\"inspector\"[\s\S]{0,2000}id=\"diag-summary\"")
 
     def test_the_columns_scroll_inside_the_screen(self):
-        layout = " ".join(self.rules(self.styles, ".layout"))
-        self.assertIn("overflow", layout)
-        self.assertIn("hidden", layout)
-        self.assertNotIn("height: calc(100vh", layout)
-        # a tall inspector must not stretch the row (the "chat runs to the end" bug)
-        children = " ".join(
-            self.rules(self.styles, ".layout > *")
-            + self.rules(self.styles, ".inspector")
-            + self.rules(self.styles, ".chat")
-            + self.rules(self.styles, ".trace-json")
-        )
-        self.assertIn("min-height: 0", children)
-        trace = " ".join(self.rules(self.styles, ".trace-json"))
-        self.assertIn("overflow: auto", trace)
-        inspector = " ".join(self.rules(self.styles, ".inspector"))
+        # the studio shell is one fixed viewport: the page itself never scrolls,
+        # each column scrolls inside itself (the "chat runs past the screen" bug)
+        body = " ".join(self.rules(self.styles, "body"))
+        self.assertIn("overflow: hidden", body)
+        self.assertNotIn("height: calc(100vh", body)
+        shell = " ".join(self.rules(self.styles, ".app-shell"))
+        self.assertIn("flex-direction: column", shell)
+        workspace = " ".join(self.rules(self.styles, ".workspace") + self.rules(self.extra, ".workspace"))
+        self.assertIn("minmax(0, 1fr)", workspace)
+        self.assertIn("overflow: hidden", workspace)
+        self.assertNotIn("height: calc(100vh", workspace)
+        # a tall inspector must not stretch the row
+        for selector in (".chat-scroll", ".inspector", ".inspector-content"):
+            body_rules = " ".join(self.rules(self.styles, selector) + self.rules(self.extra, selector))
+            self.assertIn("min-height: 0", body_rules, selector)
+        inspector = " ".join(self.rules(self.styles, ".inspector") + self.rules(self.extra, ".inspector"))
         self.assertIn("overflow: hidden", inspector)
-        # the runs panel scrolls its own list
-        runs = " ".join(self.rules(self.extra, ".panel.grow > #runs-list"))
-        self.assertIn("overflow-y: auto", runs)
+        self.assertIn("overflow: auto", " ".join(self.rules(self.styles, ".inspector-content")))
+        self.assertIn("overflow: auto", " ".join(self.rules(self.styles, ".chat-scroll")))
+        # long JSON and the run list scroll, never push the layout
+        json_view = " ".join(self.rules(self.extra, ".json-view"))
+        self.assertIn("overflow-wrap: anywhere", json_view)
+        self.assertIn("overflow: auto", " ".join(self.rules(self.styles, ".sidebar") + self.rules(self.extra, ".sidebar")))
+        self.assertIn("display: grid", " ".join(self.rules(self.extra, ".run-list")))
+

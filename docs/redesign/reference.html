@@ -1,0 +1,1182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b1020" />
+  <meta name="description" content="A polished workspace for testing agentic orchestration, search providers, and execution traces." />
+  <title>Agentic Orchestration Studio</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0e17;
+      --surface: #101725;
+      --surface-2: #141e2e;
+      --surface-3: #1a2638;
+      --surface-hover: #202e43;
+      --line: rgba(151, 174, 210, .13);
+      --line-strong: rgba(151, 174, 210, .22);
+      --text: #edf3ff;
+      --text-2: #b5c2d8;
+      --muted: #7f90ac;
+      --accent: #7c9cff;
+      --accent-strong: #5c83ff;
+      --accent-soft: rgba(103, 139, 255, .14);
+      --mint: #50d6b0;
+      --mint-soft: rgba(80, 214, 176, .12);
+      --amber: #efbd72;
+      --amber-soft: rgba(239, 189, 114, .12);
+      --red: #ff858d;
+      --red-soft: rgba(255, 133, 141, .12);
+      --radius: 14px;
+      --shadow: 0 20px 60px rgba(0, 0, 0, .28);
+      --sidebar-width: 278px;
+      --inspector-width: 358px;
+      --header-height: 70px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      overflow: hidden;
+    }
+    button, textarea, input, select { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    ::selection { background: rgba(124, 156, 255, .3); }
+
+    .app-shell { height: 100%; display: flex; flex-direction: column; }
+    .topbar {
+      height: var(--header-height);
+      min-height: var(--header-height);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 22px;
+      padding: 0 22px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(15, 22, 35, .94);
+      position: relative;
+      z-index: 5;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 250px; }
+    .brand-mark {
+      width: 39px; height: 39px; border-radius: 12px; display: grid; place-items: center;
+      color: #dce6ff; background: linear-gradient(145deg, #263b68, #17233b);
+      border: 1px solid rgba(132, 164, 255, .25); box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+    }
+    .brand-mark svg { width: 21px; height: 21px; }
+    .brand-copy { min-width: 0; }
+    .brand-title { font-size: 14px; font-weight: 720; letter-spacing: -.02em; line-height: 1.25; }
+    .brand-subtitle { margin-top: 3px; color: var(--muted); font-size: 11px; letter-spacing: .015em; }
+    .topbar-right { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+    .status-pill {
+      height: 31px; display: inline-flex; align-items: center; gap: 7px; padding: 0 11px;
+      border: 1px solid var(--line-strong); border-radius: 999px; background: rgba(20, 30, 46, .72);
+      white-space: nowrap; color: var(--text-2); font-size: 10.5px;
+    }
+    .status-pill .dot, .provider-state .dot, .health-dot {
+      width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 10px rgba(80,214,176,.34);
+    }
+    .status-pill.success { color: #8de8ce; border-color: rgba(80,214,176,.25); background: rgba(23, 65, 59, .17); }
+    .status-pill code { color: #7ce2c3; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .btn {
+      border: 1px solid var(--line-strong); background: rgba(23, 33, 50, .82); color: var(--text-2);
+      border-radius: 9px; height: 33px; padding: 0 12px; display: inline-flex; align-items: center; justify-content: center;
+      gap: 7px; cursor: pointer; transition: .18s ease; white-space: nowrap;
+    }
+    .btn:hover { color: var(--text); border-color: rgba(142, 169, 224, .4); background: var(--surface-hover); }
+    .btn.primary { background: var(--accent-strong); color: white; border-color: transparent; box-shadow: 0 5px 16px rgba(79, 117, 255, .2); }
+    .btn.primary:hover { background: #7092ff; transform: translateY(-1px); }
+    .btn.ghost { background: transparent; }
+    .btn.icon-only { width: 33px; padding: 0; }
+    .btn svg { width: 14px; height: 14px; }
+
+    .workspace { min-height: 0; flex: 1; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--inspector-width); }
+    .sidebar {
+      min-height: 0; overflow: auto; padding: 16px 13px 18px 15px; background: #0d1420;
+      border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 18px;
+    }
+    .workspace-switcher {
+      display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; border: 1px solid var(--line);
+      border-radius: 11px; background: rgba(23, 34, 51, .62); text-align: left; cursor: pointer;
+    }
+    .workspace-avatar { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; color: #aabfff; background: #26375b; font-size: 11px; font-weight: 800; }
+    .workspace-meta { min-width: 0; flex: 1; }
+    .workspace-name { display: block; font-size: 11.5px; font-weight: 650; }
+    .workspace-type { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+    .workspace-switcher > svg { width: 14px; color: var(--muted); }
+    .section-label { padding: 0 8px; margin-bottom: 7px; color: #71829e; font-size: 9.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .13em; }
+    .nav-list { display: grid; gap: 3px; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px; width: 100%; height: 36px; padding: 0 10px; border-radius: 9px;
+      border: 1px solid transparent; background: transparent; color: var(--text-2); text-align: left; cursor: pointer;
+      transition: .16s ease;
+    }
+    .nav-item:hover { background: rgba(95, 119, 165, .1); color: var(--text); }
+    .nav-item.active { color: #dce6ff; background: var(--accent-soft); border-color: rgba(124,156,255,.2); }
+    .nav-item svg { width: 15px; height: 15px; color: #8d9fbc; }
+    .nav-item.active svg { color: #8daaff; }
+    .nav-item .nav-count { margin-left: auto; font: 10px ui-monospace, monospace; color: var(--muted); }
+    .sidebar-divider { height: 1px; background: var(--line); margin: -3px 2px; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 8px 8px; }
+    .section-heading .section-label { padding: 0; margin: 0; }
+    .mini-action { border: 0; padding: 4px 6px; color: var(--muted); background: transparent; border-radius: 6px; cursor: pointer; }
+    .mini-action:hover { color: var(--text); background: var(--surface-hover); }
+    .mini-action svg { width: 13px; height: 13px; display: block; }
+    .session-card {
+      display: flex; align-items: center; gap: 9px; border-radius: 9px; padding: 9px 9px; cursor: pointer;
+      color: var(--text-2); border: 1px solid transparent; background: transparent; width: 100%; text-align: left;
+    }
+    .session-card:hover { background: rgba(95,119,165,.1); }
+    .session-card.selected { background: rgba(124,156,255,.09); border-color: rgba(124,156,255,.22); color: var(--text); }
+    .session-icon { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 8px; background: #202d43; color: #9ab0ff; }
+    .session-icon svg { width: 13px; height: 13px; }
+    .session-copy { display: block; flex: 1; min-width: 0; }
+    .session-time { display: block; }
+    .session-title { font-size: 10.7px; font-weight: 610; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .session-time { margin-top: 3px; color: var(--muted); font-size: 9.5px; }
+    .session-status { width: 6px; height: 6px; border-radius: 50%; background: var(--mint); }
+    .provider-list { display: grid; gap: 6px; }
+    .provider-row {
+      width: 100%; display: flex; align-items: flex-start; gap: 8px; padding: 8px 9px; border-radius: 9px;
+      background: rgba(22, 32, 48, .75); border: 1px solid var(--line); text-align: left; cursor: pointer; transition: .16s ease;
+    }
+    .provider-row:hover { border-color: var(--line-strong); background: #1a2638; }
+    .provider-row.selected { border-color: rgba(124,156,255,.65); background: rgba(49, 70, 116, .25); box-shadow: inset 0 0 0 1px rgba(124,156,255,.06); }
+    .provider-radio { width: 13px; height: 13px; flex: 0 0 13px; border: 1px solid #566782; border-radius: 50%; margin-top: 2px; display: grid; place-items: center; }
+    .provider-row.selected .provider-radio { border-color: var(--accent); }
+    .provider-row.selected .provider-radio::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+    .provider-content { min-width: 0; flex: 1; }
+    .provider-name-line { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .provider-name { font-size: 10.5px; font-weight: 640; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .provider-desc { margin-top: 3px; color: var(--muted); font-size: 9.4px; line-height: 1.35; }
+    .tag { flex: 0 0 auto; padding: 2px 5px; border-radius: 5px; font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; text-transform: uppercase; border: 1px solid rgba(80,214,176,.22); color: #77dcbf; background: rgba(80,214,176,.07); }
+    .tag.warn { color: #edbc75; border-color: rgba(239,189,114,.22); background: rgba(239,189,114,.07); }
+    .tag.error { color: #ff949b; border-color: rgba(255,133,141,.24); background: rgba(255,133,141,.07); }
+    .sidebar-bottom { margin-top: auto; padding-top: 4px; }
+    .health-card { padding: 11px; background: rgba(20, 30, 46, .76); border: 1px solid var(--line); border-radius: 11px; }
+    .health-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .health-title { font-size: 10.5px; font-weight: 650; }
+    .health-live { display: inline-flex; align-items: center; gap: 5px; color: #83dfc5; font-size: 9px; }
+    .health-live .dot { width: 5px; height: 5px; background: var(--mint); border-radius: 50%; }
+    .health-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 11px; }
+    .health-stat { border-top: 1px solid var(--line); padding-top: 8px; }
+    .health-stat strong { display: block; font: 12px ui-monospace, monospace; color: #d9e4fb; }
+    .health-stat span { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; }
+
+    .main-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #0b1019; position: relative; }
+    .main-toolbar { height: 56px; min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 23px; border-bottom: 1px solid var(--line); }
+    .breadcrumbs { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 10.5px; }
+    .breadcrumbs strong { color: var(--text-2); font-weight: 600; }
+    .breadcrumbs svg { width: 12px; height: 12px; }
+    .toolbar-actions { display: flex; gap: 7px; align-items: center; }
+    .toolbar-actions .btn { height: 29px; font-size: 10px; }
+    .run-label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
+    .run-label .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--mint); }
+    .chat-scroll { min-height: 0; flex: 1; overflow: auto; padding: 34px clamp(20px, 5vw, 70px) 36px; scroll-behavior: smooth; }
+    .welcome { max-width: 790px; margin: 4vh auto 0; text-align: center; }
+    .welcome-orb {
+      width: 56px; height: 56px; display: grid; place-items: center; margin: 0 auto 18px; border-radius: 18px;
+      color: #cbd8ff; background: radial-gradient(circle at 30% 20%, #344d86, #1b2946 75%); border: 1px solid rgba(129,158,255,.25);
+      box-shadow: 0 12px 35px rgba(33, 66, 145, .18), inset 0 1px 0 rgba(255,255,255,.08);
+    }
+    .welcome-orb svg { width: 25px; height: 25px; }
+    .eyebrow { color: #8fa8ff; font-size: 9px; text-transform: uppercase; letter-spacing: .16em; font-weight: 750; }
+    .welcome h1 { margin: 10px 0 10px; font-size: clamp(23px, 2.1vw, 29px); line-height: 1.2; letter-spacing: -.045em; font-weight: 720; }
+    .welcome-lead { max-width: 610px; margin: 0 auto; color: #9cacc5; font-size: 12.5px; line-height: 1.8; }
+    .architecture { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: left; margin: 31px 0 28px; }
+    .architecture-step { position: relative; padding: 14px 14px 13px; min-height: 105px; border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(145deg, rgba(22,33,51,.82), rgba(15,23,36,.84)); }
+    .step-top { display: flex; align-items: center; gap: 8px; }
+    .step-number { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 7px; color: #a9bcff; background: rgba(124,156,255,.13); font: 10px ui-monospace, monospace; }
+    .step-title { font-size: 11px; font-weight: 670; }
+    .step-copy { margin-top: 9px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+    .suggestion-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; color: #a9b7cd; font-size: 10px; font-weight: 650; }
+    .suggestion-heading span:last-child { color: var(--muted); font-weight: 450; }
+    .suggestions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; text-align: left; }
+    .suggestion {
+      display: flex; align-items: flex-start; gap: 10px; min-height: 74px; padding: 12px; border: 1px solid var(--line);
+      border-radius: 11px; background: rgba(18,28,43,.73); text-align: left; cursor: pointer; transition: .17s ease;
+    }
+    .suggestion:hover { transform: translateY(-2px); border-color: rgba(124,156,255,.42); background: rgba(29,43,66,.88); }
+    .suggestion-icon { display: grid; place-items: center; flex: 0 0 27px; width: 27px; height: 27px; border-radius: 8px; color: #9db3ff; background: rgba(124,156,255,.12); }
+    .suggestion-icon svg { width: 14px; height: 14px; }
+    .suggestion strong { display: block; font-size: 10.5px; font-weight: 650; }
+    .suggestion small { display: block; color: var(--muted); margin-top: 4px; font-size: 9.5px; line-height: 1.4; }
+
+    .messages { max-width: 820px; margin: 0 auto; display: grid; gap: 24px; }
+    .message { display: flex; gap: 11px; align-items: flex-start; }
+    .message.user { flex-direction: row-reverse; }
+    .message-avatar { width: 30px; height: 30px; flex: 0 0 30px; display: grid; place-items: center; border-radius: 9px; color: #b5c6ff; background: #202f50; border: 1px solid rgba(124,156,255,.2); }
+    .message-avatar svg { width: 15px; height: 15px; }
+    .message.user .message-avatar { color: #c5d0e2; background: #283346; border-color: var(--line); }
+    .message-body { min-width: 0; max-width: min(700px, 90%); }
+    .message.user .message-body { text-align: right; }
+    .message-meta { margin: 1px 0 7px; color: var(--muted); font-size: 9.5px; }
+    .message-bubble { direction: auto; unicode-bidi: plaintext; display: inline-block; max-width: 100%; padding: 13px 15px; border: 1px solid var(--line); border-radius: 4px 13px 13px 13px; background: #121c2b; color: #dce5f5; text-align: left; font-size: 11.5px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .message.user .message-bubble { border-radius: 13px 4px 13px 13px; background: rgba(74, 101, 174, .22); border-color: rgba(124,156,255,.22); }
+    .assistant-note { margin-top: 11px; padding: 11px 13px; border-left: 2px solid var(--accent); background: rgba(124,156,255,.055); border-radius: 0 8px 8px 0; color: #9baecc; font-size: 10.5px; line-height: 1.6; }
+    .inline-run { margin-top: 12px; border: 1px solid var(--line); border-radius: 11px; background: rgba(16,25,39,.86); overflow: hidden; }
+    .inline-run-head { display: flex; justify-content: space-between; align-items: center; padding: 9px 11px; border-bottom: 1px solid var(--line); color: var(--text-2); font-size: 10px; }
+    .inline-run-head strong { font-weight: 650; }
+    .inline-run-body { padding: 9px 11px; display: grid; gap: 8px; }
+    .inline-step { display: flex; align-items: center; gap: 8px; color: #aebbd0; font-size: 10px; }
+    .inline-step .health-dot { width: 6px; height: 6px; }
+    .inline-step time { margin-left: auto; color: var(--muted); font: 9px ui-monospace, monospace; }
+    .demo-disclaimer { color: #8292ad; font-size: 9px; line-height: 1.5; margin-top: 9px; }
+
+    .composer-wrap { padding: 14px clamp(16px, 4vw, 45px) 17px; border-top: 1px solid var(--line); background: rgba(17, 25, 38, .97); }
+    .composer { max-width: 900px; margin: 0 auto; border: 1px solid rgba(143,164,203,.24); border-radius: 14px; background: #0f1724; box-shadow: 0 12px 30px rgba(0,0,0,.14); transition: border .18s, box-shadow .18s; }
+    .composer:focus-within { border-color: rgba(124,156,255,.5); box-shadow: 0 0 0 3px rgba(124,156,255,.07), 0 12px 30px rgba(0,0,0,.14); }
+    .composer.dragover { border-color: var(--accent); background: rgba(34,49,79,.5); }
+    .composer textarea { width: 100%; min-height: 74px; max-height: 180px; resize: vertical; border: 0; outline: 0; background: transparent; color: var(--text); padding: 15px 16px 7px; font-size: 12px; line-height: 1.6; }
+    .composer textarea::placeholder { color: #72839f; }
+    .attachment-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 13px 8px; }
+    .attachment-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; padding: 5px 7px; border-radius: 7px; border: 1px solid var(--line-strong); color: #aebdd5; background: #172236; font-size: 9px; }
+    .attachment-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .attachment-chip button { display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+    .attachment-chip svg { width: 11px; height: 11px; }
+    .composer-controls { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 9px 9px 13px; border-top: 1px solid rgba(151,174,210,.1); }
+    .composer-tools, .composer-submit { display: flex; align-items: center; gap: 7px; }
+    .mode-select { height: 30px; border: 1px solid var(--line); border-radius: 8px; color: #c8d5ed; background: #172236; padding: 0 9px; font-size: 10px; cursor: pointer; }
+    .mode-hint { color: var(--muted); font-size: 9.5px; margin-left: 3px; }
+    .tool-btn { height: 29px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; background: transparent; color: #8fa0bc; border-radius: 7px; padding: 0 8px; cursor: pointer; font-size: 10px; }
+    .tool-btn:hover { color: var(--text); background: var(--surface-hover); }
+    .tool-btn svg { width: 13px; height: 13px; }
+    .send-btn { height: 32px; padding: 0 15px; font-size: 10px; }
+    .composer-footnote { max-width: 900px; display: flex; justify-content: space-between; margin: 8px auto 0; color: #687a96; font-size: 9px; }
+    .key-hint { display: inline-flex; align-items: center; gap: 4px; }
+    kbd { font: 8px ui-monospace, monospace; border: 1px solid rgba(151,174,210,.2); border-radius: 4px; padding: 2px 4px; color: #8293ad; background: rgba(26,39,58,.6); }
+    .hidden-input { display: none; }
+
+    .inspector { min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: #0e1521; }
+    .inspector-head { padding: 17px 16px 0; }
+    .inspector-title-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .inspector-title { font-size: 10px; font-weight: 760; color: #a8b9d5; text-transform: uppercase; letter-spacing: .12em; }
+    .inspector-actions { display: flex; gap: 6px; }
+    .inspector-actions .btn { height: 28px; padding: 0 9px; font-size: 9px; }
+    .inspector-description { margin: 9px 0 14px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+    .inspector-tabs { display: flex; gap: 17px; border-bottom: 1px solid var(--line); padding: 0 16px; }
+    .inspector-tab { position: relative; border: 0; background: transparent; padding: 0 0 11px; color: #7486a2; font-size: 10px; cursor: pointer; }
+    .inspector-tab.active { color: #d4e0f5; }
+    .inspector-tab.active::after { content: ""; height: 2px; position: absolute; bottom: -1px; left: 0; right: 0; background: var(--accent); border-radius: 2px; }
+    .inspector-content { min-height: 0; flex: 1; overflow: auto; padding: 14px 14px 18px; }
+    .inspector-empty { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; }
+    .empty-icon { width: 45px; height: 45px; display: grid; place-items: center; border-radius: 14px; color: #8fa8e9; background: rgba(124,156,255,.1); border: 1px solid rgba(124,156,255,.16); }
+    .empty-icon svg { width: 19px; height: 19px; }
+    .inspector-empty h3 { margin: 13px 0 6px; font-size: 12px; font-weight: 650; }
+    .inspector-empty p { max-width: 215px; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
+    .inspect-section { margin-bottom: 17px; }
+    .inspect-section-title { display: flex; justify-content: space-between; align-items: center; margin: 2px 2px 9px; color: #8496b2; font-size: 9px; font-weight: 720; text-transform: uppercase; letter-spacing: .11em; }
+    .run-summary { padding: 11px; background: rgba(22,33,50,.8); border: 1px solid var(--line); border-radius: 10px; }
+    .run-summary-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .run-summary-name { font-size: 10.5px; font-weight: 650; }
+    .success-label { display: inline-flex; align-items: center; gap: 5px; color: #7cddbf; font-size: 9px; }
+    .success-label .dot { width: 5px; height: 5px; background: var(--mint); border-radius: 50%; }
+    .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 12px; }
+    .summary-metric { padding-top: 8px; border-top: 1px solid var(--line); }
+    .summary-metric strong { display: block; color: #dce5f5; font: 11px ui-monospace, monospace; }
+    .summary-metric span { display: block; margin-top: 3px; color: var(--muted); font-size: 8.5px; }
+    .trace-list { position: relative; display: grid; gap: 0; }
+    .trace-item { position: relative; display: flex; gap: 10px; padding: 0 0 14px; }
+    .trace-item:not(:last-child)::before { content: ""; position: absolute; top: 15px; bottom: -2px; left: 6px; width: 1px; background: rgba(116,139,180,.22); }
+    .trace-marker { position: relative; z-index: 1; width: 13px; height: 13px; flex: 0 0 13px; display: grid; place-items: center; margin-top: 1px; border: 1px solid rgba(80,214,176,.38); border-radius: 50%; background: #122c2b; color: var(--mint); font-size: 7px; }
+    .trace-marker.pending { background: #30291e; border-color: rgba(239,189,114,.35); color: var(--amber); }
+    .trace-copy { min-width: 0; flex: 1; }
+    .trace-name { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: #cbd7ea; font-size: 10px; font-weight: 610; }
+    .trace-detail { color: var(--muted); margin-top: 4px; font-size: 9px; line-height: 1.45; }
+    .trace-duration { color: #8394b0; font: 8.5px ui-monospace, monospace; white-space: nowrap; }
+    .trace-card { padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(20,30,46,.64); }
+    .trace-card + .trace-card { margin-top: 7px; }
+    .trace-card-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #c3d0e5; font-size: 9.5px; }
+    .trace-card p { margin: 6px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
+    .json-view { min-height: 100%; padding: 13px; border-radius: 9px; background: #090e16; border: 1px solid var(--line); color: #adc0df; font: 9.5px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .context-list { display: grid; gap: 8px; }
+    .context-item { padding: 10px; border-radius: 9px; border: 1px solid var(--line); background: rgba(20,30,46,.65); }
+    .context-item strong { display: block; color: #cad7eb; font-size: 9.5px; }
+    .context-item span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+    .panel-hidden { display: none !important; }
+    .workspace.inspector-collapsed { grid-template-columns: var(--sidebar-width) minmax(0, 1fr); }
+    .workspace.inspector-collapsed .inspector { display: none; }
+
+    .toast-region { position: fixed; z-index: 20; right: 18px; bottom: 18px; display: grid; gap: 8px; pointer-events: none; }
+    .toast { display: flex; align-items: center; gap: 8px; min-width: 210px; max-width: 340px; padding: 11px 13px; border: 1px solid var(--line-strong); border-radius: 10px; background: #182437; color: #dce6f6; box-shadow: var(--shadow); font-size: 10px; animation: toast-in .2s ease-out; }
+    .toast svg { width: 14px; height: 14px; color: var(--mint); flex: 0 0 auto; }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
+    .modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: rgba(2,6,12,.72); backdrop-filter: blur(6px); }
+    .modal { width: min(520px, 100%); max-height: min(680px, 90vh); overflow: auto; border: 1px solid var(--line-strong); border-radius: 16px; background: #121c2b; box-shadow: 0 30px 90px rgba(0,0,0,.5); }
+    .modal-head { display: flex; justify-content: space-between; align-items: center; padding: 17px 18px; border-bottom: 1px solid var(--line); }
+    .modal-head strong { font-size: 13px; }
+    .modal-body { padding: 18px; }
+    .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 18px; border-top: 1px solid var(--line); }
+    .field-label { display: block; margin-bottom: 7px; color: #a7b8d2; font-size: 10px; }
+    .field-input { width: 100%; height: 36px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 8px; outline: 0; color: var(--text); background: #0d1522; font-size: 11px; }
+    .modal-note { margin-top: 8px; color: var(--muted); font-size: 9.5px; line-height: 1.6; }
+    .provider-config { display: grid; gap: 10px; }
+    .config-row { padding: 11px; border: 1px solid var(--line); border-radius: 9px; background: rgba(20,30,46,.65); }
+    .config-row-top { display: flex; justify-content: space-between; gap: 10px; }
+    .config-row strong { font-size: 10.5px; }
+    .config-row p { margin: 5px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
+    .mobile-menu { display: none; }
+
+    @media (max-width: 1220px) {
+      :root { --sidebar-width: 250px; --inspector-width: 320px; }
+      .topbar { padding: 0 16px; }
+      .status-pill { padding: 0 8px; }
+      .status-pill.search-pill { display: none; }
+    }
+    @media (max-width: 980px) {
+      :root { --inspector-width: 300px; }
+      .workspace { grid-template-columns: 235px minmax(0,1fr); }
+      .inspector { position: fixed; z-index: 10; top: var(--header-height); right: 0; bottom: 0; width: min(360px, 92vw); box-shadow: -20px 0 60px rgba(0,0,0,.4); transform: translateX(0); transition: transform .22s ease; }
+      .inspector.closed { transform: translateX(105%); }
+      .main-toolbar { padding: 0 17px; }
+      .toolbar-actions .run-label { display: none; }
+    }
+    @media (max-width: 700px) {
+      :root { --header-height: 61px; }
+      body { overflow: hidden; }
+      .topbar { padding: 0 12px; gap: 10px; }
+      .brand { min-width: 0; gap: 9px; }
+      .brand-mark { width: 34px; height: 34px; border-radius: 10px; }
+      .brand-title { font-size: 12px; }
+      .brand-subtitle { font-size: 9px; }
+      .topbar-right .status-pill { display: none; }
+      .topbar-right .btn { height: 30px; padding: 0 8px; font-size: 9px; }
+      .topbar-right #diagnosticsButton { display: none; }
+      .workspace { display: block; position: relative; }
+      .sidebar { position: fixed; z-index: 15; top: var(--header-height); bottom: 0; left: 0; width: min(292px, 88vw); box-shadow: 20px 0 60px rgba(0,0,0,.4); transform: translateX(-105%); transition: transform .22s ease; }
+      .sidebar.open { transform: translateX(0); }
+      .main-panel { height: 100%; }
+      .mobile-menu { display: inline-flex; }
+      .main-toolbar { height: 48px; min-height: 48px; padding: 0 12px; }
+      .breadcrumbs { font-size: 9px; }
+      .toolbar-actions .btn { height: 27px; padding: 0 7px; font-size: 9px; }
+      .chat-scroll { padding: 23px 14px 24px; }
+      .welcome { margin-top: 2vh; }
+      .welcome h1 { font-size: 22px; }
+      .welcome-lead { font-size: 11px; }
+      .architecture { gap: 6px; margin: 22px 0; }
+      .architecture-step { min-height: 95px; padding: 10px 9px; }
+      .step-title { font-size: 9px; }
+      .step-copy { font-size: 8.5px; }
+      .step-number { width: 20px; height: 20px; }
+      .suggestions { grid-template-columns: 1fr; gap: 7px; }
+      .suggestion { min-height: 57px; padding: 9px; }
+      .suggestion small { margin-top: 2px; }
+      .composer-wrap { padding: 9px 10px 10px; }
+      .composer textarea { min-height: 62px; padding: 12px 12px 5px; font-size: 11px; }
+      .mode-hint, .composer-footnote span:last-child { display: none; }
+      .composer-controls { padding: 7px; }
+      .mode-select { max-width: 110px; font-size: 9px; }
+      .tool-btn { padding: 0 6px; font-size: 9px; }
+      .send-btn { padding: 0 11px; }
+      .inspector { top: var(--header-height); }
+      .message-body { max-width: 88%; }
+    }
+    @media (max-width: 390px) {
+      .topbar-right #providersButton { display: none; }
+      .architecture { grid-template-columns: 1fr; }
+      .architecture-step { min-height: auto; }
+      .step-copy { margin-top: 5px; }
+      .composer-tools .tool-btn span { display: none; }
+    }
+
+
+    /* Refinement pass: stronger hierarchy and a first-class Markdown reading surface. */
+    :root {
+      --bg: #090d14;
+      --surface: #101722;
+      --surface-2: #141e2b;
+      --surface-3: #1a2738;
+      --surface-hover: #202f43;
+      --line: rgba(155, 176, 207, .13);
+      --line-strong: rgba(155, 176, 207, .23);
+      --text: #edf3fc;
+      --text-2: #c0cce0;
+      --muted: #8292aa;
+      --accent: #89a6ff;
+      --accent-strong: #668aff;
+      --accent-soft: rgba(112, 146, 255, .12);
+      --mint: #54d7b0;
+      --radius: 13px;
+    }
+    body { font-size: 13px; background: #090d14; }
+    .topbar { background: rgba(13, 19, 29, .96); backdrop-filter: blur(18px); }
+    .brand-title { font-size: 14.5px; }
+    .brand-subtitle { font-size: 10.5px; }
+    .workspace { grid-template-columns: minmax(240px, 262px) minmax(420px, 1fr) minmax(300px, 340px); }
+    .sidebar { padding: 15px 12px 16px; gap: 15px; background: #0c121c; }
+    .workspace-switcher { padding: 9px; }
+    .nav-item { height: 37px; font-size: 12px; }
+    .section-label { font-size: 9px; }
+    .provider-row { padding: 9px 9px; }
+    .provider-name { font-size: 11px; }
+    .provider-desc { font-size: 9.7px; }
+    .main-panel { background: #0a0f17; }
+    .main-toolbar { height: 54px; min-height: 54px; padding: 0 25px; background: rgba(12, 18, 28, .72); }
+    .breadcrumbs { font-size: 11px; }
+    .toolbar-actions .btn { height: 31px; font-size: 10.5px; }
+    .chat-scroll { padding: 32px clamp(24px, 4.1vw, 66px) 30px; }
+    .welcome { margin-top: 3vh; max-width: 820px; }
+    .welcome h1 { font-size: clamp(25px, 2.3vw, 32px); }
+    .welcome-lead { font-size: 13px; line-height: 1.8; }
+    .architecture-step { min-height: 112px; padding: 15px; }
+    .step-title { font-size: 11.5px; }
+    .step-copy { font-size: 10.5px; }
+    .suggestion { min-height: 81px; padding: 13px; }
+    .suggestion strong { font-size: 11px; }
+    .suggestion small { font-size: 10px; }
+
+    .messages { max-width: 900px; gap: 30px; }
+    .message { gap: 12px; }
+    .message-avatar { width: 32px; height: 32px; flex-basis: 32px; border-radius: 10px; }
+    .message-body { max-width: min(820px, 94%); }
+    .message.assistant .message-body { flex: 1; max-width: 850px; }
+    .message-meta { margin: 2px 0 10px; font-size: 10px; }
+    .message-bubble { display: inline-block; padding: 13px 16px; font-size: 13px; line-height: 1.72; border-radius: 5px 14px 14px 14px; }
+    .message.assistant .message-bubble { display: block; width: 100%; padding: 0 1px; border: 0; border-radius: 0; background: transparent; color: #dce5f2; overflow: visible; }
+    .message.user .message-body { max-width: min(680px, 88%); }
+    .message.user .message-bubble { max-width: 100%; background: rgba(79, 106, 170, .2); border-color: rgba(137,166,255,.2); }
+
+    .markdown-body { color: #dce5f2; font-size: 13.2px; line-height: 1.78; overflow-wrap: anywhere; }
+    .markdown-body > :first-child { margin-top: 0 !important; }
+    .markdown-body > :last-child { margin-bottom: 0 !important; }
+    .markdown-body p { margin: 0 0 13px; color: #cbd6e7; }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+      color: #f1f5fc; font-weight: 700; letter-spacing: -.025em; line-height: 1.35;
+      margin: 23px 0 10px;
+    }
+    .markdown-body h1 { font-size: 23px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+    .markdown-body h2 { font-size: 18px; }
+    .markdown-body h3 { font-size: 15px; }
+    .markdown-body h4 { font-size: 13px; }
+    .markdown-body strong { color: #f2f5fb; font-weight: 700; }
+    .markdown-body em { color: #dce4f2; }
+    .markdown-body a { color: #9db5ff; text-decoration: underline; text-decoration-color: rgba(157,181,255,.42); text-underline-offset: 3px; }
+    .markdown-body a:hover { color: #c0ceff; }
+    .markdown-body ul, .markdown-body ol { margin: 7px 0 15px; padding-left: 24px; color: #cbd6e7; }
+    .markdown-body li { padding-left: 3px; margin: 5px 0; }
+    .markdown-body li::marker { color: #8fa8ee; }
+    .markdown-body li > ul, .markdown-body li > ol { margin: 5px 0 7px; }
+    .markdown-body blockquote { margin: 15px 0; padding: 11px 15px; border-left: 3px solid #7898f7; border-radius: 0 9px 9px 0; background: rgba(113,146,242,.075); color: #b9c8e1; }
+    .markdown-body blockquote > :last-child { margin-bottom: 0; }
+    .markdown-body code { padding: .16em .42em; border: 1px solid rgba(154,176,212,.13); border-radius: 5px; background: rgba(24,36,54,.92); color: #d8e4ff; font: .88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .markdown-body pre { position: relative; margin: 13px 0 17px; padding: 15px 16px; border: 1px solid rgba(151,174,210,.16); border-radius: 11px; background: #080d14; overflow: auto; tab-size: 2; }
+    .markdown-body pre code { display: block; padding: 0; border: 0; border-radius: 0; background: transparent; color: #d6e2f5; font-size: 11.5px; line-height: 1.7; white-space: pre; }
+    .markdown-body hr { height: 1px; margin: 22px 0; border: 0; background: var(--line-strong); }
+    .markdown-table-wrap { max-width: 100%; overflow-x: auto; margin: 13px 0 17px; border: 1px solid var(--line); border-radius: 10px; }
+    .markdown-body table { width: 100%; border-collapse: collapse; font-size: 11.5px; min-width: 360px; }
+    .markdown-body th { padding: 10px 12px; text-align: start; color: #e3ebf8; background: rgba(34,48,70,.72); font-weight: 650; border-bottom: 1px solid var(--line-strong); }
+    .markdown-body td { padding: 9px 12px; color: #c2cee1; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .markdown-body tr:last-child td { border-bottom: 0; }
+    .markdown-body tbody tr:nth-child(even) { background: rgba(20,30,46,.35); }
+    .markdown-body img { max-width: 100%; height: auto; border-radius: 10px; }
+    .markdown-body input[type="checkbox"] { accent-color: var(--accent-strong); margin-inline-end: 7px; }
+    .markdown-body[dir="rtl"] { text-align: right; }
+    .markdown-body[dir="rtl"] ul, .markdown-body[dir="rtl"] ol { padding-left: 0; padding-right: 24px; }
+    .markdown-body[dir="rtl"] blockquote { border-left: 0; border-right: 3px solid #7898f7; border-radius: 9px 0 0 9px; }
+    .markdown-body[dir="rtl"] pre, .markdown-body[dir="rtl"] code { direction: ltr; text-align: left; }
+    .message-actions { display: flex; align-items: center; gap: 6px; margin-top: 9px; opacity: .72; }
+    .message-actions button { height: 27px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #8798b2; font-size: 9px; cursor: pointer; }
+    .message-actions button:hover { color: #dce6f7; border-color: var(--line); background: rgba(24,36,54,.72); }
+    .message-actions svg { width: 12px; height: 12px; }
+    .inline-run { margin-top: 15px; }
+    .assistant-note { margin-top: 12px; }
+
+    .composer-wrap { padding: 13px clamp(16px, 3.5vw, 38px) 13px; background: rgba(15,22,34,.98); }
+    .composer { max-width: 940px; border-radius: 15px; background: #0d1521; }
+    .composer textarea { min-height: 76px; padding: 16px 17px 8px; font-size: 13px; line-height: 1.65; }
+    .composer textarea::placeholder { color: #8292aa; }
+    .composer-controls { padding: 8px 10px 10px 13px; }
+    .mode-select { height: 32px; font-size: 10.5px; }
+    .tool-btn { height: 31px; font-size: 10.5px; }
+    .send-btn { height: 34px; font-size: 10.5px; }
+    .composer-footnote { font-size: 9.5px; }
+    .inspector { background: #0d141f; }
+    .inspector-head { padding: 17px 16px 0; }
+    .inspector-title { font-size: 10.5px; }
+    .inspector-description { font-size: 10.5px; }
+    .inspector-tab { font-size: 10.5px; }
+    .inspect-section-title { font-size: 9.5px; }
+    .trace-name { font-size: 10.5px; }
+    .trace-detail { font-size: 9.5px; }
+
+    @media (max-width: 1220px) {
+      .workspace { grid-template-columns: minmax(225px, 245px) minmax(400px, 1fr) minmax(280px, 310px); }
+    }
+    @media (max-width: 980px) {
+      .workspace { grid-template-columns: 235px minmax(0,1fr); }
+      .message.assistant .message-body { max-width: 100%; }
+    }
+    @media (max-width: 700px) {
+      .workspace { display: block; }
+      .chat-scroll { padding: 20px 13px 22px; }
+      .messages { gap: 24px; }
+      .message { gap: 8px; }
+      .message-avatar { width: 28px; height: 28px; flex-basis: 28px; }
+      .message-body, .message.assistant .message-body { max-width: calc(100% - 36px); }
+      .message-bubble { font-size: 12px; }
+      .markdown-body { font-size: 12.4px; }
+      .markdown-body h1 { font-size: 20px; }
+      .markdown-body h2 { font-size: 16px; }
+      .markdown-body h3 { font-size: 14px; }
+      .markdown-body pre { padding: 12px; }
+      .markdown-body pre code { font-size: 10.5px; }
+      .composer-wrap { padding: 8px 9px 9px; }
+      .composer textarea { min-height: 64px; font-size: 12px; }
+    }
+
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <button class="btn icon-only mobile-menu" id="menuButton" aria-label="Open workspace menu" title="Open menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.2"/><path d="M12 7.4a4.6 4.6 0 1 0 0 9.2 4.6 4.6 0 0 0 0-9.2Z"/><path d="m15.1 8.9 2.3-2.3" opacity=".6"/></svg>
+        </div>
+        <div class="brand-copy">
+          <div class="brand-title">Agentic Orchestration Studio</div>
+          <div class="brand-subtitle">A controlled environment for testing agent workflows</div>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="status-pill success"><span class="dot"></span><code>LLM&nbsp; groq → gemini → openrouter</code></div>
+        <div class="status-pill success search-pill"><span class="dot"></span><code>SEARCH&nbsp; ddg → wikipedia</code></div>
+        <div class="status-pill success"><span class="dot"></span><code>ALL SYSTEMS OPERATIONAL</code></div>
+        <button class="btn" id="providersButton">Providers</button>
+        <button class="btn" id="diagnosticsButton"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13a8 8 0 1 0 2.4-5.7L4 9"/><path d="M4 4v5h5M12 8v4l3 2"/></svg>Run diagnostics</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="sidebar" id="sidebar">
+        <button class="workspace-switcher" id="workspaceSwitcher" aria-label="Switch workspace">
+          <span class="workspace-avatar">AS</span>
+          <span class="workspace-meta"><span class="workspace-name">Orchestration Sandbox</span><span class="workspace-type">Local test environment</span></span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m8 10 4 4 4-4"/></svg>
+        </button>
+
+        <section>
+          <div class="section-label">Workspace</div>
+          <nav class="nav-list" aria-label="Workspace navigation">
+            <button class="nav-item active" data-view="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>Overview</button>
+            <button class="nav-item" data-view="runs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r=".8" fill="currentColor"/><circle cx="4" cy="12" r=".8" fill="currentColor"/><circle cx="4" cy="18" r=".8" fill="currentColor"/></svg>Run history<span class="nav-count" id="runCount">04</span></button>
+            <button class="nav-item" data-view="memory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H20v16H7.5A2.5 2.5 0 0 0 5 21V5.5Z"/><path d="M5 6h11M9 8.5h7M9 12h6"/></svg>Memory<span class="nav-count">ON</span></button>
+            <button class="nav-item" data-view="providers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg>Provider settings</button>
+          </nav>
+        </section>
+
+        <div class="sidebar-divider"></div>
+
+        <section>
+          <div class="section-heading"><div class="section-label">Current session</div><button class="mini-action" id="newSessionSide" title="New conversation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></button></div>
+          <button class="session-card selected" id="currentSession">
+            <span class="session-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5v-15Z"/><path d="M4 6h12M8 10h8M8 13h5"/></svg></span>
+            <span class="session-copy"><span class="session-title" id="sessionName">Untitled conversation</span><span class="session-time">Active · just now</span></span>
+            <span class="session-status"></span>
+          </button>
+          <button class="session-card" data-session="Research orchestration patterns"><span class="session-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5M8.5 11h5M11 8.5v5"/></svg></span><span class="session-copy"><span class="session-title">Research orchestration patterns</span><span class="session-time">Yesterday · 10:42</span></span></button>
+          <button class="session-card" data-session="Compare search providers"><span class="session-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5h14v14H5zM8 9h8M8 12h8M8 15h5"/></svg></span><span class="session-copy"><span class="session-title">Compare search providers</span><span class="session-time">Oct 28 · 16:08</span></span></button>
+        </section>
+
+        <div class="sidebar-divider"></div>
+
+        <section>
+          <div class="section-heading"><div class="section-label">Search backends</div><button class="mini-action" id="refreshProviders" title="Refresh providers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button></div>
+          <div class="provider-list" id="searchProviders">
+            <button class="provider-row selected" data-provider="Chain (failover)"><span class="provider-radio"></span><span class="provider-content"><span class="provider-name-line"><span class="provider-name">Chain (failover)</span><span class="tag">Active</span></span><span class="provider-desc">Try backends in order; first useful result wins.</span></span></button>
+            <button class="provider-row" data-provider="DuckDuckGo"><span class="provider-radio"></span><span class="provider-content"><span class="provider-name-line"><span class="provider-name">DuckDuckGo</span><span class="tag">No server</span></span><span class="provider-desc">Free HTML search. No account or quota.</span></span></button>
+            <button class="provider-row" data-provider="Wikipedia"><span class="provider-radio"></span><span class="provider-content"><span class="provider-name-line"><span class="provider-name">Wikipedia</span><span class="tag">No server</span></span><span class="provider-desc">Encyclopedia search with generous rate limits.</span></span></button>
+            <button class="provider-row" data-provider="Tavily"><span class="provider-radio"></span><span class="provider-content"><span class="provider-name-line"><span class="provider-name">Tavily</span><span class="tag warn">API key</span></span><span class="provider-desc">1,000 free credits per month.</span></span></button>
+            <button class="provider-row" data-provider="Exa"><span class="provider-radio"></span><span class="provider-content"><span class="provider-name-line"><span class="provider-name">Exa</span><span class="tag warn">API key</span></span><span class="provider-desc">Semantic search · 1,000 free searches/month.</span></span></button>
+            <button class="provider-row" data-provider="Serper"><span class="provider-radio"></span><span class="provider-content"><span class="provider-name-line"><span class="provider-name">Serper</span><span class="tag error">Not configured</span></span><span class="provider-desc">Google Search results API.</span></span></button>
+          </div>
+        </section>
+
+        <div class="sidebar-bottom">
+          <div class="health-card">
+            <div class="health-top"><span class="health-title">System diagnostics</span><span class="health-live"><span class="dot"></span>Healthy</span></div>
+            <div class="health-stats"><div class="health-stat"><strong id="modelLatency">1,271 ms</strong><span>Model · groq</span></div><div class="health-stat"><strong id="searchLatency">6,689 ms</strong><span>Search · ddg</span></div></div>
+            <button class="btn ghost" id="sidebarDiagnostics" style="width:100%;height:28px;margin-top:10px;font-size:9px">View diagnostics report <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m9 18 6-6-6-6"/></svg></button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-panel">
+        <div class="main-toolbar">
+          <div class="breadcrumbs"><span>Sandbox</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 18 6-6-6-6"/></svg><strong id="breadcrumbTitle">Orchestration workspace</strong></div>
+          <div class="toolbar-actions"><span class="run-label"><span class="dot"></span><span id="runStatus">Ready for a new run</span></span><button class="btn ghost" id="toggleInspector"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>Inspector</button></div>
+        </div>
+
+        <section class="chat-scroll" id="chatScroll" aria-label="Conversation">
+          <div class="welcome" id="welcomeScreen">
+            <div class="welcome-orb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2.8 14.1 9.9 21.2 12 14.1 14.1 12 21.2 9.9 14.1 2.8 12 9.9 9.9 12 2.8Z"/><path d="m18.6 2.8.7 2.1 2.1.7-2.1.7-.7 2.1-.7-2.1-2.1-.7 2.1-.7.7-2.1Z" opacity=".65"/></svg></div>
+            <div class="eyebrow">Multi-agent test environment</div>
+            <h1>Explore your orchestration flow.</h1>
+            <p class="welcome-lead">Run a prompt through your manager, inspect parallel agent work, and see exactly how the final response was assembled. Every stage is designed to be observable.</p>
+
+            <div class="architecture" aria-label="How orchestration works">
+              <article class="architecture-step"><div class="step-top"><span class="step-number">01</span><span class="step-title">Manager plans</span></div><p class="step-copy">The manager interprets the request, breaks it into tasks, and chooses the right specialists.</p></article>
+              <article class="architecture-step"><div class="step-top"><span class="step-number">02</span><span class="step-title">Agents execute</span></div><p class="step-copy">Specialists work in parallel waves, using configured models and search tools.</p></article>
+              <article class="architecture-step"><div class="step-top"><span class="step-number">03</span><span class="step-title">Manager synthesizes</span></div><p class="step-copy">The manager reviews evidence and writes one answer, with the trace kept alongside it.</p></article>
+            </div>
+
+            <div class="suggestion-heading"><span>Try a sample task</span><span>Choose a prompt to get started</span></div>
+            <div class="suggestions">
+              <button class="suggestion" data-prompt="Research the latest approaches to agent orchestration and compare their trade-offs."><span class="suggestion-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5M8 10.5h5M10.5 8v5"/></svg></span><span><strong>Research a topic</strong><small>Use web search and synthesize multiple sources.</small></span></button>
+              <button class="suggestion" data-prompt="Analyze the attached document and extract its key findings, assumptions, and open questions."><span class="suggestion-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3.5h8l4 4V20H6z"/><path d="M14 3.5V8h4M9 12h6M9 15.5h6"/></svg></span><span><strong>Analyze a document</strong><small>Inspect structure, facts, and important details.</small></span></button>
+              <button class="suggestion" data-prompt="Compare DuckDuckGo, Wikipedia, Tavily, and Exa as search backends for a research agent."><span class="suggestion-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 19V5M4 19h16"/><path d="M8 16v-5M13 16V7M18 16v-8"/></svg></span><span><strong>Compare providers</strong><small>Evaluate tools, reliability, and capabilities.</small></span></button>
+            </div>
+            <p class="demo-disclaimer">Prototype interface · Connect your orchestration API to execute real model and tool calls.</p>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+        </section>
+
+        <footer class="composer-wrap">
+          <div class="composer" id="composer">
+            <textarea id="promptInput" rows="2" placeholder="Message your orchestration manager…" aria-label="Message to the orchestration manager"></textarea>
+            <div class="attachment-list" id="attachmentList"></div>
+            <div class="composer-controls">
+              <div class="composer-tools">
+                <select class="mode-select" id="modeSelect" aria-label="Execution mode"><option value="Auto">✦ Auto · orchestrated</option><option value="General">General · direct</option><option value="Number">Number · data</option><option value="Document">Document · files</option><option value="Web">Web · research</option></select>
+                <span class="mode-hint" id="modeHint">Manager-led · parallel agents</span>
+                <input type="file" id="fileInput" class="hidden-input" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.md,.txt,.csv,.json,.png,.jpg,.jpeg,.webp" />
+                <button class="tool-btn" id="attachButton"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m8 12.5 7.1-7.1a3 3 0 0 1 4.2 4.2l-8.5 8.5a5 5 0 0 1-7.1-7.1l8.1-8.1"/></svg><span>Attach</span></button>
+              </div>
+              <div class="composer-submit"><button class="tool-btn" id="newChatButton"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 5v14M5 12h14"/></svg><span>New chat</span></button><button class="btn primary send-btn" id="sendButton">Run prompt <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button></div>
+            </div>
+          </div>
+          <div class="composer-footnote"><span>Attach files or drop them here · backend integration controls upload handling.</span><span class="key-hint"><kbd>Enter</kbd> to run <span>·</span> <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</span></div>
+        </footer>
+      </main>
+
+      <aside class="inspector" id="inspector">
+        <div class="inspector-head">
+          <div class="inspector-title-row"><div class="inspector-title">Run inspector</div><div class="inspector-actions"><button class="btn ghost" id="copyJsonButton">Copy JSON</button><button class="btn icon-only ghost" id="closeInspector" aria-label="Close inspector"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div></div>
+          <p class="inspector-description" id="inspectorDescription">Select a run or submit a prompt to explore its execution trace, agent activity, and context.</p>
+        </div>
+        <div class="inspector-tabs" role="tablist" aria-label="Inspector views">
+          <button class="inspector-tab active" data-tab="trace" role="tab" aria-selected="true">Trace</button>
+          <button class="inspector-tab" data-tab="context" role="tab" aria-selected="false">Context</button>
+          <button class="inspector-tab" data-tab="json" role="tab" aria-selected="false">JSON</button>
+        </div>
+        <div class="inspector-content" id="inspectorContent">
+          <div class="inspector-empty"><div class="empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h4"/></svg></div><h3>No run selected</h3><p>Your execution trace will appear here. Send a prompt to inspect planning, agent calls, tool results, and synthesis.</p></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+  <div class="modal-backdrop panel-hidden" id="modalBackdrop" role="presentation">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-head"><strong id="modalTitle">Provider settings</strong><button class="btn icon-only ghost" id="modalClose" aria-label="Close dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-foot"><button class="btn" id="modalCancel">Close</button><button class="btn primary" id="modalSave">Save settings</button></div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+  <script>
+    (() => {
+      const $ = (selector, root = document) => root.querySelector(selector);
+      const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+      const state = {
+        attachments: [],
+        selectedProvider: 'Chain (failover)',
+        activeTab: 'trace',
+        currentRun: null,
+        runHistory: [],
+        runIndex: 0,
+        busy: false,
+        inspectorOpen: true,
+        currentView: 'overview'
+      };
+
+      const icons = {
+        check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg>',
+        file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h4"/></svg>',
+        bot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="7" width="16" height="13" rx="4"/><path d="M12 3v4M9 13h.01M15 13h.01M9 17h6"/></svg>'
+      };
+
+      function toast(message) {
+        const el = document.createElement('div');
+        el.className = 'toast';
+        el.innerHTML = `${icons.check}<span></span>`;
+        $('span', el).textContent = message;
+        $('#toastRegion').append(el);
+        window.setTimeout(() => el.remove(), 2800);
+      }
+
+      function escapeHTML(value) {
+        return String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+      }
+
+      function setInspectorTab(tab) {
+        state.activeTab = tab;
+        $$('.inspector-tab').forEach(button => {
+          const active = button.dataset.tab === tab;
+          button.classList.toggle('active', active);
+          button.setAttribute('aria-selected', String(active));
+        });
+        renderInspector();
+      }
+
+      function renderInspector() {
+        const target = $('#inspectorContent');
+        const run = state.currentRun;
+        if (!run) {
+          target.innerHTML = `<div class="inspector-empty"><div class="empty-icon">${icons.file}</div><h3>No run selected</h3><p>Your execution trace will appear here. Send a prompt to inspect planning, agent calls, tool results, and synthesis.</p></div>`;
+          $('#inspectorDescription').textContent = 'Select a run or submit a prompt to explore its execution trace, agent activity, and context.';
+          return;
+        }
+        $('#inspectorDescription').textContent = `Run ${run.id} · ${run.mode} mode · ${run.timestamp}`;
+        if (state.activeTab === 'trace') {
+          target.innerHTML = `
+            <section class="inspect-section">
+              <div class="inspect-section-title"><span>Execution summary</span><span>Latest run</span></div>
+              <div class="run-summary"><div class="run-summary-top"><span class="run-summary-name">${escapeHTML(run.title)}</span><span class="success-label"><span class="dot"></span>Preview complete</span></div>
+                <div class="summary-grid"><div class="summary-metric"><strong>${run.steps.length}</strong><span>Stages</span></div><div class="summary-metric"><strong>${run.duration}</strong><span>Total time</span></div><div class="summary-metric"><strong>${run.agents}</strong><span>Agents</span></div></div>
+              </div>
+            </section>
+            <section class="inspect-section"><div class="inspect-section-title"><span>Execution timeline</span><span>${run.steps.length} events</span></div><div class="trace-list">${run.steps.map((step, index) => `<div class="trace-item"><span class="trace-marker">${index + 1}</span><div class="trace-copy"><div class="trace-name"><span>${escapeHTML(step.name)}</span><span class="trace-duration">${escapeHTML(step.time)}</span></div><div class="trace-detail">${escapeHTML(step.detail)}</div></div></div>`).join('')}</div></section>
+            <section class="inspect-section"><div class="inspect-section-title"><span>Tool activity</span><span>${(run.tools || []).length} calls</span></div>${(run.tools || []).length ? run.tools.map(tool => `<div class="trace-card"><div class="trace-card-row"><span>${escapeHTML(tool.name || tool.tool || 'Tool call')}</span><span class="tag">${escapeHTML(tool.status || 'Complete')}</span></div><p>${escapeHTML(tool.detail || tool.output || 'Tool event recorded.')}</p></div>`).join('') : `<div class="trace-card"><div class="trace-card-row"><span>No tool calls returned</span><span class="tag warn">No data</span></div><p>The backend did not include separate tool-call events in this response.</p></div>`}</section>`;
+        } else if (state.activeTab === 'context') {
+          target.innerHTML = `<section class="inspect-section"><div class="inspect-section-title"><span>Run context</span><span>Preview</span></div><div class="context-list"><div class="context-item"><strong>Original prompt</strong><span>${escapeHTML(run.prompt)}</span></div><div class="context-item"><strong>Execution mode</strong><span>${escapeHTML(run.mode)} · ${run.mode === 'Auto' ? 'Manager-led orchestration with parallel specialist agents' : 'Direct execution path selected by the user'}</span></div><div class="context-item"><strong>Model route</strong><span>Groq → Gemini → OpenRouter · configured fallback chain</span></div><div class="context-item"><strong>Search route</strong><span>${escapeHTML(state.selectedProvider)} · DDG → Wikipedia</span></div><div class="context-item"><strong>Memory</strong><span>Conversation memory enabled for this workspace. Connect this panel to your actual memory store to show retrieved items.</span></div><div class="context-item"><strong>Attachments</strong><span>${run.attachments.length ? run.attachments.map(escapeHTML).join(', ') : 'No files attached to this run.'}</span></div></div></section>`;
+        } else {
+          target.innerHTML = `<pre class="json-view">${escapeHTML(JSON.stringify(run.raw, null, 2))}</pre>`;
+        }
+      }
+
+      function renderRunHistory() {
+        const count = String(state.runHistory.length).padStart(2, '0');
+        $('#runCount').textContent = count;
+      }
+
+      function renderMarkdownFallback(source) {
+        // Safe, intentionally small offline parser. Raw HTML is escaped rather than trusted.
+        const lines = String(source ?? '').replace(/\r\n?/g, '\n').split('\n');
+        const esc = escapeHTML;
+        const inline = value => {
+          let text = esc(value);
+          const stash = [];
+          const hold = html => { const key = `\u0000${stash.length}\u0000`; stash.push(html); return key; };
+          text = text.replace(/`([^`]+)`/g, (_, code) => hold(`<code>${code}</code>`));
+          text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)(?:\s+"([^"]*)")?\)/g,
+            (_, label, url, title) => hold(`<a href="${url}" target="_blank" rel="noopener noreferrer"${title ? ` title="${title}"` : ''}>${label}</a>`));
+          text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/__(.+?)__/g, '<strong>$1</strong>');
+          text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
+          text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+          text = text.replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
+          return text.replace(/\u0000(\d+)\u0000/g, (_, index) => stash[Number(index)] || '');
+        };
+        const isTableSeparator = line => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+        const isBlockStart = line => /^\s*(```|#{1,6}\s|>|([-*+]\s|\d+[.)]\s)|([-*_]\s*){3,})/.test(line);
+        const parse = srcLines => {
+          let html = '', i = 0;
+          while (i < srcLines.length) {
+            const line = srcLines[i];
+            if (!line.trim()) { i++; continue; }
+            const fence = line.match(/^\s*```\s*([\w-]+)?\s*$/);
+            if (fence) {
+              const lang = fence[1] ? ` class="language-${esc(fence[1])}"` : '';
+              const code = []; i++;
+              while (i < srcLines.length && !/^\s*```\s*$/.test(srcLines[i])) code.push(srcLines[i++]);
+              if (i < srcLines.length) i++;
+              html += `<pre><code${lang}>${esc(code.join('\n'))}</code></pre>`; continue;
+            }
+            const heading = line.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
+            if (heading) { const level = heading[1].length; html += `<h${level}>${inline(heading[2])}</h${level}>`; i++; continue; }
+            if (/^\s*([-*_]\s*){3,}$/.test(line)) { html += '<hr>'; i++; continue; }
+            if (i + 1 < srcLines.length && line.includes('|') && isTableSeparator(srcLines[i+1])) {
+              const cells = row => row.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim());
+              const headers = cells(line); i += 2; const rows = [];
+              while (i < srcLines.length && srcLines[i].includes('|') && srcLines[i].trim()) rows.push(cells(srcLines[i++]));
+              html += `<div class="markdown-table-wrap"><table><thead><tr>${headers.map(cell => `<th>${inline(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${headers.map((_, index) => `<td>${inline(row[index] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+              continue;
+            }
+            if (/^\s*>/.test(line)) {
+              const quote = [];
+              while (i < srcLines.length && /^\s*>/.test(srcLines[i])) quote.push(srcLines[i++].replace(/^\s*>\s?/, ''));
+              html += `<blockquote>${parse(quote)}</blockquote>`; continue;
+            }
+            if (/^\s*([-*+]\s|\d+[.)]\s)/.test(line)) {
+              const ordered = /^\s*\d+[.)]\s/.test(line); const items = [];
+              while (i < srcLines.length && /^\s*([-*+]\s|\d+[.)]\s)/.test(srcLines[i])) {
+                items.push(srcLines[i++].replace(/^\s*(?:[-*+]|\d+[.)])\s+/, ''));
+              }
+              const tag = ordered ? 'ol' : 'ul'; html += `<${tag}>${items.map(item => `<li>${inline(item)}</li>`).join('')}</${tag}>`; continue;
+            }
+            const para = [line.trim()]; i++;
+            while (i < srcLines.length && srcLines[i].trim() && !isBlockStart(srcLines[i]) && !(i + 1 < srcLines.length && srcLines[i].includes('|') && isTableSeparator(srcLines[i+1]))) para.push(srcLines[i++].trim());
+            html += `<p>${para.map(inline).join('<br>')}</p>`;
+          }
+          return html;
+        };
+        return parse(lines);
+      }
+
+      function renderMarkdown(source) {
+        const markdown = String(source ?? '');
+        let html;
+        try {
+          if (window.marked && typeof window.marked.parse === 'function') {
+            window.marked.setOptions({ gfm: true, breaks: false, mangle: false, headerIds: false });
+            html = window.marked.parse(markdown);
+          } else {
+            html = renderMarkdownFallback(markdown);
+          }
+          if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
+            html = window.DOMPurify.sanitize(html, {
+              USE_PROFILES: { html: true },
+              ADD_ATTR: ['target', 'rel', 'class'],
+              FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form'],
+              FORBID_ATTR: ['style', 'onerror', 'onclick']
+            });
+          } else if (!window.marked) {
+            // The offline fallback already escapes raw HTML and only generates safe tags/URLs.
+            html = html.replace(/href="(?!https?:|mailto:)[^"]*"/gi, '');
+          } else {
+            // Fail closed if Markdown parsing is available but the sanitizer CDN is not.
+            // Escaping keeps content safe; the offline parser still provides formatting.
+            html = renderMarkdownFallback(markdown);
+          }
+        } catch (error) {
+          console.warn('Markdown rendering failed; using safe fallback.', error);
+          html = renderMarkdownFallback(markdown);
+        }
+        return html;
+      }
+
+      function addMessage(role, text, run) {
+        const wrap = document.createElement('article');
+        wrap.className = `message ${role}`;
+        const avatar = role === 'user' ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.5-3.6 3.2-5.5 7-5.5s6.5 1.9 7 5.5"/></svg>' : icons.bot;
+        const safeText = String(text ?? '');
+        wrap.innerHTML = `<div class="message-avatar">${avatar}</div><div class="message-body"><div class="message-meta">${role === 'user' ? 'You' : 'Orchestration manager'} · ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</div><div class="message-bubble markdown-body"></div>${role === 'assistant' && run ? `<div class="inline-run"><div class="inline-run-head"><strong>Execution overview</strong><span class="success-label"><span class="dot"></span>${escapeHTML(run.preview ? 'Preview complete' : 'Run complete')}</span></div><div class="inline-run-body">${(run.steps || []).slice(0,3).map(step => `<div class="inline-step"><span class="health-dot"></span><span>${escapeHTML(step.name)}</span><time>${escapeHTML(step.time || '')}</time></div>`).join('') || '<span class="trace-detail">No execution events were included in this response.</span>'}</div></div>` : ''}<div class="message-actions"><button type="button" class="copy-message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>Copy</button></div></div>`;
+        const markdownSurface = $('.message-bubble', wrap);
+        markdownSurface.dir = 'auto';
+        markdownSurface.innerHTML = renderMarkdown(safeText);
+        $('.copy-message', wrap).addEventListener('click', async () => {
+          try { await navigator.clipboard.writeText(safeText); toast('Message copied.'); }
+          catch { toast('Clipboard access is unavailable in this browser context.'); }
+        });
+        $('#messages').append(wrap);
+      }
+
+      function createPreviewRun(prompt, mode) {
+        state.runIndex += 1;
+        const run = {
+          id: `run_${String(state.runIndex).padStart(4,'0')}`,
+          title: prompt.length > 48 ? prompt.slice(0, 45) + '…' : prompt,
+          prompt,
+          mode,
+          timestamp: new Date().toLocaleString(),
+          duration: '8.2s',
+          agents: mode === 'Auto' ? 3 : 1,
+          attachments: state.attachments.map(file => file.name),
+          preview: true,
+          tools: [
+            { name: 'DuckDuckGo search', status: '2 results', detail: 'Sample search event for demonstrating the tool activity panel.' },
+            { name: 'Wikipedia lookup', status: '1 result', detail: 'Sample knowledge-base lookup for demonstrating the tool activity panel.' }
+          ],
+          steps: [
+            { name: 'Manager · request analysis', detail: 'Classified the request, identified the expected output, and prepared a task plan.', time: '1.2s' },
+            { name: 'Planner · task decomposition', detail: 'Created independent subtasks and selected the specialist agents for this request.', time: '0.8s' },
+            { name: 'Research agent · source discovery', detail: 'Sample search stage using the configured search-provider chain.', time: '3.1s' },
+            { name: 'Analysis agent · evidence review', detail: 'Reviewed sample findings and prepared a structured synthesis.', time: '1.7s' },
+            { name: 'Manager · final synthesis', detail: 'Combined specialist outputs and prepared the response for the conversation.', time: '1.4s' }
+          ]
+        };
+        run.raw = {
+          run_id: run.id,
+          status: 'prototype_preview',
+          preview: true,
+          mode: run.mode,
+          prompt: run.prompt,
+          created_at: new Date().toISOString(),
+          model_route: ['groq', 'gemini', 'openrouter'],
+          search_route: ['duckduckgo', 'wikipedia'],
+          attachments: run.attachments,
+          events: run.steps.map((step, index) => ({ sequence: index + 1, name: step.name, detail: step.detail, duration: step.time }))
+        };
+        return run;
+      }
+
+      function normalizeBackendRun(payload, prompt, mode) {
+        state.runIndex += 1;
+        const data = payload && typeof payload === 'object' ? payload : { answer: String(payload ?? '') };
+        const answer = data.answer ?? data.final_answer ?? data.response ?? data.output ?? data.content ?? data.message ?? '';
+        const rawSteps = data.steps ?? data.trace ?? data.events ?? data.run?.steps ?? data.run?.events ?? [];
+        const steps = Array.isArray(rawSteps) ? rawSteps.map((event, index) => ({
+          name: event.name ?? event.type ?? event.event ?? event.agent ?? event.tool ?? `Execution event ${index + 1}`,
+          detail: event.detail ?? event.summary ?? event.output_preview ?? event.description ?? event.input ?? '',
+          time: event.duration ?? event.elapsed ?? event.latency ?? '',
+          status: event.status ?? 'Complete'
+        })) : [];
+        const rawTools = data.tools ?? data.tool_calls ?? data.run?.tools ?? [];
+        const tools = Array.isArray(rawTools) ? rawTools.map(tool => ({
+          name: tool.name ?? tool.tool ?? tool.function?.name ?? 'Tool call',
+          status: tool.status ?? 'Complete',
+          detail: tool.detail ?? tool.output ?? tool.result_summary ?? tool.arguments ?? ''
+        })) : [];
+        return {
+          id: data.run_id ?? data.id ?? `run_${String(state.runIndex).padStart(4,'0')}`,
+          title: prompt.length > 48 ? prompt.slice(0,45) + '…' : prompt,
+          prompt, mode,
+          timestamp: new Date().toLocaleString(),
+          duration: data.duration ?? data.elapsed ?? '—',
+          agents: data.agent_count ?? data.agents?.length ?? 1,
+          attachments: state.attachments.map(file => file.name),
+          steps, tools, preview: false, answer: String(answer),
+          raw: data
+        };
+      }
+
+      async function executePrompt(prompt, mode) {
+        // Integrate your real API by defining window.AGENT_API_CONFIG.send(payload).
+        // Example adapter (replace the URL and field names with your backend contract):
+        // window.AGENT_API_CONFIG = {
+        //   send: async ({ prompt, mode, files }) => {
+        //     const body = new FormData();
+        //     body.append('prompt', prompt); body.append('mode', mode);
+        //     files.forEach(file => body.append('files', file));
+        //     const response = await fetch('/api/agent/run', { method: 'POST', body });
+        //     if (!response.ok) throw new Error(`Backend returned ${response.status}`);
+        //     return response.json(); // { answer, trace, tools, run_id, ... }
+        //   }
+        // };
+        const config = window.AGENT_API_CONFIG;
+        if (config && typeof config.send === 'function') {
+          return normalizeBackendRun(await config.send({ prompt, mode, files: [...state.attachments] }), prompt, mode);
+        }
+        return createPreviewRun(prompt, mode);
+      }
+
+      async function runPrompt() {
+        const input = $('#promptInput');
+        const prompt = input.value.trim();
+        if (!prompt || state.busy) {
+          if (!prompt) toast('Write a prompt before starting a run.');
+          return;
+        }
+        state.busy = true;
+        $('#sendButton').disabled = true;
+        $('#sendButton').innerHTML = 'Running…';
+        $('#welcomeScreen').classList.add('panel-hidden');
+        addMessage('user', prompt);
+        input.value = '';
+        const mode = $('#modeSelect').value;
+        $('#runStatus').textContent = 'Executing workflow…';
+        $('#inspectorContent').innerHTML = `<div class="inspector-empty"><div class="empty-icon">${icons.bot}</div><h3>Run in progress</h3><p>Waiting for the orchestration manager and its tools to return events.</p></div>`;
+        $('#chatScroll').scrollTop = $('#chatScroll').scrollHeight;
+        try {
+          let run = await executePrompt(prompt, mode);
+          if (run.preview) {
+            run.answer = `## Orchestration preview\n\nThis is a **sample response** to demonstrate how the conversation area renders Markdown. When your backend is connected, the manager’s actual response will appear here instead.\n\n### What happened\n\n1. The manager analyzed the request and selected an execution path.\n2. Specialist agents prepared their work and used the configured tools.\n3. The manager combined the results into a final answer.\n\n### Example result table\n\n| Component | Status | Purpose |\n|:---|:---:|:---|\n| Manager | Complete | Plans and synthesizes |\n| Research agent | Complete | Gathers evidence |\n| Search tools | Complete | Retrieves relevant sources |\n\n> The full execution trace remains available in the inspector.\n\nA tool call might look like \`search(query)\`, and code blocks are rendered separately:\n\n\`\`\`python\ndef summarize(items):\n    return [item.strip() for item in items if item]\n\`\`\`\n\n**Note:** This is a UI preview, not a real model response.`;
+          }
+          if (!run.answer) run.answer = 'The backend completed the request but did not return a recognized answer field. Check the response adapter in `window.AGENT_API_CONFIG`.';
+          state.currentRun = run;
+          state.runHistory.unshift(run);
+          addMessage('assistant', run.answer, run);
+          $('#runStatus').textContent = run.preview ? 'Preview complete' : 'Run completed';
+          renderInspector();
+          renderRunHistory();
+          if (window.innerWidth <= 980) openInspector();
+        } catch (error) {
+          console.error(error);
+          addMessage('assistant', `## The run could not be completed\n\n${escapeHTML(error?.message || 'An unexpected API error occurred.')}\n\nCheck the backend endpoint and network request, then try again.`, null);
+          $('#runStatus').textContent = 'Run failed';
+          toast('The orchestration request failed.');
+        } finally {
+          state.busy = false;
+          $('#sendButton').disabled = false;
+          $('#sendButton').innerHTML = 'Run prompt <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h13M13 6l6 6-6 6"/></svg>';
+          $('#chatScroll').scrollTop = $('#chatScroll').scrollHeight;
+        }
+      }
+
+      function newChat() {
+        state.currentRun = null;
+        state.attachments = [];
+        $('#messages').innerHTML = '';
+        $('#attachmentList').innerHTML = '';
+        $('#promptInput').value = '';
+        $('#welcomeScreen').classList.remove('panel-hidden');
+        $('#runStatus').textContent = 'Ready for a new run';
+        $('#sessionName').textContent = 'Untitled conversation';
+        $('#breadcrumbTitle').textContent = 'Orchestration workspace';
+        renderInspector();
+        $('#promptInput').focus();
+        toast('New conversation started.');
+      }
+
+      function addFiles(files) {
+        [...files].forEach(file => {
+          const exists = state.attachments.some(item => item.name === file.name && item.size === file.size);
+          if (!exists) state.attachments.push(file);
+        });
+        renderAttachments();
+      }
+
+      function renderAttachments() {
+        const list = $('#attachmentList');
+        list.innerHTML = '';
+        state.attachments.forEach((file, index) => {
+          const chip = document.createElement('div');
+          chip.className = 'attachment-chip';
+          chip.innerHTML = `${icons.file}<span></span><button type="button" aria-label="Remove attachment">×</button>`;
+          $('span', chip).textContent = `${file.name} · ${formatBytes(file.size)}`;
+          $('button', chip).addEventListener('click', () => { state.attachments.splice(index, 1); renderAttachments(); });
+          list.append(chip);
+        });
+      }
+
+      function formatBytes(bytes) {
+        if (!bytes) return '0 B';
+        const units = ['B','KB','MB','GB'];
+        const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3);
+        return `${(bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+      }
+
+      function showModal(title, bodyHTML) {
+        $('#modalTitle').textContent = title;
+        $('#modalBody').innerHTML = bodyHTML;
+        $('#modalBackdrop').classList.remove('panel-hidden');
+        $('#modalSave').style.display = title.includes('Diagnostics') ? 'none' : '';
+      }
+      function closeModal() { $('#modalBackdrop').classList.add('panel-hidden'); }
+
+      function openProviders() {
+        showModal('Provider configuration', `
+          <div class="provider-config">
+            <div class="config-row"><div class="config-row-top"><strong>Language model route</strong><span class="tag">3 providers</span></div><p>Primary: Groq · Fallback: Gemini · Final fallback: OpenRouter. Manage API credentials in your server environment, not in this browser UI.</p></div>
+            <div class="config-row"><div class="config-row-top"><strong>Search route</strong><span class="tag">${escapeHTML(state.selectedProvider)}</span></div><p>The selected backend is used by the orchestration workflow. Chain mode attempts DuckDuckGo first, then Wikipedia if the first source returns no useful results.</p></div>
+            <div class="config-row"><div class="config-row-top"><strong>Available backends</strong><span class="tag warn">Some need keys</span></div><p>DuckDuckGo and Wikipedia can run without a server key. Tavily, Exa, and Serper require credentials configured on your backend.</p></div>
+            <div><label class="field-label" for="modelRoute">Model route label</label><input class="field-input" id="modelRoute" value="groq → gemini → openrouter" /><p class="modal-note">This field is a visual configuration placeholder. Persist provider settings through your backend and keep secrets out of client-side HTML.</p></div>
+          </div>`);
+      }
+
+      function runDiagnostics() {
+        showModal('Diagnostics report', `
+          <div class="provider-config">
+            <div class="config-row"><div class="config-row-top"><strong>Language model · Groq</strong><span class="success-label"><span class="dot"></span>Reachable</span></div><p>Sample latency: 1,271 ms · Model: openai/gpt-oss-120b</p></div>
+            <div class="config-row"><div class="config-row-top"><strong>Search · DuckDuckGo</strong><span class="success-label"><span class="dot"></span>Reachable</span></div><p>Sample result count: 3 · Sample latency: 6,689 ms</p></div>
+            <div class="config-row"><div class="config-row-top"><strong>Search · Wikipedia</strong><span class="success-label"><span class="dot"></span>Reachable</span></div><p>Sample result count: 2 · Sample latency: 1,671 ms</p></div>
+            <div class="config-row"><div class="config-row-top"><strong>Runtime status</strong><span class="tag warn">Demo values</span></div><p>These are illustrative values from the provided interface concept. Replace them with live health-check responses from your diagnostics endpoint.</p></div>
+          </div>`);
+        toast('Diagnostics view opened.');
+      }
+
+      function openInspector() {
+        $('.workspace').classList.remove('inspector-collapsed');
+        $('#inspector').classList.remove('closed');
+        state.inspectorOpen = true;
+      }
+      function closeInspector() {
+        if (window.innerWidth <= 980) {
+          $('#inspector').classList.add('closed');
+        } else {
+          $('.workspace').classList.add('inspector-collapsed');
+        }
+        state.inspectorOpen = false;
+      }
+
+      // Navigation is intentionally local in this standalone prototype.
+      $$('.nav-item').forEach(item => item.addEventListener('click', () => {
+        $$('.nav-item').forEach(nav => nav.classList.toggle('active', nav === item));
+        state.currentView = item.dataset.view;
+        const labels = { overview: 'Orchestration workspace', runs: 'Run history', memory: 'Conversation memory', providers: 'Provider settings' };
+        $('#breadcrumbTitle').textContent = labels[state.currentView];
+        if (state.currentView === 'providers') openProviders();
+        if (state.currentView === 'memory') {
+          showModal('Conversation memory', '<div class="config-row"><div class="config-row-top"><strong>Memory is enabled</strong><span class="tag">Active</span></div><p>This workspace can carry conversation context across turns. Connect your memory service to inspect stored summaries and retrieved memories here.</p></div>');
+        }
+        if (state.currentView === 'runs') {
+          if (state.runHistory.length) {
+            const latest = state.runHistory[0]; state.currentRun = latest; setInspectorTab('trace'); openInspector(); toast(`Showing ${latest.id} in the inspector.`);
+          } else toast('No runs in this prototype session yet.');
+        }
+        if (window.innerWidth <= 700) $('#sidebar').classList.remove('open');
+      }));
+
+      $$('.provider-row').forEach(row => row.addEventListener('click', () => {
+        state.selectedProvider = row.dataset.provider;
+        $$('.provider-row').forEach(item => item.classList.toggle('selected', item === row));
+        toast(`${state.selectedProvider} selected for this preview.`);
+        if (state.currentRun) renderInspector();
+      }));
+
+      $$('.inspector-tab').forEach(tab => tab.addEventListener('click', () => setInspectorTab(tab.dataset.tab)));
+      $('#sendButton').addEventListener('click', runPrompt);
+      $('#promptInput').addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); runPrompt(); }
+      });
+      $('#newChatButton').addEventListener('click', newChat);
+      $('#newSessionSide').addEventListener('click', newChat);
+      $('#attachButton').addEventListener('click', () => $('#fileInput').click());
+      $('#fileInput').addEventListener('change', event => { addFiles(event.target.files); event.target.value = ''; });
+      $$('.suggestion').forEach(card => card.addEventListener('click', () => { $('#promptInput').value = card.dataset.prompt; $('#promptInput').focus(); }));
+      $('#providersButton').addEventListener('click', openProviders);
+      $('#diagnosticsButton').addEventListener('click', runDiagnostics);
+      $('#sidebarDiagnostics').addEventListener('click', runDiagnostics);
+      $('#refreshProviders').addEventListener('click', () => toast('Provider list refreshed (local preview).'));
+      $('#workspaceSwitcher').addEventListener('click', () => toast('You are in the Local test environment.'));
+      $('#currentSession').addEventListener('click', () => { newChat(); $('#sidebar').classList.remove('open'); });
+      $$('[data-session]').forEach(button => button.addEventListener('click', () => { toast(`“${button.dataset.session}” is a saved-session preview.`); $('#sessionName').textContent = button.dataset.session; }));
+      $('#toggleInspector').addEventListener('click', () => state.inspectorOpen ? closeInspector() : openInspector());
+      $('#closeInspector').addEventListener('click', closeInspector);
+      $('#menuButton').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+      $('#modalClose').addEventListener('click', closeModal);
+      $('#modalCancel').addEventListener('click', closeModal);
+      $('#modalSave').addEventListener('click', () => { closeModal(); toast('Settings saved in this UI preview only.'); });
+      $('#modalBackdrop').addEventListener('click', event => { if (event.target === $('#modalBackdrop')) closeModal(); });
+      $('#copyJsonButton').addEventListener('click', async () => {
+        if (!state.currentRun) { toast('There is no run JSON to copy yet.'); return; }
+        const json = JSON.stringify(state.currentRun.raw, null, 2);
+        try { await navigator.clipboard.writeText(json); toast('Run JSON copied to clipboard.'); }
+        catch { const area = document.createElement('textarea'); area.value = json; document.body.append(area); area.select(); document.execCommand('copy'); area.remove(); toast('Run JSON copied.'); }
+      });
+      $('#modeSelect').addEventListener('change', event => {
+        const hints = { Auto: 'Manager-led · parallel agents', General: 'Direct response · no delegation', Number: 'Structured data · calculations', Document: 'File-aware · document tools', Web: 'Research · search tools' };
+        $('#modeHint').textContent = hints[event.target.value];
+      });
+      ['dragenter','dragover'].forEach(type => $('#composer').addEventListener(type, event => { event.preventDefault(); $('#composer').classList.add('dragover'); }));
+      ['dragleave','drop'].forEach(type => $('#composer').addEventListener(type, event => { event.preventDefault(); $('#composer').classList.remove('dragover'); }));
+      $('#composer').addEventListener('drop', event => { if (event.dataTransfer?.files?.length) addFiles(event.dataTransfer.files); });
+
+      // Keep the conversation visible by default on tablet and mobile; open the inspector on demand.
+      if (window.innerWidth <= 980) {
+        $('#inspector').classList.add('closed');
+        state.inspectorOpen = false;
+      }
+      window.addEventListener('resize', () => {
+        if (window.innerWidth > 980) {
+          $('#inspector').classList.remove('closed');
+          if (state.inspectorOpen) $('.workspace').classList.remove('inspector-collapsed');
+          else $('.workspace').classList.add('inspector-collapsed');
+        } else {
+          $('.workspace').classList.remove('inspector-collapsed');
+          if (!state.inspectorOpen) $('#inspector').classList.add('closed');
+        }
+      });
+      renderInspector();
+    })();
+  </script>
+</body>
+</html>
