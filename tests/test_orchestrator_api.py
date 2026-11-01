@@ -50,6 +50,7 @@ class OrchestratorApiTests(unittest.TestCase):
         self.settings = Settings(
             _env_file=None,
             files_dir=str(Path(self.tmp.name) / "files"),
+            memory_dir=str(Path(self.tmp.name) / "memory"),
             orchestrator_timeout=5.0,
             orchestrator_planner="heuristic",
             orchestrator_review=False,
@@ -57,6 +58,7 @@ class OrchestratorApiTests(unittest.TestCase):
         )
         get_settings.cache_clear()
         main_module.reset_store()
+        main_module.reset_memory()
         self.patches = [
             mock.patch.object(main_module, "get_settings", lambda: self.settings),
             mock.patch.object(main_module, "build_chain", lambda settings=None: FakeModel()),
@@ -72,6 +74,7 @@ class OrchestratorApiTests(unittest.TestCase):
         for patch in self.patches:
             patch.stop()
         main_module.reset_store()
+        main_module.reset_memory()
         get_settings.cache_clear()
         self.tmp.cleanup()
 

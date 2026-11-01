@@ -306,3 +306,48 @@ body.dragging::after {
 .run-agents { font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
 .run-ms { margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
 p.muted.small { font-size: 10.5px; line-height: 1.5; margin: 8px 0 0; }
+
+/* ══════════════════════════════════════════════════════════════
+   Harness memory: past conversations + the active-session pill
+   ══════════════════════════════════════════════════════════════ */
+.session-list {
+  display: flex; flex-direction: column; gap: 3px;
+  margin: 8px 0 0; padding: 0; list-style: none;
+  max-height: 240px; overflow-y: auto;
+}
+.session-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 7px; border-radius: 7px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.session-item:hover { background: var(--bg-soft); border-color: var(--border); }
+.session-item.active {
+  background: var(--bg-soft);
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.session-main { min-width: 0; flex: 1; }
+.session-title {
+  font-size: 11.5px; line-height: 1.35; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-meta {
+  font-family: var(--mono); font-size: 9.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-forget {
+  flex: 0 0 auto; background: transparent; color: var(--muted);
+  border: 1px solid transparent; border-radius: 6px;
+  font-size: 10px; line-height: 1; padding: 3px 5px; cursor: pointer; opacity: .55;
+}
+.session-item:hover .session-forget { opacity: 1; }
+.session-forget:hover { color: #ff9c9c; border-color: #ff6b6b; }
+.session-forget.armed { color: #ff9c9c; border-color: #ff6b6b; opacity: 1; }
+
+.session-pill {
+  font-family: var(--mono); font-size: 9.5px; color: var(--muted);
+  border: 1px dashed var(--border); border-radius: 999px;
+  padding: 2px 8px; max-width: 260px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-pill.live { color: var(--accent); border-style: solid; border-color: var(--accent); }

@@ -45,11 +45,13 @@ function check(name, condition, detail) {
   }
 }
 
-function mount(fetchImpl, pageUrl) {
+function mount(fetchImpl, pageUrl, seed) {
   const dom = new JSDOM(HTML, { url: pageUrl, pretendToBeVisual: true, runScripts: 'outside-only' });
   const w = dom.window;
   w.fetch = fetchImpl;
   w.navigator.clipboard = { writeText: async () => {} };
+  // A second window with the remembered session id = the page after a reload.
+  Object.entries(seed || {}).forEach(([key, value]) => w.localStorage.setItem(key, value));
   w.eval(JS);
   return w;
 }
@@ -131,6 +133,7 @@ async function scenarioNormalHost() {
   check('a prompt produces an answer bubble', !!answer);
   check('the reply is a real answer or a configuration error — never Not Found', !!answer && !/Not Found/.test(body), body.slice(0, 100));
   const orchPanel = w.document.querySelector('.orch-panel');
+  const hadOrch = !!orchPanel;
   const traceRows = w.document.querySelectorAll('.trace-row');
   check('auto mode renders the step-by-step trace', !!orchPanel && traceRows.length > 0, `${traceRows.length} rows`);
   check('the trace names the manager and the planner',
@@ -141,10 +144,53 @@ async function scenarioNormalHost() {
     check('expand all opens every step', w.document.querySelectorAll('.trace-row.open').length === traceRows.length);
   }
   check('the run log panel is populated', w.document.querySelectorAll('#runs-list .run-row').length > 0);
+  check(
+    'the turn was written to the harness memory',
+    !!w.document.querySelector('#sessions-list .session-item'),
+    text(w, 'sessions-summary')
+  );
+  const pill = text(w, 'session-pill');
+  check('the composer names the active session', /memory: \d+ turn/.test(pill), pill);
 
   w.document.getElementById('btn-diag').click();
   await sleep(1200);
   check('diagnostics produce rows', w.document.querySelectorAll('#diag-summary .diag-row').length > 0);
+
+  // ── D: reload. A brand-new window with the same remembered session id
+  // must redraw the conversation exactly as it was, with no model call.
+  const match = /s-\d{8}-\d{6}-[0-9a-f]+/.exec(pill);
+  if (!match) {
+    check('a session id is available to reload', false, pill);
+    return;
+  }
+  console.log('');
+  console.log('D  reload: the same conversation, replayed from memory');
+  const w2 = mount(
+    (target, init) => fetch(new URL(String(target), liveBase + '/').href, init),
+    liveBase + '/',
+    { 'agetnic.session.v1': match[0] }
+  );
+  await sleep(1800);
+  const userBubble = w2.document.querySelector('.message.user .msg-text');
+  check('the user turn is back', !!userBubble && /hello/.test(userBubble.textContent || ''), userBubble ? userBubble.textContent : 'none');
+  check('the assistant turn is back', !!w2.document.querySelector('.message.assistant .msg-text'));
+  check(
+    'the restored session is the active one',
+    !!w2.document.querySelector('#sessions-list .session-item.active')
+  );
+  if (hadOrch) {
+    check('the step-by-step trace survives the reload', w2.document.querySelectorAll('.trace-row').length > 0);
+    check(
+      'the trace is the stored one, not a new run',
+      !!w2.document.querySelector('.orch-runid')
+    );
+  }
+  const w3 = mount(
+    (target, init) => fetch(new URL(String(target), liveBase + '/').href, init),
+    liveBase + '/'
+  );
+  await sleep(600);
+  check('a fresh browser starts with an empty conversation', !w3.document.querySelector('.message'));
 }
 
 (async () => {

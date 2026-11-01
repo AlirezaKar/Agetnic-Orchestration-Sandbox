@@ -22,4 +22,6 @@ logs/*.log
 logs/archive/
 # orchestration run records (one JSON per run + runs.jsonl)
 logs/orchestrator/
+# harness memory (the conversations themselves: sessions/*.json + index.jsonl)
+memory/
 .DS_Store

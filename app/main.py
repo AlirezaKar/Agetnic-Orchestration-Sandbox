@@ -34,6 +34,7 @@ from app.llm.registry import (
     describe_providers,
     resolve_named,
 )
+from app.memory import SessionMemory, session_view
 from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
@@ -68,6 +69,11 @@ API_ROUTES = [
     "GET  /agents                     (agent catalogue + planner mode)",
     "GET  /runs                       (orchestration log: recent runs)",
     "GET  /runs/{run_id}              (full trace of one run)",
+    "GET  /sessions                   (harness memory: past conversations)",
+    "POST /sessions                   (start a new conversation)",
+    "GET  /sessions/{id}              (one conversation, replayable turn by turn)",
+    "PATCH /sessions/{id}             (rename a conversation)",
+    "DELETE /sessions/{id}            (forget a conversation)",
     "GET  /diagnose",
     "GET  /                           (test harness UI)",
     "GET  /assets/…                   (css + js)",
@@ -111,6 +117,10 @@ class ChatRequest(BaseModel):
     history: list[dict[str, Any]] = []
     max_steps: int | None = Field(default=None, ge=1, le=10)
     allow_search: bool = True
+    # Harness memory: continue this conversation (created when unknown) and
+    # store this exchange. ``remember=false`` keeps it out of memory.
+    session_id: str | None = None
+    remember: bool = True
 
 
 class FileUploadRequest(BaseModel):
@@ -128,12 +138,27 @@ class OrchestrateRequest(BaseModel):
     planner: str | None = Field(default=None, pattern="^(auto|heuristic|llm)$")
     synthesize: bool | None = None
     review: bool | None = None
+    # Harness memory: continue this conversation (created when unknown) and
+    # store this exchange, both sides, exactly as the page rendered it.
+    session_id: str | None = None
+    remember: bool = True
 
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     max_results: int = Field(default=5, ge=1, le=10)
     provider: str | None = None
+    session_id: str | None = None
+    remember: bool = True
+
+
+class SessionCreateRequest(BaseModel):
+    title: str = Field(default="", max_length=120)
+    mode: str = Field(default="auto", pattern="^(auto|agent|answer|search)$")
+
+
+class SessionRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
 
 
 # ------------------------------------------------------------ attachments
@@ -154,6 +179,83 @@ def reset_store() -> None:
     _STORE = None
 
 
+# ---------------------------------------------------------- harness memory
+_MEMORY: SessionMemory | None = None
+
+
+def get_memory() -> SessionMemory:
+    """One conversation store per process, rooted at settings.memory_dir."""
+    global _MEMORY
+    if _MEMORY is None:
+        settings = get_settings()
+        _MEMORY = SessionMemory(
+            settings.memory_dir,
+            enabled=settings.harness_memory,
+            max_turns=settings.memory_max_turns,
+            history_turns=settings.memory_history_turns,
+            history_chars=settings.memory_history_chars,
+        )
+    return _MEMORY
+
+
+def reset_memory() -> None:
+    """Tests (and a changed MEMORY_DIR) get a fresh conversation store."""
+    global _MEMORY
+    _MEMORY = None
+
+
+def _history_for(payload, sessions: SessionMemory) -> list[dict[str, Any]]:
+    """Earlier turns for the model: the stored conversation wins over the UI's replay.
+
+    A browser that was reloaded no longer has to resend the chat — the harness
+    remembers it. ``history`` in the request stays as the fallback for a session
+    the store has never seen (or for memory switched off).
+    """
+    session_id = getattr(payload, "session_id", None)
+    stored = sessions.history(session_id) if session_id else []
+    return stored or list(getattr(payload, "history", []) or [])
+
+
+def _remember(
+    sessions: SessionMemory,
+    payload,
+    *,
+    mode: str,
+    user_text: str,
+    files: list[dict[str, Any]],
+    response: dict[str, Any] | None = None,
+    ok: bool = True,
+    error: dict[str, Any] | None = None,
+    run_id: str = "",
+    provider: str = "",
+    model: str = "",
+    latency_ms: int = 0,
+) -> dict[str, Any] | None:
+    """Store one exchange in the harness memory (no-op when disabled)."""
+    if not getattr(payload, "remember", True):
+        return None
+    return sessions.append(
+        getattr(payload, "session_id", None),
+        mode=mode,
+        user_text=user_text,
+        user_files=files,
+        response=response,
+        ok=ok,
+        error=error,
+        run_id=run_id,
+        provider=provider,
+        model=model,
+        latency_ms=latency_ms,
+    )
+
+
+def _file_refs(attachments) -> list[dict[str, Any]]:
+    return [
+        {"id": item.id, "name": item.name, "kind": item.kind, "chars": item.chars}
+        for item in attachments
+    ]
+
+
 # ---------------------------------------------------------------- helpers
 def _file_error(exc: FileError) -> JSONResponse:
     body: dict[str, Any] = {"error": "file", "message": str(exc)}
@@ -162,7 +264,7 @@ def _file_error(exc: FileError) -> JSONResponse:
     return JSONResponse(status_code=exc.status, content=body)
 
 
-def _error(status: int, kind: str, exc: Exception, **extra: Any) -> JSONResponse:
+def _error_body(kind: str, exc: Exception) -> dict[str, Any]:
     body: dict[str, Any] = {"error": kind, "message": str(exc)}
     if isinstance(exc, ProviderError):
         body["detail"] = exc.to_dict()
@@ -170,7 +272,41 @@ def _error(status: int, kind: str, exc: Exception, **extra: Any) -> JSONResponse
         body["detail"] = {"missing": exc.missing}
     elif isinstance(exc, SearchError):
         body["detail"] = exc.to_dict()
+    return body
+
+
+def _error(status: int, kind: str, exc: Exception, **extra: Any) -> JSONResponse:
+    body = _error_body(kind, exc)
     body.update(extra)
+    return JSONResponse(status_code=status, content=body)
+
+
+def _payload_text(payload: Any) -> str:
+    """The user's words in this request (``message`` for chat, ``query`` for search)."""
+    return getattr(payload, "message", None) or getattr(payload, "query", "") or ""
+
+
+def _remembered_error(
+    sessions: SessionMemory,
+    payload: Any,
+    *,
+    mode: str,
+    status: int,
+    kind: str,
+    exc: Exception,
+    files: list[dict[str, Any]] | None = None,
+) -> JSONResponse:
+    """A failed turn is a turn too: it is remembered, so the transcript stays honest."""
+    body = _error_body(kind, exc)
+    body["session"] = _remember(
+        sessions,
+        payload,
+        mode=mode,
+        user_text=_payload_text(payload),
+        files=files or [],
+        ok=False,
+        error={"status": status, "body": dict(body)},
+    )
     return JSONResponse(status_code=status, content=body)
 
 
@@ -220,6 +356,8 @@ async def version(request: Request) -> dict[str, Any]:
         "api_prefixes": ["", "/api"],
         "changelog": f"logs/changelog/v{VERSION}.md",
         "logs": str(logs.log_dir()),
+        "memory": str(get_memory().dir),
+        "sessions": "/sessions",
     }
 
 
@@ -245,6 +383,7 @@ async def health(request: Request) -> dict[str, Any]:
             "agents": settings.orchestrator_roster,
         },
         "files": {"count": len(get_store().list())},
+        "memory": get_memory().stats(),
         "ui": {
             "index": INDEX_FILE.exists(),
             "assets": ASSETS_DIR.exists(),
@@ -316,6 +455,7 @@ async def provider_models(name: str) -> Any:
 @router.post("/search")
 async def search(request: SearchRequest) -> Any:
     settings = get_settings()
+    sessions = get_memory()
     try:
         if request.provider:
             key = request.provider.lower()
@@ -323,18 +463,23 @@ async def search(request: SearchRequest) -> Any:
                 raise SearchError(key, f"unknown provider (known: {', '.join(PROVIDER_CLASSES)})")
             provider = PROVIDER_CLASSES[key](settings)
             results = await provider.search(request.query, request.max_results)
-            return {
+            payload = {
                 "query": request.query,
                 "provider": key,
                 "count": len(results),
                 "results": [r.to_dict() for r in results],
             }
-        chain = build_search_chain(settings)
-        response = await chain.search(request.query, request.max_results)
+        else:
+            chain = build_search_chain(settings)
+            response = await chain.search(request.query, request.max_results)
+            payload = response.to_dict()
     except SearchError as exc:
         logs.get_logger("search").warning("search failed [%s]: %s", exc.provider, exc)
-        return _error(502, "search", exc)
-    return response.to_dict()
+        return _remembered_error(sessions, request, mode="search", status=502, kind="search", exc=exc)
+    payload["session"] = _remember(
+        sessions, request, mode="search", user_text=request.query, files=[], response=payload
+    )
+    return payload
 
 
 @router.get("/search/diagnose")
@@ -383,21 +528,27 @@ async def chat(request: ChatRequest) -> Any:
     settings = get_settings()
     chain = build_chain(settings)
     search_chain = build_search_chain(settings)
+    sessions = get_memory()
+    mode = "agent" if request.allow_search else "answer"
     agent = WebSearchAgent(chain, search_chain, settings)
     try:
         result = await agent.run(
             request.message,
-            history=request.history,
+            history=_history_for(request, sessions),
             max_steps=request.max_steps,
             allow_search=request.allow_search,
         )
     except ConfigurationError as exc:
         logs.get_logger("chat").warning("chat rejected, no provider: %s", exc)
-        return _error(400, "configuration", exc)
+        return _remembered_error(sessions, request, mode=mode, status=400, kind="configuration", exc=exc)
     except ProviderError as exc:
         logs.get_logger("chat").warning("chat failed [%s]: %s", exc.provider, exc)
-        return _error(502, "provider", exc)
-    return result.to_dict()
+        return _remembered_error(sessions, request, mode=mode, status=502, kind="provider", exc=exc)
+    payload = result.to_dict()
+    payload["session"] = _remember(
+        sessions, request, mode=mode, user_text=request.message, files=[], response=payload
+    )
+    return payload
 
 
 @router.post("/files")
@@ -482,12 +633,14 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
 
     chain = build_chain(settings)
     search_chain = build_search_chain(settings)
+    sessions = get_memory()
+    files = _file_refs(attachments)
     manager = Manager(settings=settings, model_chain=chain, search_chain=search_chain)
     try:
         result = await manager.run(
             payload.message,
             attachments=attachments,
-            history=payload.history,
+            history=_history_for(payload, sessions),
             agents=payload.agents,
             planner=payload.planner,
             synthesize=payload.synthesize,
@@ -495,10 +648,14 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
         )
     except ConfigurationError as exc:
         logs.get_logger("orchestrator").warning("configuration error: %s", exc)
-        return _error(400, "configuration", exc)
+        return _remembered_error(
+            sessions, payload, mode="auto", status=400, kind="configuration", exc=exc, files=files
+        )
     except ProviderError as exc:
         logs.get_logger("orchestrator").warning("provider error [%s]: %s", exc.provider, exc)
-        return _error(502, "provider", exc)
+        return _remembered_error(
+            sessions, payload, mode="auto", status=502, kind="provider", exc=exc, files=files
+        )
 
     logs.get_logger("orchestrator").info(
         "request done run=%s intent=%s agents=%s waves=%s parallel_ms=%s total_ms=%s "
@@ -512,7 +669,20 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
         result.synthesized,
         result.model_calls,
     )
-    return result.to_dict(trace_limit=settings.orchestrator_trace_chars)
+    body = result.to_dict(trace_limit=settings.orchestrator_trace_chars)
+    body["session"] = _remember(
+        sessions,
+        payload,
+        mode="auto",
+        user_text=payload.message,
+        files=files,
+        response=body,
+        run_id=result.run_id,
+        provider=result.provider,
+        model=result.model,
+        latency_ms=result.latency_ms,
+    )
+    return body
 
 
 @router.get("/runs")
@@ -540,6 +710,85 @@ async def run_detail(run_id: str) -> Any:
             },
         )
     return record
+
+
+@router.get("/sessions")
+async def sessions_list(
+    limit: int = Query(default=20, ge=1, le=200),
+    q: str = Query(default="", description="filter on title, last message, last answer"),
+) -> dict[str, Any]:
+    """The harness memory: past conversations, newest first."""
+    sessions = get_memory()
+    items = sessions.list(limit, q)
+    return {
+        "enabled": sessions.enabled,
+        "count": len(items),
+        "sessions": items,
+        "dir": str(sessions.dir),
+        "writable": sessions.writable,
+        "hint": (
+            "GET /sessions/{id} replays one turn by turn; POST /orchestrate (or /chat) "
+            "with its session_id continues it."
+        ),
+    }
+
+
+@router.post("/sessions")
+async def sessions_create(payload: SessionCreateRequest) -> Any:
+    """Start a conversation before the first message (optional — the first turn creates one)."""
+    sessions = get_memory()
+    if not sessions.enabled:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "disabled",
+                "message": "Harness memory is off (HARNESS_MEMORY=false).",
+                "hint": "Set HARNESS_MEMORY=true in .env to keep conversations.",
+            },
+        )
+    record = sessions.create(title=payload.title, mode=payload.mode)
+    return session_view(record, history_turns=sessions.history_turns)
+
+
+@router.get("/sessions/{session_id}")
+async def sessions_get(session_id: str) -> Any:
+    """One conversation, every turn with the payload the page rendered."""
+    sessions = get_memory()
+    record = sessions.get(session_id)
+    if record is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "not_found",
+                "message": f"no session '{session_id}'",
+                "hint": "GET /sessions lists what is in memory; memory/ holds the JSON files.",
+            },
+        )
+    return session_view(record, history_turns=sessions.history_turns)
+
+
+@router.patch("/sessions/{session_id}")
+async def sessions_rename(session_id: str, payload: SessionRenameRequest) -> Any:
+    sessions = get_memory()
+    record = sessions.rename(session_id, payload.title)
+    if record is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "message": f"no session '{session_id}'"},
+        )
+    return session_view(record, history_turns=sessions.history_turns)
+
+
+@router.delete("/sessions/{session_id}")
+async def sessions_delete(session_id: str) -> Any:
+    sessions = get_memory()
+    if not sessions.delete(session_id):
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "message": f"no session '{session_id}'"},
+        )
+    logs.get_logger("memory").info("session forgotten: %s", session_id)
+    return {"deleted": session_id}
 
 
 @router.get("/diagnose")
