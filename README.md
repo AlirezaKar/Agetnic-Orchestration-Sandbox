@@ -357,6 +357,9 @@ prompt ─► MANAGER ─► PLANNER ─┼── Web researcher ──── UR
 
 | Piece | Where | What it decides |
 |---|---|---|
+| **Service** | `app/orchestrator/service.py` | the entry point and the wiring: `OrchestratorService(settings, models=…, search=…, agent_loop=…)` |
+| **Ports** | `app/orchestrator/contracts.py` | what the orchestrator needs from outside (model, search, agent loop, settings) — protocols, not imports |
+| **Host seam** | `app/orchestrator/host.py` | the only file in the package that imports the app (logger, log dir, agent loop, settings) |
 | Manager | `app/orchestrator/manager.py` | classify → plan → waves → review → one answer (+ sources, errors, timings) |
 | Planner | `app/orchestrator/planner.py` | which agents run, the brief each one gets, and the dependency graph |
 | Executor | `app/orchestrator/executor.py` | waves: `asyncio.gather` + semaphore + per-agent timeout; failures stay isolated |
@@ -365,6 +368,47 @@ prompt ─► MANAGER ─► PLANNER ─┼── Web researcher ──── UR
 | Run log | `app/orchestrator/runlog.py` | one unclipped JSON record per run in `logs/orchestrator/` |
 | Memory | `app/memory.py` | the conversation itself: every user turn + answer in `memory/`, replayable |
 | Attachments | `app/orchestrator/files.py` | upload decoding, extraction, on-disk store |
+
+### The orchestrator is a service (and it is portable)
+
+The orchestrator is organised like a microservice that runs next to the other
+ones — the model providers (`app/llm`), the web search (`app/search`), the
+single-agent tool loop (`app/agent.py`), the conversation memory (`app/memory.py`).
+It **does not import any of them**. It is handed four ports and one host seam:
+
+| Port | Shape | This app passes |
+|---|---|---|
+| `ModelChain` | `await complete(messages, tools=None, temperature=…, max_tokens=…)` | `build_chain(settings)` |
+| `SearchChain` | `await search(query, limit)` | `build_search_chain(settings)` |
+| `AgentLoopFactory` | `factory(model_chain, search_chain, settings, observer=hook)` | `app.agent.WebSearchAgent` |
+| `OrchestratorSettings` | 15 plain attributes (`contracts.py`) | `app.config.Settings` |
+
+```python
+# app/main.py — the whole host side of the orchestration
+service = OrchestratorService(settings, models=chain, search=search_chain, agent_loop=WebSearchAgent)
+result  = await service.run(OrchestrationRequest(message=…, attachments=…))
+body    = service.payload(result)      # trace clipped for the browser
+```
+
+```
+app/                                     one folder, as before — services side by side
+  llm/            search/               ← siblings: providers, backends
+  agent.py        memory.py             ← siblings: tool loop, conversations
+  orchestrator/   ← this service: service.py · contracts.py · host.py · manager…
+  main.py                               ← the adapter that wires them together
+  config.py       logs.py               ← host concerns (untouched)
+```
+
+To lift it into another project: copy `app/orchestrator/`, rewrite the four
+functions in `host.py`, implement the three ports, wire one `OrchestratorService`.
+`app/orchestrator/README.md` is the checklist.
+
+Nothing about the algorithm changed for this: the manager, planner, executor,
+agents, trace and run log are the same code, and `tests/test_orchestrator_service.py`
+proves the package runs against *foreign* objects (a dataclass settings object,
+a two-method model chain, an injected agent loop). It also parses the AST of
+every file in the folder and fails if anything imports the host outside
+`host.py` — the boundary is enforced, not just described.
 
 ### What a plan looks like
 
@@ -625,7 +669,11 @@ app/
     base.py            SearchResult / SearchResponse / SearchError
   agent.py             tool-calling loop + trace + sources
   memory.py            harness memory: conversations in memory/ (store, replay, CLI)
-  orchestrator/
+  orchestrator/        ONE SERVICE: portable, talks to the app only through host.py
+    service.py         entry point: OrchestratorService(settings, models=, search=, agent_loop=)
+    contracts.py       ports: model chain, search chain, agent loop, settings, request
+    host.py            the only file that imports the app (logger, log dir, loop, settings)
+    README.md          the service contract + the porting checklist
     manager.py         classify -> plan -> waves -> review -> synthesis, totals, errors
     planner.py         rules + LLM planner, per-agent briefs, dependency graph
     executor.py        waves: asyncio.gather + semaphore + timeout, failures isolated

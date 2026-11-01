@@ -30,7 +30,7 @@ from app.config import get_settings
 from app.llm.base import ProviderError
 from app.llm.registry import ConfigurationError, build_chain, describe_providers
 from app.memory import SessionMemory
-from app.orchestrator import Manager
+from app.orchestrator import OrchestrationRequest, OrchestratorService
 from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
@@ -132,13 +132,14 @@ async def check_orchestrator(settings, question: str) -> tuple[bool, dict]:
     if not settings.orchestrator_enabled:
         line(SKIP, "orchestrator", "disabled (ORCHESTRATOR_ENABLED=false)")
         return "skipped", skipped("the orchestrator is disabled")
-    manager = Manager(
-        settings=settings,
-        model_chain=build_chain(settings),
-        search_chain=build_search_chain(settings),
+    service = OrchestratorService(
+        settings,
+        models=build_chain(settings),
+        search=build_search_chain(settings),
+        agent_loop=WebSearchAgent,
     )
     try:
-        result = await manager.run(question)
+        result = await service.run(OrchestrationRequest(message=question))
     except (ConfigurationError, ProviderError) as exc:
         line(BAD, "orchestrator", str(exc))
         return False, {}

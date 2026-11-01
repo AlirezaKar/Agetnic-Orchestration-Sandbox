@@ -28,10 +28,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from app import logs
-from app.config import Settings, get_settings
-from app.orchestrator import runlog
+from app.orchestrator import host, runlog
 from app.orchestrator.agents import AgentContext, AgentOutcome, catalogue
+from app.orchestrator.contracts import OrchestratorSettings
 from app.orchestrator.executor import run_plan, schedule
 from app.orchestrator.files import Attachment
 from app.orchestrator.planner import AGENTS, Plan, PlanStep, make_plan
@@ -194,14 +193,20 @@ class Manager:
 
     def __init__(
         self,
-        settings: Settings | None = None,
+        settings: OrchestratorSettings | None = None,
         model_chain: Any = None,
         search_chain: Any = None,
+        agent_loop: Any = None,
+        log_dir: Any = None,
     ) -> None:
-        self.settings = settings or get_settings()
+        self.settings = settings if settings is not None else host.default_settings()
         self.model_chain = model_chain
         self.search_chain = search_chain
-        self.log = logs.get_logger("orchestrator")
+        # factory for the single-agent tool loop (the `search` agent's collaborator)
+        self.agent_loop = agent_loop or host.agent_loop()
+        # None = the host's log directory (runlog resolves it)
+        self.log_dir = log_dir
+        self.log = host.get_logger("orchestrator")
 
     # ------------------------------------------------------------------ api
     async def run(
@@ -248,6 +253,7 @@ class Manager:
             settings=self.settings,
             history=history or [],
             trace=trace,
+            agent_loop=self.agent_loop,
         )
         plan = await make_plan(
             message,
@@ -385,7 +391,7 @@ class Manager:
             errors=errors,
         )
         if getattr(self.settings, "orchestrator_log_runs", True):
-            path = runlog.save_run(result.record())
+            path = runlog.save_run(result.record(), log_dir=self.log_dir)
             result.log_path = str(path) if path else ""
         return result
 
@@ -573,8 +579,8 @@ def _parse_review(raw: str, roster: list[str]) -> dict[str, Any]:
     return {"note": str(payload.get("note") or "")[:300], "follow_up": items}
 
 
-def agent_catalogue(settings: Settings | None = None) -> dict[str, Any]:
-    settings = settings or get_settings()
+def agent_catalogue(settings: OrchestratorSettings | None = None) -> dict[str, Any]:
+    settings = settings if settings is not None else host.default_settings()
     return {
         "agents": catalogue(),
         "roster": settings.orchestrator_roster,
