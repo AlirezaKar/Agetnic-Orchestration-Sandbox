@@ -30,7 +30,7 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.10.0 | 2026-11-01 | merged (PR #16, `db10169`) | [v0.10.0.md](v0.10.0.md) | Orchestrator reorganised as a portable service: `service.py` + `contracts.py` (ports) + `host.py` (single seam), boundary enforced by tests |
 | 0.11.0 | 2026-11-01 | merged (PR #18, `23244fa`) | [v0.11.0.md](v0.11.0.md) | Run records always serialise (`PlanStep` 500 fixed), `/favicon.ico` 204, file permission prompt (`FILES_PERMISSION_PROMPT`, allow/deny endpoint, 403 guard) |
 | 0.11.1 | 2026-11-01 | merged (PR #20, `0b4ad53`) | [v0.11.1.md](v0.11.1.md) | Sidebar tidied (5 panels, Runs tabs, diagnostics only in the top bar) and every column scrolls inside the screen instead of stretching the page |
-| 0.12.0 | 2026-11-01 | merged (PR #22) | [v0.12.0.md](v0.12.0.md) | Studio redesign: three-column shell, status pills, sidebar with sessions/runs/agents/search, a Markdown answer surface (tables, code, callouts), plan chips, tabbed inspector (Trace/Context/JSON) |
+| 0.12.0 | 2026-11-01 | merged (PR #22, `42192f5`) | [v0.12.0.md](v0.12.0.md) | Studio redesign: three-column shell, status pills, sidebar with sessions/runs/agents/search, a Markdown answer surface (tables, code, callouts), plan chips, tabbed inspector (Trace/Context/JSON) |
 
 ## Adding a version
 
