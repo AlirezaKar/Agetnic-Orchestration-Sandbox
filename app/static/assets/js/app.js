@@ -44,6 +44,8 @@
     runs: "agetnic.runs.v1",
     mode: "agetnic.mode.v1",
     session: "agetnic.session.v1",
+    theme: "agetnic.theme.v1",
+    layout: "agetnic.layout.v1",
   };
   const UI_VERSION =
     document.querySelector('meta[name="agetnic-version"]')?.content || "dev";
@@ -69,6 +71,29 @@
       };
     }
   })();
+
+  // Column widths: the design's defaults, overridable by dragging the
+  // handles and remembered per browser. The middle column always keeps
+  // ROOM_FOR_CHAT px, so a drag can never squeeze the conversation.
+  const LAYOUT = {
+    sidebar: { min: 248, max: 560, def: 322, cssVar: "--sidebar-width", handle: "gutter-left" },
+    inspector: { min: 300, max: 680, def: 412, cssVar: "--inspector-width", handle: "gutter-right" },
+  };
+  const ROOM_FOR_CHAT = 360;
+
+  const readLayout = () => {
+    try {
+      const parsed = JSON.parse(store.getItem(STORAGE.layout) || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  };
+  const savedLayout = readLayout();
+  const layout = {
+    sidebar: Number(savedLayout.sidebar) || null,
+    inspector: Number(savedLayout.inspector) || null,
+  };
 
   const state = {
     mode: store.getItem(STORAGE.mode) || "auto",
@@ -265,6 +290,179 @@
       node.classList.remove("show");
       setTimeout(() => node.remove(), 240);
     }, 2600);
+  }
+
+  /* ───────────────────────── theme (light/dark) ────────────── */
+  function applyTheme(theme) {
+    const light = theme === "light";
+    document.documentElement.dataset.theme = light ? "light" : "dark";
+    const button = $("btn-theme");
+    if (button) {
+      const label = light ? "Switch to dark mode" : "Switch to light mode";
+      button.setAttribute("aria-pressed", light ? "true" : "false");
+      button.setAttribute("aria-label", label);
+      button.title = label;
+    }
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", light ? "#f2f5fb" : "#090d14");
+    try {
+      store.setItem(STORAGE.theme, light ? "light" : "dark");
+    } catch (_) {
+      /* storage may be disabled — the theme still applies for this visit */
+    }
+  }
+
+  function toggleTheme() {
+    applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+  }
+
+  /* ─────────────────── column widths (drag handles) ─────────── */
+  function saveLayout() {
+    try {
+      store.setItem(STORAGE.layout, JSON.stringify(layout));
+    } catch (_) {
+      /* storage may be disabled — widths last for this visit */
+    }
+  }
+
+  function gutterWidth() {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue("--gutter-width");
+    const value = parseFloat(raw);
+    return Number.isFinite(value) ? value : 7;
+  }
+
+  // The width a column actually has right now: the inline drag value if any,
+  // otherwise whatever the stylesheet resolved (it changes with the breakpoints).
+  function currentWidth(side) {
+    const workspace = $("workspace");
+    if (!workspace) return LAYOUT[side].def;
+    const inline = parseFloat(workspace.style.getPropertyValue(LAYOUT[side].cssVar));
+    if (Number.isFinite(inline)) return inline;
+    const resolved = parseFloat(
+      getComputedStyle(workspace).getPropertyValue(LAYOUT[side].cssVar)
+    );
+    return Number.isFinite(resolved) ? resolved : LAYOUT[side].def;
+  }
+
+  function clampWidth(side, value) {
+    const info = LAYOUT[side];
+    const workspace = $("workspace");
+    // clientWidth is 0 before layout (and in jsdom): the window is the safe bound
+    const visible = (workspace && workspace.clientWidth) || window.innerWidth;
+    const narrow = window.innerWidth <= 980;
+    const collapsed = !!(workspace && workspace.classList.contains("inspector-collapsed"));
+    // the middle column keeps ROOM_FOR_CHAT: that is the hard limit on a drag
+    const budget = visible - ROOM_FOR_CHAT - gutterWidth() * 2;
+    // below 980px the inspector is an overlay, so it costs the grid no width
+    const inspectorShares = !narrow && !collapsed;
+    const hardMax = side === "sidebar"
+      ? budget - (inspectorShares ? currentWidth("inspector") : 0)
+      : budget - currentWidth("sidebar");
+    // a column that is already wider than the budget keeps its width: the first
+    // drag must shrink it smoothly, never snap it somewhere else
+    const upper = Math.max(
+      Math.max(info.min, Math.min(info.max, hardMax)),
+      currentWidth(side)
+    );
+    return Math.round(Math.min(Math.max(value, info.min), upper));
+  }
+
+  function setWidth(side, value, persist) {
+    const info = LAYOUT[side];
+    const width = clampWidth(side, value);
+    layout[side] = width;
+    const workspace = $("workspace");
+    if (workspace) workspace.style.setProperty(info.cssVar, width + "px");
+    const handle = $(info.handle);
+    if (handle) handle.setAttribute("aria-valuenow", String(width));
+    if (persist) saveLayout();
+    return width;
+  }
+
+  function applyLayout() {
+    const workspace = $("workspace");
+    Object.keys(LAYOUT).forEach((side) => {
+      const info = LAYOUT[side];
+      const width = layout[side];
+      if (!width) return;
+      if (workspace) workspace.style.setProperty(info.cssVar, width + "px");
+      const handle = $(info.handle);
+      if (handle) handle.setAttribute("aria-valuenow", String(Math.round(width)));
+    });
+  }
+
+  function resetWidth(side) {
+    const info = LAYOUT[side];
+    layout[side] = info.def;
+    const workspace = $("workspace");
+    if (workspace) workspace.style.removeProperty(info.cssVar);
+    const handle = $(info.handle);
+    if (handle) handle.setAttribute("aria-valuenow", String(info.def));
+    saveLayout();
+    toast("Column width reset", "");
+  }
+
+  function wireGutter(side) {
+    const info = LAYOUT[side];
+    const handle = $(info.handle);
+    if (!handle) return;
+    handle.setAttribute("aria-valuemin", String(info.min));
+    handle.setAttribute("aria-valuemax", String(info.max));
+    handle.setAttribute("aria-valuenow", String(Math.round(layout[side] || info.def)));
+    let dragging = false;
+
+    const measure = (event) => {
+      const workspace = $("workspace");
+      if (!workspace) return 0;
+      const rect = workspace.getBoundingClientRect();
+      return side === "sidebar" ? event.clientX - rect.left : rect.right - event.clientX;
+    };
+
+    const onMove = (event) => {
+      if (!dragging) return;
+      setWidth(side, measure(event), false);
+      event.preventDefault();
+    };
+
+    const stop = () => {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove("dragging");
+      document.body.classList.remove("resizing");
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", stop);
+      document.removeEventListener("pointercancel", stop);
+      saveLayout();
+    };
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      dragging = true;
+      handle.classList.add("dragging");
+      document.body.classList.add("resizing");
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", stop);
+      document.addEventListener("pointercancel", stop);
+      event.preventDefault();
+    });
+
+    handle.addEventListener("dblclick", () => resetWidth(side));
+
+    handle.addEventListener("keydown", (event) => {
+      const grow = side === "sidebar" ? "ArrowRight" : "ArrowLeft";
+      const shrink = side === "sidebar" ? "ArrowLeft" : "ArrowRight";
+      if (event.key !== grow && event.key !== shrink) {
+        if (event.key === "Home" || event.key === "Enter") {
+          event.preventDefault();
+          resetWidth(side);
+        }
+        return;
+      }
+      event.preventDefault();
+      const step = event.shiftKey ? 48 : 12;
+      const base = layout[side] || info.def;
+      setWidth(side, base + (event.key === grow ? step : -step), true);
+    });
   }
 
   function errorText(result) {
@@ -2492,6 +2690,26 @@
       if (node) node.addEventListener(event, handler);
     };
 
+    on("btn-theme", "click", toggleTheme);
+    // the stored choice is the source of truth; the head script already
+    // applied it before paint, this keeps the button in sync
+    const savedTheme = store.getItem(STORAGE.theme);
+    applyTheme(
+      savedTheme === "light" || savedTheme === "dark"
+        ? savedTheme
+        : document.documentElement.dataset.theme === "light"
+          ? "light"
+          : "dark"
+    );
+    wireGutter("sidebar");
+    wireGutter("inspector");
+    window.addEventListener("resize", () => {
+      applyLayout();
+      Object.keys(LAYOUT).forEach((side) => {
+        if (layout[side]) setWidth(side, layout[side], false);
+      });
+    });
+
     on("btn-refresh-agents", "click", loadAgents);
     on("btn-refresh-runs", "click", () => {
       renderHistory();
@@ -2610,6 +2828,8 @@
   }
 
   async function boot() {
+    // saved column widths first: the grid should never jump once painted
+    applyLayout();
     // below 980px the inspector is a drawer and must not cover the chat on load
     if (window.innerWidth <= 980) closeInspector();
     renderModes();

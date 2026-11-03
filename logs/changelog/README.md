@@ -12,7 +12,7 @@ Release notes, one file per version. Runtime logs are **not** here — they live
 The version string is the single source of truth in `app/main.py`
 (`app/version.py`, re-exported as `app.main.VERSION`) and is mirrored into the page as `<meta name="agetnic-version">`,
 into the `?v=` cache-bust on every asset, and into the composer label
-(`· v0.12.0`). If those disagree, the browser is showing a cached page.
+(`· v0.13.0`). If those disagree, the browser is showing a cached page.
 
 ## Index
 
@@ -31,11 +31,12 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.11.0 | 2026-11-01 | merged (PR #18, `23244fa`) | [v0.11.0.md](v0.11.0.md) | Run records always serialise (`PlanStep` 500 fixed), `/favicon.ico` 204, file permission prompt (`FILES_PERMISSION_PROMPT`, allow/deny endpoint, 403 guard) |
 | 0.11.1 | 2026-11-01 | merged (PR #20, `0b4ad53`) | [v0.11.1.md](v0.11.1.md) | Sidebar tidied (5 panels, Runs tabs, diagnostics only in the top bar) and every column scrolls inside the screen instead of stretching the page |
 | 0.12.0 | 2026-11-01 | merged (PR #22, `42192f5`) | [v0.12.0.md](v0.12.0.md) | Studio redesign: three-column shell, status pills, sidebar with sessions/runs/agents/search, a Markdown answer surface (tables, code, callouts), plan chips, tabbed inspector (Trace/Context/JSON) |
+| 0.13.0 | 2026-11-03 | merged | [v0.13.0.md](v0.13.0.md) | Light theme (`theme.css`, pre-paint switch, stored choice), wider columns with a lifted type scale, and drag-to-resize handles on both side columns that remember their width |
 
 ## Adding a version
 
 1. Bump `VERSION` in `app/main.py`.
-2. Bump `?v=` in `app/static/index.html` (3 assets) and the `<meta>` tag.
+2. Bump `?v=` in `app/static/index.html` (4 assets) and the `<meta>` tag.
 3. Add `logs/changelog/v<new>.md` using the same sections as the existing files.
 4. Add a row to the table above.
 5. `python3 -m unittest discover -s tests -t .` — `tests/test_logs.py` fails if a

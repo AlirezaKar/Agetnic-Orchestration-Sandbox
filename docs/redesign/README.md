@@ -1,4 +1,4 @@
-# Redesign reference (v0.12.0)
+# Redesign reference (v0.12.0, extended in 0.13.0)
 
 The user-supplied design that the 0.12.0 interface is built on. Kept here so the
 look has a source of truth that outlives a chat attachment.
@@ -31,3 +31,18 @@ What the app took from it:
 
 Never copied from the prototype: the fake run data, the fake composer target and
 the CDN dependency.
+
+## Added after the redesign (0.13.0)
+
+Two comforts the prototype did not have, both layered on top of its CSS rather
+than woven into it:
+
+* **a light theme** — `app/static/assets/css/theme.css` maps the dark palette
+  rule by rule (tokens → component remap → polish). It is loaded last and every
+  selector is prefixed with `html[data-theme="light"]`, so `styles.css` stays
+  the untouched source of truth and the dark design is unaffected.
+* **resizable columns** — `extra.css` replaced the prototype's fixed
+  `minmax()` columns with `--sidebar-width` / `--inspector-width` custom
+  properties and 7 px gutters; `app.js` drags them and remembers the result.
+  The prototype's widths (262 / 340 px) are still its proportions, just wider
+  and now adjustable.
