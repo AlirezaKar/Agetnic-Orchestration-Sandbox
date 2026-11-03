@@ -1,19 +1,31 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#090d14" />
-  <meta name="agetnic-version" content="0.12.0" />
+  <meta name="agetnic-version" content="0.13.0" />
   <meta name="description" content="Agentic Orchestration Studio — a controlled workspace for testing agent workflows, search providers and execution traces." />
   <title>Agetnic Orchestration Sandbox — Agentic Orchestration Studio</title>
+  <script>
+    /* Apply the saved theme before the first paint: without this, a light-mode
+       reload flashes the dark palette for one frame. Inline on purpose. */
+    try {
+      var savedTheme = localStorage.getItem("agetnic.theme.v1");
+      if (savedTheme === "light" || savedTheme === "dark") {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch (error) { /* private mode: keep the default */ }
+  </script>
   <!-- Relative asset URLs: the harness keeps working when the app is mounted
        under a sub-path (/ui/, /sandbox/, a proxy prefix). The ?v= query busts
        stale caches after an upgrade. -->
   <!-- A data: icon keeps the browser from asking /favicon.ico at all. -->
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.12.0" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.12.0" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.13.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.13.0" />
+  <!-- light palette: maps every colour of the dark design; loads last so it can win -->
+  <link rel="stylesheet" href="assets/css/theme.css?v=0.13.0" />
 </head>
 <body>
   <!-- Connection / asset diagnostics: shown by app.js, never by the server -->
@@ -44,6 +56,11 @@
         <div class="status-pill" id="pill-llm"><span class="dot"></span><code id="badge-llm">LLM&nbsp; checking…</code></div>
         <div class="status-pill search-pill" id="pill-search"><span class="dot"></span><code id="badge-search">SEARCH&nbsp; checking…</code></div>
         <div class="status-pill" id="pill-diag"><span class="dot"></span><code id="badge-diag">Diag: not run</code></div>
+        <button class="btn icon-only theme-toggle" id="btn-theme" aria-pressed="false"
+                title="Switch to light mode" aria-label="Switch to light mode">
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><path d="M12 2.6v2.2M12 19.2v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.4 19.6 6 18M18 6l1.6-1.6"/></svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5Z"/></svg>
+        </button>
         <button class="btn" id="btn-providers">Providers</button>
         <button class="btn" id="btn-diag-top">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13a8 8 0 1 0 2.4-5.7L4 9"/><path d="M4 4v5h5M12 8v4l3 2"/></svg>
@@ -177,6 +194,11 @@
         </div>
       </aside>
 
+      <!-- drag handle: sidebar width (double-click resets, arrows nudge) -->
+      <div class="gutter gutter-left" id="gutter-left" data-edge="left" role="separator"
+           aria-orientation="vertical" aria-label="Resize the sidebar" aria-controls="sidebar"
+           tabindex="0" title="Drag to resize · double-click to reset"></div>
+
       <!-- ═════════════════════════════════════════════════════════
            Main column: conversation + composer
            ═════════════════════════════════════════════════════════ -->
@@ -302,6 +324,11 @@
         </footer>
       </main>
 
+      <!-- drag handle: inspector width -->
+      <div class="gutter gutter-right" id="gutter-right" data-edge="right" role="separator"
+           aria-orientation="vertical" aria-label="Resize the inspector" aria-controls="inspector"
+           tabindex="0" title="Drag to resize · double-click to reset"></div>
+
       <!-- ═════════════════════════════════════════════════════════
            Right drawer: run inspector (trace · context · JSON)
            ═════════════════════════════════════════════════════════ -->
@@ -362,6 +389,6 @@
     </section>
   </div>
 
-  <script src="assets/js/app.js?v=0.12.0" defer></script>
+  <script src="assets/js/app.js?v=0.13.0" defer></script>
 </body>
 </html>

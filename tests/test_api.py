@@ -50,6 +50,7 @@ class ApiTests(unittest.TestCase):
         for path, marker in (
             ("/assets/css/styles.css", ".topbar"),
             ("/assets/css/extra.css", ".diag-row"),
+            ("/assets/css/theme.css", 'html[data-theme="light"]'),
             ("/assets/js/app.js", "runDiagnostics"),
         ):
             response = self.client.get(path)
@@ -219,6 +220,7 @@ class FrontendContractTests(unittest.TestCase):
         cls.app_js = (root / "app/static/assets/js/app.js").read_text(encoding="utf-8")
         cls.styles = (root / "app/static/assets/css/styles.css").read_text(encoding="utf-8")
         cls.extra = (root / "app/static/assets/css/extra.css").read_text(encoding="utf-8")
+        cls.theme = (root / "app/static/assets/css/theme.css").read_text(encoding="utf-8")
 
     def rules(self, css: str, selector: str) -> list[str]:
         """Every declaration block for one selector, comments removed."""
@@ -243,6 +245,7 @@ class FrontendContractTests(unittest.TestCase):
         # absolute "/assets/..." breaks under any proxy prefix -> unstyled page
         self.assertIn('href="assets/css/styles.css', self.index)
         self.assertIn('href="assets/css/extra.css', self.index)
+        self.assertIn('href="assets/css/theme.css', self.index)
         self.assertIn('src="assets/js/app.js', self.index)
         self.assertNotIn('href="/assets/', self.index)
         self.assertNotIn('src="/assets/', self.index)
@@ -250,6 +253,7 @@ class FrontendContractTests(unittest.TestCase):
     def test_asset_urls_are_cache_busted_with_the_app_version(self):
         self.assertIn(f"styles.css?v={VERSION}", self.index)
         self.assertIn(f"extra.css?v={VERSION}", self.index)
+        self.assertIn(f"theme.css?v={VERSION}", self.index)
         self.assertIn(f"app.js?v={VERSION}", self.index)
         self.assertIn(f'content="{VERSION}"', self.index)
 
@@ -264,6 +268,77 @@ class FrontendContractTests(unittest.TestCase):
     def test_frontend_surfaces_connection_problems(self):
         self.assertIn("Backend not reachable", self.app_js)
         self.assertIn("Styles failed to load", self.app_js)
+
+    # ── the light theme ────────────────────────────────────────────────
+    def test_the_light_theme_only_ever_targets_the_light_root(self):
+        """theme.css is loaded after everything else: an unscoped rule would
+        repaint the dark design, so every selector must be prefixed."""
+        import re
+
+        css = re.sub(r"/\*.*?\*/", "", self.theme, flags=re.S)
+        selectors = []
+        for chunk in css.split("}"):
+            head = chunk.split("{")[0].strip()
+            if head and "{" in chunk:
+                selectors.extend(part.strip() for part in head.split(","))
+        self.assertGreater(len(selectors), 100)
+        stray = [sel for sel in selectors if not sel.startswith('html[data-theme="light"]')]
+        self.assertEqual(stray, [])
+
+    def test_the_light_theme_restates_every_core_token(self):
+        import re
+
+        block = re.search(r'html\[data-theme="light"\]\s*\{([^}]*)\}', self.theme, flags=re.S)
+        self.assertIsNotNone(block)
+        tokens = block.group(1)
+        for token in ("--bg", "--surface", "--text", "--accent", "--mint", "--amber", "--red"):
+            self.assertIn(f"{token}:", tokens, token)
+        self.assertIn("color-scheme: light", tokens)
+
+    def test_the_page_starts_dark_and_can_flip_before_paint(self):
+        # an inline script in <head> applies the stored choice before first paint
+        head = self.index.split("</head>")[0]
+        self.assertIn('data-theme="dark"', head)
+        self.assertIn("agetnic.theme.v1", head)
+        self.assertIn("dataset.theme", head)
+        self.assertIn('id="btn-theme"', self.index)
+        self.assertIn('aria-pressed="false"', self.index)
+
+    def test_the_theme_choice_is_remembered(self):
+        self.assertIn("agetnic.theme.v1", self.app_js)
+        self.assertIn('name="theme-color"', self.index)
+        self.assertIn("#f2f5fb", self.app_js)
+
+    # ── the resizable columns ──────────────────────────────────────────
+    def test_the_workspace_has_two_drag_handles(self):
+        self.assertEqual(self.index.count('role="separator"'), 2)
+        self.assertIn('id="gutter-left"', self.index)
+        self.assertIn('id="gutter-right"', self.index)
+        self.assertIn('aria-orientation="vertical"', self.index)
+        # the range itself comes from the JS layout spec, the markup stays static
+        self.assertIn('class="gutter gutter-left"', self.index)
+        self.assertIn('class="gutter gutter-right"', self.index)
+
+    def test_the_columns_are_driven_by_custom_properties(self):
+        self.assertIn("--sidebar-width", self.extra)
+        self.assertIn("--inspector-width", self.extra)
+        self.assertIn("--gutter-width", self.extra)
+        grid = " ".join(self.rules(self.extra, ".workspace"))
+        self.assertIn("var(--sidebar-width) var(--gutter-width)", grid)
+
+    def test_the_wide_design_keeps_the_columns_generous(self):
+        import re
+
+        root = re.search(r":root\s*\{([^}]*)\}", self.extra, flags=re.S).group(1)
+        self.assertIn("--sidebar-width: 322px", root)
+        self.assertIn("--inspector-width: 412px", root)
+
+    def test_the_drag_lives_in_the_page_and_is_persisted(self):
+        for marker in ("wireGutter", "pointerdown", "pointermove", "clampWidth",
+                       "agetnic.layout.v1", "ROOM_FOR_CHAT", "applyLayout"):
+            self.assertIn(marker, self.app_js, marker)
+        self.assertIn("ArrowLeft", self.app_js)
+        self.assertIn("dblclick", self.app_js)
 
     def test_sidebar_is_one_tidy_column(self):
         # diagnostics moved to the top bar: one button, no sidebar panel

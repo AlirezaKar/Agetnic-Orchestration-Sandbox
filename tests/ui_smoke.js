@@ -27,6 +27,7 @@ const JS = fs.readFileSync(path.join(ROOT, 'app/static/assets/js/app.js'), 'utf8
 const CSS =
   fs.readFileSync(path.join(ROOT, 'app/static/assets/css/styles.css'), 'utf8') +
   fs.readFileSync(path.join(ROOT, 'app/static/assets/css/extra.css'), 'utf8');
+const THEME_CSS = fs.readFileSync(path.join(ROOT, 'app/static/assets/css/theme.css'), 'utf8');
 const liveBase = (process.argv[2] || '').replace(/\/+$/, '');
 
 let JSDOM;
@@ -408,8 +409,119 @@ async function scenarioRichAnswer() {
     !!(lastPanel && /orchestration/.test(lastPanel.textContent)));
 }
 
+
+/* ── G: light/dark switch and the resizable columns ─────────────────────
+   Both are page-level features with no backend: a stored preference, an
+   inline style on .workspace and a value in localStorage. jsdom cannot
+   paint, so this checks the state machine and the CSS contract (theme.css
+   must only ever target html[data-theme="light"]). */
+async function scenarioThemeAndColumns() {
+  console.log('G  theme switch + resizable columns');
+  const stub = async (target) => {
+    let clean = String(target).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+    if (!clean.startsWith('/')) clean = '/' + clean;
+    const routes = {
+      '/health': { status: 'ok', version: '0.13.0', model_chain: ['groq'], search_chain: ['ddg'] },
+      '/providers': { providers: [], search: { providers: [] } },
+      '/agents': { planner: 'llm', synthesize: true, parallel: 4, roster: [], agents: [] },
+      '/runs': { runs: [] },
+      '/sessions': { sessions: [] },
+    };
+    const body = routes[clean] || {};
+    return { ok: true, status: 200, json: async () => body };
+  };
+  const w = mount(stub, 'http://localhost:8000/');
+  await sleep(700);
+
+  // ── theme
+  const root = w.document.documentElement;
+  const toggle = w.document.getElementById('btn-theme');
+  check('the theme switch is in the top bar', !!toggle);
+  check('dark is the default', root.dataset.theme === 'dark', root.dataset.theme);
+  check('the switch reports the current mode', toggle.getAttribute('aria-pressed') === 'false');
+  toggle.click();
+  check('clicking it turns the page light', root.dataset.theme === 'light', root.dataset.theme);
+  check('the switch is now pressed', toggle.getAttribute('aria-pressed') === 'true');
+  check('the choice is remembered', w.localStorage.getItem('agetnic.theme.v1') === 'light');
+  check('the theme-color meta follows', w.document.querySelector('meta[name="theme-color"]').content === '#f2f5fb');
+  toggle.click();
+  check('clicking again returns to dark', root.dataset.theme === 'dark');
+
+  const reloaded = mount(stub, 'http://localhost:8000/', { 'agetnic.theme.v1': 'light' });
+  await sleep(600);
+  check('a stored light theme is applied on load',
+    reloaded.document.documentElement.dataset.theme === 'light');
+  check('...and the switch reflects it',
+    reloaded.document.getElementById('btn-theme').getAttribute('aria-pressed') === 'true');
+
+  check('the theme stylesheet is linked', /assets\/css\/theme\.css/.test(HTML));
+  const lightSelectors = THEME_CSS.split('}')
+    .map((chunk) => chunk.split('{')[0].trim())
+    .filter((sel) => sel && !sel.startsWith('/*') && !sel.startsWith('*'));
+  const unprefixed = lightSelectors.filter((sel) => !sel.startsWith('html[data-theme="light"]'));
+  check('every light rule is scoped to the light theme', unprefixed.length === 0, unprefixed.slice(0, 3).join(' | '));
+  check('the light palette redefines the tokens', /html\[data-theme="light"\][^{]*\{[^}]*--bg:\s*#f2f5fb/.test(THEME_CSS));
+
+  // ── columns
+  const ws = w.document.getElementById('workspace');
+  const gutters = [...w.document.querySelectorAll('.gutter')];
+  check('both column edges have a handle', gutters.length === 2);
+  check('the handles are separators with a range',
+    gutters.every((g) => g.getAttribute('role') === 'separator'
+      && g.getAttribute('aria-valuemin') && g.getAttribute('aria-valuemax')));
+  check('the grid reserves a gutter column',
+    /--gutter-width/.test(CSS) && /var\(--sidebar-width\) var\(--gutter-width\)/.test(CSS));
+
+  const left = w.document.getElementById('gutter-left');
+  const before = Number(left.getAttribute('aria-valuenow'));
+  left.dispatchEvent(new w.MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 200, clientY: 300 }));
+  const move = new w.Event('pointermove', { bubbles: true });
+  move.clientX = 360;
+  move.clientY = 300;
+  w.document.dispatchEvent(move);
+  w.document.dispatchEvent(new w.Event('pointerup', { bubbles: true }));
+  check('dragging the edge sets a width', /\d+px/.test(ws.style.getPropertyValue('--sidebar-width')),
+    ws.style.getPropertyValue('--sidebar-width'));
+  check('the width is remembered',
+    /sidebar/.test(w.localStorage.getItem('agetnic.layout.v1') || ''));
+  check('the handle reports the new width',
+    Number(left.getAttribute('aria-valuenow')) === parseInt(ws.style.getPropertyValue('--sidebar-width'), 10));
+
+  left.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+  const afterKey = parseInt(ws.style.getPropertyValue('--sidebar-width'), 10);
+  check('the arrow keys nudge the column', afterKey < Number(left.getAttribute('aria-valuenow')) + 1 && afterKey >= 248,
+    `${afterKey}px`);
+
+  left.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
+  check('a double click resets to the design width',
+    ws.style.getPropertyValue('--sidebar-width') === '');
+
+  const right = w.document.getElementById('gutter-right');
+  right.dispatchEvent(new w.MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 900, clientY: 300 }));
+  const move2 = new w.Event('pointermove', { bubbles: true });
+  move2.clientX = 700;
+  move2.clientY = 300;
+  w.document.dispatchEvent(move2);
+  w.document.dispatchEvent(new w.Event('pointerup', { bubbles: true }));
+  check('the inspector edge resizes too',
+    /\d+px/.test(ws.style.getPropertyValue('--inspector-width')),
+    ws.style.getPropertyValue('--inspector-width'));
+
+  const saved = mount(stub, 'http://localhost:8000/', {
+    'agetnic.layout.v1': JSON.stringify({ sidebar: 350, inspector: 430 }),
+  });
+  await sleep(600);
+  const ws2 = saved.document.getElementById('workspace');
+  check('saved widths are restored on load',
+    ws2.style.getPropertyValue('--sidebar-width') === '350px'
+      && ws2.style.getPropertyValue('--inspector-width') === '430px',
+    `${ws2.style.getPropertyValue('--sidebar-width')} / ${ws2.style.getPropertyValue('--inspector-width')}`);
+}
+
 (async () => {
   await scenarioStaticHost();
+  console.log('');
+  await scenarioThemeAndColumns();
   console.log('');
   await scenarioRichAnswer();
   console.log('');
