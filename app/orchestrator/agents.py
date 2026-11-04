@@ -49,10 +49,23 @@ class AgentOutcome:
     model_calls: int = 0
     tool_calls: int = 0
     depends_on: list[str] = field(default_factory=list)
+    # the evaluator's verdict on this report (see app/orchestrator/evaluator.py)
+    evaluation: dict[str, Any] = field(default_factory=dict)
+    # the evaluator's rewrite — ``answer`` always keeps what the agent wrote
+    optimized: str = ""
 
     @property
     def label(self) -> str:
         return AGENTS.get(self.agent, {}).get("label", self.agent.title())
+
+    @property
+    def effective_answer(self) -> str:
+        """What the manager reads: the evaluator's rewrite when there is one."""
+        return self.optimized or self.answer
+
+    @property
+    def revised(self) -> bool:
+        return bool(self.optimized) and self.optimized != self.answer
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +87,9 @@ class AgentOutcome:
             "model_calls": self.model_calls,
             "tool_calls": self.tool_calls,
             "depends_on": self.depends_on,
+            "evaluation": self.evaluation,
+            "optimized": self.optimized,
+            "revised": self.revised,
         }
 
 

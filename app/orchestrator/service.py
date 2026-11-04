@@ -105,6 +105,7 @@ class OrchestratorService:
             planner=request.planner,
             synthesize=request.synthesize,
             review=request.review,
+            evaluate=request.evaluate,
         )
 
     def payload(self, result: OrchestrationResult, *, trace_limit: Any = _DEFAULT) -> dict[str, Any]:

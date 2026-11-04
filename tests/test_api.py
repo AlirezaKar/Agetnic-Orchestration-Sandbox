@@ -99,6 +99,15 @@ class ApiTests(unittest.TestCase):
         self.assertIn("ddg", data["search_chain"])
         self.assertTrue(any("GROQ_API_KEY" in note for note in data["skipped"]["models"]))
 
+    def test_health_describes_the_orchestration_pipeline(self):
+        data = self.client.get("/health").json()
+        orchestrator = data["orchestrator"]
+        for key in ("enabled", "planner", "evaluate", "optimize", "review", "review_rounds", "agents"):
+            self.assertIn(key, orchestrator)
+        self.assertTrue(orchestrator["evaluate"])  # the gate is on by default
+        self.assertTrue(orchestrator["optimize"])
+        self.assertGreaterEqual(orchestrator["review_rounds"], 1)
+
     def test_config_hides_secrets(self):
         data = self.client.get("/config").json()
         flattened = str(data).lower()

@@ -314,12 +314,29 @@ function richPayload() {
         ],
       },
       waves: [{ wave: 1, agents: ['search', 'document'] }],
+      evaluation: {
+        requested: true, ran: true, method: 'model', rounds: 1,
+        summary: 'the search report buries its answer', gaps: ['no publication date'],
+        quality: 4.0, revised: 1, failed: 0, model_calls: 1, latency_ms: 700,
+        items: [
+          { agent: 'search', label: 'Search agent', verdict: 'revise', score: 4,
+            issues: ['buries the answer'], revised: true, usable: true },
+          { agent: 'document', label: 'Document agent', verdict: 'keep', score: 5,
+            issues: [], revised: false, usable: true },
+        ],
+      },
       trace: [
         { seq: 1, stage: 'manager', actor: 'manager', title: 'Manager chose 2 specialists', offset_ms: 0, detail: { note: 'planner=llm' } },
         { seq: 2, stage: 'tool', actor: 'search', title: 'web_search', offset_ms: 300, detail: { query: 'orchestration', latency_ms: 620, output: { count: 5 } } },
-        { seq: 3, stage: 'synthesis', actor: 'manager', title: 'Synthesized final answer', offset_ms: 2400, detail: { latency_ms: 1500 } },
+        { seq: 3, stage: 'evaluate', actor: 'evaluator', offset_ms: 1900,
+          title: 'Evaluator reviewed 2 report(s): quality 4/5, 1 rewritten',
+          detail: { round: 1, method: 'model', quality: 4, summary: 'the search report buries its answer',
+                    gaps: ['no publication date'], revised: 1,
+                    items: [{ agent: 'search', label: 'Search agent', verdict: 'revise', score: 4,
+                              issues: ['buries the answer'], revised: true }] } },
+        { seq: 4, stage: 'synthesis', actor: 'manager', title: 'Synthesized final answer', offset_ms: 2400, detail: { latency_ms: 1500 } },
       ],
-      review: { asked: true, note: 'enough evidence', follow_up: [] },
+      review: { asked: true, note: 'enough evidence', follow_up: [], rounds: 1 },
     },
   };
 }
@@ -372,13 +389,38 @@ async function scenarioRichAnswer() {
   check('sources become chips', w.document.querySelectorAll('.sources .source-link').length === 1);
   check('the orchestration panel is attached', !!w.document.querySelector('.orch-panel'));
   check('the plan lists one chip per agent', w.document.querySelectorAll('.plan-agents .agent-chip').length === 2);
-  check('the trace rows keep every event', w.document.querySelectorAll('.orch-panel .trace-row').length === 3);
+  check('the trace rows keep every event', w.document.querySelectorAll('.orch-panel .trace-row').length === 4);
+
+  // the evaluator gate is visible: a head chip, a note, a per-agent verdict
+  const head = w.document.querySelector('.orch-panel .orch-head');
+  check('the panel reports the evaluator', /evaluator 4\/5/.test(head ? head.textContent : ''));
+  check('...and how many reports it rewrote', /1 revised/.test(head ? head.textContent : ''));
+  const evalNote = w.document.querySelector('.orch-panel .eval-note');
+  check('the evaluator note names the problem', !!evalNote && /buries its answer/.test(evalNote.textContent));
+  check('the evaluator note lists the gaps', !!evalNote && /no publication date/.test(evalNote.textContent));
+  check('the evaluator note names the rewritten report', !!evalNote && /Search agent/.test(evalNote.textContent));
+  check('the agent chip carries its verdict',
+    !!w.document.querySelector('.plan-agents .agent-chip .verdict'));
+  check('a revised report is marked on its chip',
+    /revised/.test((w.document.querySelector('.plan-agents .agent-chip .verdict') || {}).textContent || ''));
+  const evalRow = [...w.document.querySelectorAll('.orch-panel .trace-row')]
+    .find((row) => /evaluator/.test(row.textContent));
+  check('the evaluator has its own trace row', !!evalRow);
+  check('...with the per-report verdict inside',
+    !!(evalRow && evalRow.querySelector('.eval-card')));
+  check('...and the gaps it found',
+    !!(evalRow && /no publication date/.test(evalRow.textContent)));
   check('the answer carries a meta line and actions',
     !!w.document.querySelector('.answer-meta') && w.document.querySelectorAll('.message-actions button').length >= 2);
 
   check('the inspector shows a run summary', !!w.document.querySelector('#inspector-trace .run-summary'));
-  check('the inspector shows a numbered timeline', w.document.querySelectorAll('#inspector-trace .trace-item').length === 3);
-  check('the inspector shows tool activity', w.document.querySelectorAll('#inspector-trace .trace-card').length === 1);
+  check('the inspector shows a numbered timeline', w.document.querySelectorAll('#inspector-trace .trace-item').length === 4);
+  check('the inspector shows an evaluation section',
+    /evaluator \/5/.test((w.document.querySelector('#inspector-trace .run-summary') || {}).textContent || ''));
+  check('the evaluation section lists both reports',
+    w.document.querySelectorAll('#inspector-trace .eval-card').length === 2);
+  check('the inspector shows tool activity',
+    w.document.querySelectorAll('#inspector-trace .trace-card').length >= 1);
   check('the context tab lists the run context', w.document.querySelectorAll('#inspector-context .context-item').length > 5);
 
   w.document.querySelector('.inspector-tab[data-tab="json"]').click();

@@ -96,7 +96,10 @@ class OrchestratorSettings(Protocol):
     # orchestration
     orchestrator_enabled: bool
     orchestrator_planner: str
+    orchestrator_evaluate: bool
+    orchestrator_optimize: bool
     orchestrator_review: bool
+    orchestrator_review_rounds: int
     orchestrator_synthesize: bool
     orchestrator_agents: str
     orchestrator_roster: list[str]
@@ -127,6 +130,7 @@ class OrchestrationRequest:
     planner: str | None = None
     synthesize: bool | None = None
     review: bool | None = None
+    evaluate: bool | None = None
 
     @classmethod
     def from_payload(cls, payload: Any, *, attachments: list[Any] | None = None) -> "OrchestrationRequest":
@@ -139,4 +143,5 @@ class OrchestrationRequest:
             planner=getattr(payload, "planner", None),
             synthesize=getattr(payload, "synthesize", None),
             review=getattr(payload, "review", None),
+            evaluate=getattr(payload, "evaluate", None),
         )

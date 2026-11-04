@@ -218,6 +218,9 @@ html[data-theme="light"] body.dragging .composer { border-color: hsla(225, 60%, 
 html[data-theme="light"] .session-time.live { color: hsl(163, 51%, 35%) }
 html[data-theme="light"] .orch-chip { color: var(--text-2); background: hsla(217, 34%, 88%, 0.90) }
 html[data-theme="light"] .orch-chip.good { color: hsl(163, 51%, 35%); border-color: hsla(163, 60%, 55%, 0.28); background: hsla(163, 56%, 86%, 0.21) }
+html[data-theme="light"] .orch-chip.warn { color: hsl(33, 72%, 33%); border-color: hsla(33, 70%, 55%, 0.30); background: hsla(33, 80%, 88%, 0.55) }
+html[data-theme="light"] .orch-chip.bad { color: hsl(355, 74%, 40%); border-color: hsla(355, 65%, 55%, 0.28); background: hsla(355, 80%, 92%, 0.55) }
+html[data-theme="light"] .orch-note-sub { color: var(--muted) }
 html[data-theme="light"] .orch-note, html[data-theme="light"] .orch-log { color: var(--text-2) }
 html[data-theme="light"] .orch-note strong { color: hsl(215, 43%, 32%) }
 html[data-theme="light"] .orch-log { color: var(--muted) }

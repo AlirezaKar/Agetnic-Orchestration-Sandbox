@@ -146,6 +146,7 @@ class OrchestrateRequest(BaseModel):
     planner: str | None = Field(default=None, pattern="^(auto|heuristic|llm)$")
     synthesize: bool | None = None
     review: bool | None = None
+    evaluate: bool | None = None
     # Harness memory: continue this conversation (created when unknown) and
     # store this exchange, both sides, exactly as the page rendered it.
     session_id: str | None = None
@@ -389,7 +390,10 @@ async def health(request: Request) -> dict[str, Any]:
             "enabled": settings.orchestrator_enabled,
             "planner": settings.orchestrator_planner,
             "synthesize": settings.orchestrator_synthesize,
+            "evaluate": settings.orchestrator_evaluate,
+            "optimize": settings.orchestrator_optimize,
             "review": settings.orchestrator_review,
+            "review_rounds": settings.orchestrator_review_rounds,
             "agents": settings.orchestrator_roster,
         },
         "files": {
@@ -740,6 +744,7 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
         planner=payload.planner,
         synthesize=payload.synthesize,
         review=payload.review,
+        evaluate=payload.evaluate,
     )
     try:
         result = await service.run(request)
@@ -756,7 +761,7 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
 
     logs.get_logger("orchestrator").info(
         "request done run=%s intent=%s agents=%s waves=%s parallel_ms=%s total_ms=%s "
-        "synthesized=%s model_calls=%s",
+        "synthesized=%s model_calls=%s quality=%s revised=%s",
         result.run_id,
         result.plan.intent,
         ",".join(result.plan.agents),
@@ -765,6 +770,8 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
         result.latency_ms,
         result.synthesized,
         result.model_calls,
+        result.evaluation.get("quality"),
+        result.evaluation.get("revised"),
     )
     body = service.payload(result)
     body["session"] = _remember(
