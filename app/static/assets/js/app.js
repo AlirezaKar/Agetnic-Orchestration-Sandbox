@@ -1016,7 +1016,7 @@
     bubble.appendChild(text);
     body.appendChild(bubble);
     scrollChat();
-    return { message, body, text };
+    return { message, body, bubble, text };
   }
 
   function scrollChat() {
@@ -1176,8 +1176,9 @@
         text ||
           "Run a prompt through the manager, watch the specialists work in parallel waves, see " +
             "their reports evaluated and tightened, and follow exactly how the answer was " +
-            "assembled. Every stage stays observable — the plan, the prompts, the tool calls, " +
-            "the evaluator's verdicts and the run record."
+            "assembled. It streams while it runs — the planner, every agent, the evaluator and " +
+            "the manager, each in its own group above the answer — and every stage stays " +
+            "auditable afterwards: the plan, the prompts, the tool calls, the verdicts, the record."
       )
     );
 
@@ -2613,6 +2614,334 @@
     if (prompt) prompt.focus();
   }
 
+  /* ──────────────────────── live thoughts ───────────────────── */
+  // A run takes a while, and the interesting part is what happens during it:
+  // the planner choosing agents, each agent's prompt and reply, the tools it
+  // called, the evaluator's verdict, the manager's waves. While a run is in
+  // flight the page reads that from POST /orchestrate/stream (server-sent
+  // events) and draws it above the answer: one row per actor, each row opening
+  // to the real text, with a spinner on whoever is working right now. The
+  // answer itself still arrives once, in its own bubble.
+
+  const THOUGHT_KIND_LABELS = {
+    prompt: "sent",
+    reply: "reply",
+    tool: "tool",
+    verdict: "verdict",
+    rewrite: "rewritten",
+    status: "status",
+    note: "note",
+  };
+
+  function timeLabel(ms) {
+    const value = Number(ms) || 0;
+    if (value < 1000) return Math.round(value) + " ms";
+    const seconds = value / 1000;
+    if (seconds < 60) return (seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)) + " s";
+    return Math.floor(seconds / 60) + ":" + String(Math.round(seconds % 60)).padStart(2, "0");
+  }
+
+  // Server-sent events: ``event: name`` + ``data: json``, frames split on a
+  // blank line, ``:`` lines are keep-alive pings.
+  function readSseFrame(frame) {
+    let name = "message";
+    const data = [];
+    frame.split("\n").forEach((line) => {
+      if (!line || line.charAt(0) === ":") return;
+      if (line.indexOf("event:") === 0) name = line.slice(6).trim();
+      else if (line.indexOf("data:") === 0) data.push(line.slice(5).trim());
+    });
+    if (!data.length) return null;
+    try {
+      return { event: name, data: JSON.parse(data.join("\n")) };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function streamOrchestrate(body, panel) {
+    const path = "/orchestrate";
+    let response;
+    try {
+      response = await fetch(apiUrl("/orchestrate/stream"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        path,
+        data: { message: "Cannot reach the backend: " + error.message },
+      };
+    }
+
+    // Validation still answers with plain JSON — nothing was streamed.
+    if (!response.ok) {
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (_) {
+        data = {};
+      }
+      return { ok: false, status: response.status, path, data };
+    }
+
+    let result = null;
+    let failure = null;
+    let broke = null;
+
+    function consume(frame) {
+      const parsed = readSseFrame(frame);
+      if (!parsed) return;
+      if (parsed.event === "open") {
+        if (panel) panel.open(parsed.data);
+      } else if (parsed.event === "thought") {
+        if (panel) panel.add(parsed.data);
+      } else if (parsed.event === "result") {
+        result = parsed.data;
+      } else if (parsed.event === "error") {
+        failure = parsed.data;
+      }
+    }
+
+    if (!response.body || !response.body.getReader || typeof TextDecoder !== "function") {
+      // No streaming reader (old browser, stubbed fetch): same frames, all at
+      // once. The answer still arrives; only the live part is lost.
+      const whole = await response.text();
+      whole.split("\n\n").forEach(consume);
+    } else {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        let chunk;
+        try {
+          chunk = await reader.read();
+        } catch (error) {
+          broke = error;
+          break;
+        }
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        let cut = buffer.indexOf("\n\n");
+        while (cut >= 0) {
+          consume(buffer.slice(0, cut));
+          buffer = buffer.slice(cut + 2);
+          cut = buffer.indexOf("\n\n");
+        }
+      }
+    }
+
+    if (result) return { ok: true, status: 200, path, data: result };
+    if (failure) {
+      return {
+        ok: false,
+        status: failure.status || 502,
+        path,
+        data: failure.message ? failure : { ...failure, message: "The run failed." },
+      };
+    }
+    return {
+      ok: false,
+      status: 0,
+      path,
+      data: {
+        message: broke
+          ? "The stream broke: " + (broke.message || broke)
+          : "The stream ended before the answer was written.",
+        hint: "The thoughts above show how far the run got; try again.",
+      },
+    };
+  }
+
+  function thoughtChips(detail) {
+    const chips = [];
+    if (detail.tool) chips.push(detail.tool + (detail.query ? " · " + detail.query : ""));
+    if (detail.model) chips.push(detail.provider ? detail.provider + " / " + detail.model : detail.model);
+    if (detail.status) chips.push("status: " + detail.status);
+    if (detail.wave) chips.push("wave " + detail.wave);
+    if (detail.round) chips.push("round " + detail.round);
+    if (detail.quality) chips.push("quality: " + detail.quality);
+    if (detail.agents && detail.agents.length) chips.push(detail.agents.join(", "));
+    if (detail.latency_ms) chips.push(timeLabel(detail.latency_ms));
+    if (detail.chars) chips.push(detail.chars + " chars");
+    if (detail.revised) chips.push("revised");
+    return chips.slice(0, 5);
+  }
+
+  function thoughtExtras(item) {
+    const detail = item.detail || {};
+    const chips = thoughtChips(detail);
+    const rows = Array.isArray(detail.items) ? detail.items : [];
+    const gaps = Array.isArray(detail.gaps) ? detail.gaps : [];
+    if (!chips.length && !rows.length && !gaps.length) return null;
+
+    const wrap = el("div", "ti-detail");
+    if (chips.length) {
+      const chipRow = el("div", "ti-chips");
+      chips.forEach((text) => chipRow.appendChild(el("span", "ti-chip", text)));
+      wrap.appendChild(chipRow);
+    }
+    if (rows.length) {
+      const scores = el("div", "ti-scores");
+      rows.forEach((row) => {
+        const line = el("div", "ti-score");
+        line.appendChild(el("span", "ti-score-name", row.label || row.agent || "agent"));
+        line.appendChild(
+          el("span", "ti-score-value", row.score == null ? "–" : row.score + "/5")
+        );
+        if (row.verdict) line.appendChild(el("span", "ti-score-verdict", row.verdict));
+        scores.appendChild(line);
+      });
+      wrap.appendChild(scores);
+    }
+    if (gaps.length) {
+      const list = el("ul", "ti-gaps");
+      gaps.slice(0, 4).forEach((gap) => list.appendChild(el("li", null, gap)));
+      wrap.appendChild(list);
+    }
+    return wrap;
+  }
+
+  function thoughtItemNode(item) {
+    const text = String(item.text || "");
+    const kind = THOUGHT_KIND_LABELS[item.kind] || item.kind || "note";
+    // Short, self-contained lines (status, one-clause notes) read better flat;
+    // everything with a body of text opens.
+    const flat = item.kind === "status" || (text.length <= 96 && text === item.title);
+    if (flat) {
+      const row = el("div", "thought-item flat");
+      row.dataset.kind = item.kind || "note";
+      row.appendChild(el("span", "ti-kind", kind));
+      row.appendChild(el("span", "ti-flat", text || item.title));
+      row.appendChild(el("span", "ti-time", timeLabel(item.offset_ms)));
+      row.title = item.title || "";
+      return row;
+    }
+
+    const details = el("details", "thought-item");
+    details.dataset.kind = item.kind || "note";
+    const summary = el("summary");
+    summary.appendChild(el("span", "ti-kind", kind));
+    summary.appendChild(el("span", "ti-title", item.title || "Thought"));
+    summary.appendChild(el("span", "ti-time", timeLabel(item.offset_ms)));
+    const body = el("div", "ti-body");
+    if (text) body.appendChild(el("p", "ti-text", text));
+    const extras = thoughtExtras(item);
+    if (extras) body.appendChild(extras);
+    details.appendChild(summary);
+    details.appendChild(body);
+    return details;
+  }
+
+  function thoughtsPanel(skeleton) {
+    const root = el("div", "thoughts");
+    root.dataset.state = "live";
+    const head = el("div", "thoughts-head");
+    const spinner = el("span", "thoughts-spinner");
+    spinner.setAttribute("aria-hidden", "true");
+    const title = el("span", "thoughts-title", "Handing the request to the manager…");
+    const timer = el("span", "thoughts-timer", "0:00");
+    head.appendChild(spinner);
+    head.appendChild(title);
+    head.appendChild(timer);
+    const list = el("div", "thoughts-list");
+    root.appendChild(head);
+    root.appendChild(list);
+    skeleton.body.insertBefore(root, skeleton.bubble);
+
+    const started = Date.now();
+    const groups = new Map();
+    let active = null;
+    let count = 0;
+
+    const clock = setInterval(() => {
+      const seconds = Math.floor((Date.now() - started) / 1000);
+      timer.textContent = Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+    }, 500);
+
+    function groupFor(item) {
+      let group = groups.get(item.group);
+      if (group) return group;
+      const details = el("details", "thought-group");
+      details.dataset.category = item.category || "manager";
+      details.open = true;
+      const summary = el("summary");
+      const label = el("span", "tg-label", item.label || "Manager");
+      const meta = el("span", "tg-meta", "0");
+      const live = el("span", "tg-live");
+      live.setAttribute("aria-hidden", "true");
+      summary.appendChild(el("span", "tg-dot"));
+      summary.appendChild(label);
+      summary.appendChild(meta);
+      summary.appendChild(live);
+      const items = el("div", "tg-items");
+      details.appendChild(summary);
+      details.appendChild(items);
+      // once the user opens or closes a group, we stop deciding for them
+      summary.addEventListener("click", () => {
+        details.dataset.touched = "1";
+      });
+      list.appendChild(details);
+      group = { details, items, meta, live, label: item.label || "Manager" };
+      groups.set(item.group, group);
+      return group;
+    }
+
+    function nearBottom() {
+      const chat = $("chat");
+      if (!chat) return true;
+      return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 180;
+    }
+
+    return {
+      open() {
+        title.textContent = "Manager is reading the request…";
+      },
+      add(item) {
+        if (!item) return;
+        const stick = nearBottom();
+        count += 1;
+        const group = groupFor(item);
+        group.items.appendChild(thoughtItemNode(item));
+        group.meta.textContent = String(group.items.childNodes.length);
+        if (active && active !== group) active.live.classList.remove("on");
+        group.live.classList.add("on");
+        active = group;
+
+        // the working group is open; finished ones fold away with their count
+        // still visible — unless the user has opened them themselves
+        groups.forEach((other) => {
+          if (other.details.dataset.touched) return;
+          other.details.open = other === group;
+        });
+        title.textContent = group.label + " · " + (item.title || "working");
+        if (stick) scrollChat();
+      },
+      finish(ok) {
+        clearInterval(clock);
+        root.dataset.state = ok ? "done" : "stopped";
+        spinner.classList.add("off");
+        if (!count) {
+          root.remove();
+          return;
+        }
+        const seconds = Math.round((Date.now() - started) / 100);
+        title.textContent = ok
+          ? "Thought through " + count + " step" + (count === 1 ? "" : "s")
+          : "Stopped after " + count + " step" + (count === 1 ? "" : "s");
+        timer.textContent = timeLabel(seconds * 100);
+        if (active) active.live.classList.remove("on");
+        groups.forEach((group) => {
+          if (!group.details.dataset.touched) group.details.open = false;
+        });
+        scrollChat();
+      },
+    };
+  }
+
   /* ──────────────────────────── sending ────────────────────── */
   function historyPayload() {
     return state.messages.slice(-8);
@@ -2653,6 +2982,7 @@
     try {
       if (mode === "auto") {
         let fileIds = [];
+        skeleton.text.textContent = "thinking · planning agents…";
         if (hasFiles) {
           skeleton.text.textContent = "uploading " + state.files.length + " file(s)…";
           const uploaded = await uploadAttachments();
@@ -2673,17 +3003,19 @@
           state.files = [];
           renderAttachments();
         }
-        skeleton.text.textContent = "thinking · planning agents…";
-        result = await api("/orchestrate", {
-          method: "POST",
-          body: JSON.stringify({
+        skeleton.text.textContent = "";
+        const panel = thoughtsPanel(skeleton);
+        result = await streamOrchestrate(
+          JSON.stringify({
             message: text,
             history: historyPayload(),
             file_ids: fileIds,
             // continue the conversation that is in memory (created when null)
             session_id: state.sessionId,
           }),
-        });
+          panel
+        );
+        panel.finish(result.ok);
       } else if (mode === "search") {
         result = await api("/search", {
           method: "POST",

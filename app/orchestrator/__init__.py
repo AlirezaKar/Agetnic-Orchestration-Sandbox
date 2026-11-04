@@ -18,6 +18,8 @@ app/orchestrator/
   executor.py    parallel waves: gather + semaphore + timeout, failures isolated
   agents.py      document / search / data / general workers
   trace.py       every step of a run (prompts, tools, replies), clipping
+  runbus.py      live channels: the trace, relayed to a watcher as it is written
+  live.py        a trace event → one "thought" the page can group and show
   runlog.py      one JSON record per run (the orchestration log base)
   files.py       attachment decoding/extraction/store — the document agent's input
 ```
@@ -55,10 +57,12 @@ from app.orchestrator.files import (
     decode_payload,
     extract,
 )
+from app.orchestrator.live import thought
 from app.orchestrator.manager import Manager, OrchestrationResult, agent_catalogue
 from app.orchestrator.planner import AGENTS, Plan, PlanStep, heuristic_plan, make_plan
+from app.orchestrator.runbus import BUS, END, Channel, RunBus
 from app.orchestrator.service import OrchestratorService
-from app.orchestrator.trace import RunTrace
+from app.orchestrator.trace import RunTrace, new_run_id
 
 __all__ = [
     "AGENTS",
@@ -77,6 +81,10 @@ __all__ = [
     "OrchestratorSettings",
     "Plan",
     "PlanStep",
+    "BUS",
+    "Channel",
+    "END",
+    "RunBus",
     "RunTrace",
     "SearchChain",
     "agent_catalogue",
@@ -85,4 +93,6 @@ __all__ = [
     "extract",
     "heuristic_plan",
     "make_plan",
+    "new_run_id",
+    "thought",
 ]

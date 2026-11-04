@@ -367,6 +367,16 @@ async function scenarioRichAnswer() {
   const stub = async (target) => {
     let clean = String(target).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
     if (!clean.startsWith('/')) clean = '/' + clean;
+    if (clean === '/orchestrate/stream') {
+      // the same turn, as frames — and without a readable body, so the page
+      // takes its "no streaming reader" path and reads the whole text at once
+      const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      const body =
+        frame('open', { run_id: 'run-rich' }) +
+        frame('thought', liveThought(1, 'manager', 'manager', 'Manager', 'status', 'Request received', 'Request received')) +
+        frame('result', richPayload());
+      return { ok: true, status: 200, json: async () => ({}), text: async () => body };
+    }
     const body = routes[clean] || {};
     return { ok: true, status: 200, json: async () => body };
   };
@@ -560,10 +570,180 @@ async function scenarioThemeAndColumns() {
     `${ws2.style.getPropertyValue('--sidebar-width')} / ${ws2.style.getPropertyValue('--inspector-width')}`);
 }
 
+/* ── H: live thoughts ────────────────────────────────────────────────────
+   Auto mode no longer waits for one JSON body: it reads
+   POST /orchestrate/stream as server-sent events and draws the run while it
+   happens — a group per actor, a spinner on whoever is working, every line
+   opening to its real text. The stream here is stubbed, but the frames are
+   the ones app/orchestrator/live.py produces, and they are delivered in
+   pieces (one frame split down the middle) so the page has to reassemble. */
+function liveThought(seq, category, group, label, kind, title, text, detail) {
+  return {
+    seq, stage: category, actor: group.replace('agent:', ''), category, group, label, kind, title, text,
+    offset_ms: seq * 700, at: '2026-11-04T09:00:00.000Z', detail: detail || {},
+  };
+}
+
+function liveStream() {
+  const frames = [];
+  const push = (event, data) => frames.push(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  push('open', { run_id: 'run-live-1', threshold_ms: 0 });
+  push('thought', liveThought(1, 'manager', 'manager', 'Manager', 'status', 'Request received', 'Request received'));
+  push('thought', liveThought(2, 'planner', 'planner', 'Planner', 'note', 'Selected the agents by rule', 'Selected the agents by rule', { agents: ['search', 'data'] }));
+  push('thought', liveThought(3, 'agent', 'agent:search', 'Web researcher', 'prompt', 'Prompt sent to the model (step 1)',
+    'Find current, verifiable information for: what changed in the latest release.'));
+  push('thought', liveThought(4, 'agent', 'agent:search', 'Web researcher', 'tool', 'web_search', 'web_search · latest python release', { tool: 'web_search', query: 'latest python release', latency_ms: 812 }));
+  push('thought', liveThought(5, 'agent', 'agent:search', 'Web researcher', 'reply', 'Model reply (step 1)',
+    'The release notes put the answer at 3.14: nothing breaking, but the REPL got faster.'));
+  push('thought', liveThought(6, 'agent', 'agent:data', 'Data analyst', 'status', 'Data analyst finished: ok', 'Data analyst finished: ok', { status: 'ok', latency_ms: 640 }));
+  push('thought', liveThought(7, 'evaluator', 'evaluator', 'Evaluator', 'verdict', 'Evaluator reviewed 2 report(s)',
+    'one report was thin — Web researcher 4/5, Data analyst 3/5 · gaps: the exact date', { quality: 0.8, round: 1, items: [
+      { agent: 'search', label: 'Web researcher', score: 4, verdict: 'keep' },
+      { agent: 'data', label: 'Data analyst', score: 3, verdict: 'revise' },
+    ], gaps: ['the exact date'] }));
+  push('thought', liveThought(8, 'synthesis', 'manager', 'Manager · writing', 'status', 'Final answer', 'Wrote the answer (812 chars)'));
+  push('result', {
+    answer: 'Python 3.14 is the current release — nothing breaking, and the REPL got faster.',
+    mode: 'auto', run_id: 'run-live-1', message: 'what changed in the latest release?',
+    orchestration: { run_id: 'run-live-1', plan: { agents: ['search', 'data'], summary: 'two agents' }, agents: [], trace: [], evaluation: {} },
+    latency_ms: 4200,
+    session: { session_id: 's-live-0001', turns: 1, stored: true },
+  });
+  const text = frames.join('');
+  // deliver it in three reads, splitting frame 7 down the middle
+  return [text.slice(0, 400), text.slice(400, 1400), text.slice(1400)].filter(Boolean);
+}
+
+async function scenarioLiveThoughts() {
+  console.log('H  live thoughts (the run, drawn while it happens)');
+  const pieces = liveStream();
+  let askedPath = '';
+  let askedBody = null;
+  const stub = async (target, init) => {
+    let clean = String(target).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+    if (!clean.startsWith('/')) clean = '/' + clean;
+    if (clean === '/orchestrate/stream') {
+      askedPath = clean;
+      askedBody = init && init.body ? JSON.parse(init.body) : null;
+      let index = 0;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: {
+          getReader: () => ({
+            // the first two reads land at once, the last one a beat later
+            read: async () => {
+              if (index >= pieces.length) return { done: true, value: undefined };
+              if (index === pieces.length - 1) await sleep(90);
+              return { done: false, value: new TextEncoder().encode(pieces[index++]) };
+            },
+          }),
+        },
+        text: async () => pieces.join(''),
+      };
+    }
+    const routes = {
+      '/health': { status: 'ok', version: '0.15.0', model_chain: ['groq'], search_chain: ['ddg'] },
+      '/providers': { providers: [], search: { providers: [] } },
+      '/agents': { planner: 'llm', synthesize: true, parallel: 4, roster: ['search'], agents: [] },
+      '/runs': { runs: [] },
+      '/sessions': { sessions: [] },
+    };
+    return { ok: true, status: 200, json: async () => routes[clean] || {} };
+  };
+
+  const w = mount(stub, 'http://localhost:8000/');
+  await sleep(600);
+  w.document.getElementById('prompt').value = 'what changed in the latest release?';
+  w.document.getElementById('btn-send').click();
+  await sleep(40);
+
+  // ── while the run is still going
+  const live = w.document.querySelector('.thoughts');
+  check('auto mode streams the run', askedPath === '/orchestrate/stream', askedPath || 'no request');
+  check('the panel is inside the assistant message', !!live);
+  check('the bubble is still empty while it thinks',
+    !!live && !(w.document.querySelector('.message.assistant .msg-text').textContent || '').trim());
+  check('the panel says it is working', !!live && live.dataset.state === 'live', live ? live.dataset.state : '-');
+  check('a waiting spinner is visible', !!w.document.querySelector('.thoughts .thoughts-spinner:not(.off)'));
+  const groupsLive = [...w.document.querySelectorAll('.thoughts .thought-group')];
+  check('thoughts are grouped by who is thinking', groupsLive.length >= 3, `${groupsLive.length} groups`);
+  check('the group that is working shows a live dot',
+    groupsLive.some((g) => g.querySelector('.tg-live.on')));
+
+  await sleep(240);
+
+  // ── after the run
+  const done = w.document.querySelector('.thoughts');
+  check('the panel survives to the end', !!done);
+  check('...and is marked done', !!done && done.dataset.state === 'done', done ? done.dataset.state : '-');
+  check('the spinner is gone', !!done && !!done.querySelector('.thoughts-spinner.off'));
+  check('the header counts the steps', !!done && /Thought through \d+ steps?/.test(done.textContent), done ? done.querySelector('.thoughts-title').textContent : '-');
+  check('the finished groups fold away',
+    [...done.querySelectorAll('.thought-group')].every((g) => !g.open));
+  const labels = [...done.querySelectorAll('.thought-group')].map((g) => (g.querySelector('.tg-label') || {}).textContent);
+  check('the planner, the agents, the evaluator and the manager each get a group',
+    ['Planner', 'Web researcher', 'Data analyst', 'Evaluator', 'Manager'].every((label) => labels.includes(label)),
+    labels.join(' | '));
+  const counts = [...done.querySelectorAll('.thought-group .tg-meta')].map((n) => Number(n.textContent));
+  check('each folded group keeps its count', counts.every((n) => n >= 1) && counts.length === labels.length, counts.join(','));
+  check('the answer is in the bubble, not in the thoughts',
+    /Python 3\.14 is the current release/.test(w.document.querySelector('.message.assistant .msg-text').textContent || ''));
+  check('the synthesis only says it wrote the answer',
+    /Wrote the answer \(812 chars\)/.test(done.textContent)
+      && !/Python 3\.14 is the current release[^]*Wrote/.test(done.textContent));
+  check('the answer text appears exactly once in the message',
+    ((w.document.querySelector('.message.assistant').textContent || '').match(/Python 3\.14 is the current release/g) || []).length === 1);
+  check('the assistant message adopts the streamed session', /memory: 1 turn/.test(text(w, 'session-pill')), text(w, 'session-pill'));
+
+  // ── opening a thought: the real text is there
+  const agent = [...done.querySelectorAll('.thought-group')].find(
+    (g) => (g.querySelector('.tg-label') || {}).textContent === 'Web researcher'
+  );
+  agent.querySelector('summary').click();
+  check('a group opens on click', agent.open);
+  const items = [...agent.querySelectorAll('.thought-item')];
+  check('the agent kept its prompt, its tool call and its reply',
+    items.length === 3, `${items.length} items`);
+  const reply = items[items.length - 1];
+  check('a thought opens to what was actually said', !!(reply.querySelector('summary') || reply.classList.contains('flat')));
+  reply.open = true;
+  check('...the model’s own words are inside',
+    /the REPL got faster/.test(reply.textContent), reply.textContent.slice(0, 80));
+  const tool = items.find((item) => item.dataset.kind === 'tool');
+  check('the tool call names the query', !!tool && /latest python release/.test(tool.textContent));
+  const evaluator = [...done.querySelectorAll('.thought-group')].find(
+    (g) => (g.querySelector('.tg-label') || {}).textContent === 'Evaluator'
+  );
+  evaluator.querySelector('summary').click();
+  const verdict = evaluator.querySelector('.thought-item');
+  verdict.open = true;
+  check('the evaluator shows a score per report',
+    evaluator.querySelectorAll('.ti-score').length === 2,
+    `${evaluator.querySelectorAll('.ti-score').length} scores`);
+  check('...and the gaps it found', /the exact date/.test(evaluator.textContent));
+
+  // a group the user opened stays open when the next run finishes
+  check('the request carried the conversation', !!askedBody && typeof askedBody.message === 'string');
+  check('the run is in the tab history', w.document.querySelectorAll('#trace-list li').length > 0);
+
+  // ── the panel's own contract (jsdom paints nothing, so only literals)
+  check('the panel is a bounded card, not a full-width log',
+    /\.thoughts \{[^}]*max-width: 760px/.test(CSS));
+  check('the waiting state is a real animation',
+    /@keyframes thought-spin/.test(CSS) && /\.thoughts-spinner \{[^}]*animation: thought-spin/.test(CSS));
+  check('the light theme carries the panel too', /html\[data-theme="light"\] \.thoughts\b/.test(THEME_CSS));
+  check('reduced motion is respected', /prefers-reduced-motion: reduce[^}]*\}[^]*thoughts-spinner/.test(CSS));
+  check('the inspector shows the finished run', !!w.document.querySelector('#inspector-trace'));
+}
+
 (async () => {
   await scenarioStaticHost();
   console.log('');
   await scenarioThemeAndColumns();
+  console.log('');
+  await scenarioLiveThoughts();
   console.log('');
   await scenarioRichAnswer();
   console.log('');

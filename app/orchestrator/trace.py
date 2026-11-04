@@ -8,6 +8,10 @@ those answers, and the prompt of the final synthesis.
 Events are kept unclipped in memory (a run is at most a few hundred kB) and
 clipped only when they are serialised for the browser. The log file gets the
 full text — that is where you go when the UI truncates something.
+
+A trace can also be *watched*: pass ``sink=`` and every event is handed to that
+callable as it is written. That is how ``POST /orchestrate/stream`` shows the
+run while it happens instead of only at the end.
 """
 
 from __future__ import annotations
@@ -57,6 +61,8 @@ class RunTrace:
     run_id: str = field(default_factory=new_run_id)
     started_at: str = field(default_factory=_now)
     events: list[dict[str, Any]] = field(default_factory=list)
+    #: called with every event as it is written (a live bus, a printer, a test)
+    sink: Any = None
     _t0: float = field(default_factory=time.perf_counter)
     _seq: int = 0
 
@@ -73,6 +79,11 @@ class RunTrace:
             "detail": detail,
         }
         self.events.append(event)
+        if self.sink is not None:
+            try:
+                self.sink(event)
+            except Exception:  # noqa: BLE001 - a broken watcher must not break the run
+                pass
         return event
 
     def add_prompt(

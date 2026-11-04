@@ -16,6 +16,11 @@ A small backend skeleton where **the model is pluggable** (free providers only) 
   tightens every report before the manager sees it**, and the manager then
   writes one answer — asking for another wave first if the gap is real. Attach a
   file and the document agent reads it.
+- **You can watch it think**: the page streams the run while it happens
+  (`POST /orchestrate/stream`, server-sent events) and shows it in the chat as a
+  group per actor — planner, each agent, evaluator, manager — with a spinner on
+  whoever is working and every line opening to the prompt, reply, tool call or
+  verdict behind it. The answer still arrives once, in its own bubble.
 - Built-in way to **verify** all of it: `python -m scripts.doctor`, `GET /diagnose`,
   `GET /search/diagnose`, plus an offline test suite.
 
@@ -561,6 +566,60 @@ one loads the stored record into the inspector, so a run can be audited after th
 page has been reloaded. The inspector scrolls inside its column: a 20 000-line
 record never stretches the page.
 
+### Watching a run: live thoughts
+
+A run with four agents and a review takes seconds to a minute, and for all of
+that the interesting part is invisible. So the page does not wait for one JSON
+body: it reads `POST /orchestrate/stream` as server-sent events and draws the
+run **while it happens**, above the answer.
+
+```
+open     {run_id}                     the run exists, work starts
+thought  {...}                        one trace event, as it is written
+result   {...}                        the finished payload — identical to POST /orchestrate
+error    {...}                        the failure body, when the run could not finish
+```
+
+A thought is one line of the trace, projected for a reader rather than an
+auditor (`app/orchestrator/live.py`):
+
+```json
+{"seq": 7, "category": "agent", "group": "agent:search", "label": "Web researcher",
+ "kind": "reply", "title": "Model reply (step 1)",
+ "text": "The 3.14 release notes…", "offset_ms": 4210, "at": "2026-11-04T09:12:44Z",
+ "detail": {"wave": 1, "model": "llama-3.3-70b"}}
+```
+
+| | |
+|---|---|
+| `group` | what the page folds by — `planner`, `agent:<name>`, `evaluator`, `manager` |
+| `kind` | `note` · `prompt` · `reply` · `tool` · `verdict` · `rewrite` · `status` |
+
+Three rules keep it honest and cheap:
+
+- **no hidden state, no system prompts** — a `prompt` thought carries the *last
+  user message*, i.e. the task the agent was actually given, never the
+  instructions around it;
+- **no double reveal** — the synthesis reply *is* the answer, so it travels as a
+  `status` ("wrote the answer, 812 chars") and the answer arrives once, in the
+  bubble;
+- **bounded** — strings are clipped in the projection (700 chars, errors 240),
+  because this goes over a socket that stays open, not into a file. The
+  unclipped record is still in `logs/orchestrator/`.
+
+```bash
+curl -N -s -X POST localhost:8000/orchestrate/stream \
+  -H 'content-type: application/json' \
+  -d '{"message":"what changed in the latest Python release?"}'
+```
+
+The run itself is untouched by the stream: same manager, same trace, same
+memory write. A browser that disconnects mid-run costs the socket, nothing more
+— the run finishes and is stored as usual. Validation errors (unknown file,
+consent pending, orchestrator disabled) are still plain JSON with their status
+code, so nothing is streamed for a request that never started. `POST
+/orchestrate` keeps working exactly as before for scripts.
+
 ### Attachments
 
 `POST /files {"name", "data_b64"}` (the UI base64-encodes what the browser
@@ -679,6 +738,7 @@ in-process memory and reports `writable: false` in `/health`.
 | `GET` | `/search/diagnose?q=&all=` | ping each backend, per-backend pass/fail + latency |
 | `POST` | `/chat` | agent loop: model + `web_search`/`fetch_url` tools, returns trace |
 | `POST` | `/orchestrate` | **Auto mode**: manager plans, agents run in parallel, manager synthesises (§5) |
+| `POST` | `/orchestrate/stream` | the same turn, streamed as it happens (SSE: `open`, `thought`, `result`, `error`) — what the page uses (§5 Watching a run) |
 | `POST` | `/files` | upload an attachment (`{name, data_b64}` or `{name, text}`, optional `consent`), returns its summary |
 | `GET` | `/files` | attachments currently in the store (+ how many wait for permission) |
 | `POST` | `/files/{id}/consent` | the user's answer: `{"granted": true}` allows, `false` deletes (§5 Attachments) |

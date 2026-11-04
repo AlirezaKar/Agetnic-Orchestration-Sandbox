@@ -93,8 +93,18 @@ class OrchestratorService:
             log_dir=self.log_dir,
         )
 
-    async def run(self, request: OrchestrationRequest) -> OrchestrationResult:
-        """One turn: the whole pipeline, exactly as before — only the wiring moved."""
+    async def run(
+        self,
+        request: OrchestrationRequest,
+        *,
+        run_id: str | None = None,
+        sink: Any = None,
+    ) -> OrchestrationResult:
+        """One turn: the whole pipeline, exactly as before — only the wiring moved.
+
+        ``sink`` is the live seam: every trace event is handed to it as it is
+        written, which is how the page watches a run instead of waiting for it.
+        """
         if not isinstance(request, OrchestrationRequest):
             raise TypeError("run() takes an OrchestrationRequest (see app.orchestrator.contracts)")
         return await self.manager().run(
@@ -106,6 +116,8 @@ class OrchestratorService:
             synthesize=request.synthesize,
             review=request.review,
             evaluate=request.evaluate,
+            run_id=run_id,
+            sink=sink,
         )
 
     def payload(self, result: OrchestrationResult, *, trace_limit: Any = _DEFAULT) -> dict[str, Any]:

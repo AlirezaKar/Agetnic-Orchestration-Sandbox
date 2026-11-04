@@ -450,3 +450,21 @@ html[data-theme="light"] .theme-toggle { color: #4a5b74; }
 html[data-theme="light"] .theme-toggle:hover { color: #1b2b45; }
 html[data-theme="light"] .theme-toggle .icon-sun { display: none; }
 html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
+
+/* ─── live thoughts (extra.css) ───────────────────────────────
+   Everything is token-driven, so only the tints the dark theme defines
+   and the light theme did not need to override get a light value. */
+html[data-theme="light"] {
+  --mint-soft: rgba(10, 128, 105, .10);
+  --amber-soft: rgba(152, 96, 15, .10);
+  --red-soft: rgba(194, 54, 63, .10);
+}
+html[data-theme="light"] .thoughts { background: hsla(216, 40%, 96%, 0.90); box-shadow: none; }
+html[data-theme="light"] .thoughts[data-state="done"] { background: transparent; }
+html[data-theme="light"] .thoughts[data-state="stopped"],
+html[data-theme="light"] .thoughts[data-state="stopped"] .thoughts-spinner { border-color: rgba(194, 54, 63, .45); }
+html[data-theme="light"] .thought-item[data-kind="tool"] .ti-kind { border-color: rgba(10, 128, 105, .28); }
+html[data-theme="light"] .thought-item[data-kind="verdict"] .ti-kind { border-color: rgba(152, 96, 15, .28); }
+html[data-theme="light"] .tg-meta,
+html[data-theme="light"] .ti-kind,
+html[data-theme="light"] .ti-chip { background: hsla(216, 36%, 93%, 1); }
