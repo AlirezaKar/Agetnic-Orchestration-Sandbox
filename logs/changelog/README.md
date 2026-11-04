@@ -32,7 +32,7 @@ into the `?v=` cache-bust on every asset, and into the composer label
 | 0.11.1 | 2026-11-01 | merged (PR #20, `0b4ad53`) | [v0.11.1.md](v0.11.1.md) | Sidebar tidied (5 panels, Runs tabs, diagnostics only in the top bar) and every column scrolls inside the screen instead of stretching the page |
 | 0.12.0 | 2026-11-01 | merged (PR #22, `42192f5`) | [v0.12.0.md](v0.12.0.md) | Studio redesign: three-column shell, status pills, sidebar with sessions/runs/agents/search, a Markdown answer surface (tables, code, callouts), plan chips, tabbed inspector (Trace/Context/JSON) |
 | 0.13.0 | 2026-11-03 | merged (PR #24, `56f652c`) | [v0.13.0.md](v0.13.0.md) | Light theme (`theme.css`, pre-paint switch, stored choice), wider columns with a lifted type scale, and drag-to-resize handles on both side columns that remember their width |
-| 0.14.0 | 2026-11-04 | merged | [v0.14.0.md](v0.14.0.md) | Evaluator–optimizer stage between the agents and the manager: every report scored 1–5 with issues and gaps, weak ones rewritten (evidence-preserving), the manager reviewing the tightened set and asking for another wave that comes back through the gate |
+| 0.14.0 | 2026-11-04 | merged (PR #26, `1dc85de`) | [v0.14.0.md](v0.14.0.md) | Evaluator–optimizer stage between the agents and the manager: every report scored 1–5 with issues and gaps, weak ones rewritten (evidence-preserving), the manager reviewing the tightened set and asking for another wave that comes back through the gate |
 
 ## Adding a version
 
