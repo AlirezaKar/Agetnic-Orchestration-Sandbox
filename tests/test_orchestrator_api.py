@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,7 +57,9 @@ class FakeSearchChain:
         )
 
 
-class OrchestratorApiTests(unittest.TestCase):
+class _ApiCase(unittest.TestCase):
+    """Shared harness: a temp file store, in-memory sessions, fake model/search."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.settings = Settings(
@@ -90,6 +93,8 @@ class OrchestratorApiTests(unittest.TestCase):
         get_settings.cache_clear()
         self.tmp.cleanup()
 
+
+class OrchestratorApiTests(_ApiCase):
     # --------------------------------------------------------------- files
     def test_upload_text_file(self):
         response = self.client.post(
@@ -366,3 +371,143 @@ class OrchestratorApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrchestrateStreamTests(_ApiCase):
+    """``POST /orchestrate/stream``: the same turn, watched while it happens."""
+
+    def frames(self, payload: dict) -> list[tuple[str, dict]]:
+        out: list[tuple[str, dict]] = []
+        kind = ""
+        with self.client.stream("POST", "/orchestrate/stream", json=payload) as response:
+            self.assertEqual(response.status_code, 200, response.read())
+            self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+            self.assertEqual(response.headers["cache-control"], "no-cache, no-transform")
+            for line in response.iter_lines():
+                if line.startswith("event: "):
+                    kind = line[len("event: "):]
+                elif line.startswith("data: "):
+                    out.append((kind, json.loads(line[len("data: "):])))
+        return out
+
+    # ------------------------------------------------------------- framing
+    def test_the_stream_opens_with_the_run_id(self):
+        frames = self.frames({"message": "Explain how TCP handshakes work."})
+        self.assertEqual(frames[0][0], "open")
+        self.assertTrue(frames[0][1]["run_id"].startswith("run-"))
+        self.assertEqual(frames[-1][0], "result")
+
+    def test_thoughts_follow_the_pipeline(self):
+        frames = self.frames({"message": "What changed in the latest Python release? Cite your sources."})
+        thoughts = [body for kind, body in frames if kind == "thought"]
+        self.assertGreater(len(thoughts), 5)
+        categories = [item["category"] for item in thoughts]
+        # planner → agents → evaluator → manager, in that order
+        self.assertEqual(categories[0], "manager")  # "Request received"
+        self.assertIn("planner", categories)
+        self.assertIn("agent", categories)
+        self.assertIn("evaluator", categories)
+        self.assertLess(categories.index("planner"), categories.index("agent"))
+        self.assertLess(categories.index("agent"), categories.index("evaluator"))
+        self.assertGreater(categories.index("evaluator"), 0)
+        # every thought carries what the page needs to group and draw it
+        for item in thoughts:
+            for key in ("seq", "category", "group", "label", "kind", "title", "text", "offset_ms"):
+                self.assertIn(key, item)
+            self.assertNotIn("messages", item["detail"])
+        # the final answer is never one of the thoughts
+        self.assertFalse(any(item["kind"] == "reply" and "Manager summary" in item["text"] for item in thoughts))
+
+    def test_the_agent_thoughts_show_the_work(self):
+        frames = self.frames({"message": "What changed in the latest Python release? Cite your sources."})
+        thoughts = [body for kind, body in frames if kind == "thought"]
+        search = [item for item in thoughts if item["group"] == "agent:search"]
+        self.assertTrue(search, "the search agent should have its own group")
+        kinds = {item["kind"] for item in search}
+        self.assertIn("note", kinds)     # the task it was given
+        self.assertIn("prompt", kinds)   # what it sent to the model
+        self.assertIn("reply", kinds)    # what came back
+        self.assertEqual({item["label"] for item in search}, {"Web researcher"})
+
+    def test_the_last_frame_is_the_same_payload_as_the_plain_route(self):
+        frames = self.frames({"message": "Explain closures in JavaScript."})
+        kind, body = frames[-1]
+        self.assertEqual(kind, "result")
+        for key in ("answer", "mode", "run_id", "orchestration", "session"):
+            self.assertIn(key, body)
+        self.assertEqual(body["mode"], "auto")
+        orchestration = body["orchestration"]
+        self.assertIn("evaluation", orchestration)
+        self.assertTrue(orchestration["agents"])
+        self.assertTrue(body["session"]["session_id"])
+
+    def test_a_streamed_run_is_remembered_like_any_other(self):
+        frames = self.frames({"message": "Explain closures in JavaScript."})
+        session_id = frames[-1][1]["session"]["session_id"]
+        turns = self.client.get(f"/sessions/{session_id}").json()
+        self.assertEqual(len(turns["turns"]), 1)
+        self.assertEqual(turns["turns"][0]["user"]["text"], "Explain closures in JavaScript.")
+
+    def test_validation_errors_stay_plain_json(self):
+        response = self.client.post(
+            "/orchestrate/stream", json={"message": "summarise it", "file_ids": ["deadbeef0000"]}
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"], "file_not_found")
+        self.assertTrue(response.headers["content-type"].startswith("application/json"))
+
+    def test_a_disabled_orchestrator_never_opens_a_stream(self):
+        self.settings.orchestrator_enabled = False
+        response = self.client.post("/orchestrate/stream", json={"message": "hi"})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"], "disabled")
+
+    def test_a_failing_run_ends_with_an_error_frame_not_a_hang(self):
+        class Broken:
+            providers = []
+            skipped = {}
+
+            async def complete(self, *args, **kwargs):
+                raise RuntimeError("provider down")
+
+        with mock.patch.object(main_module, "build_chain", lambda settings=None: Broken()):
+            frames = self.frames({"message": "Explain closures."})
+        # the agents degrade rather than fail the run, so this is still a result
+        self.assertEqual(frames[-1][0], "result")
+        self.assertTrue(frames[-1][1]["orchestration"]["agents"])
+
+    def test_a_reader_that_leaves_lets_the_run_finish(self):
+        """The work is already paid for: closing the tab must not throw it away."""
+        import asyncio
+
+        from app.orchestrator.runbus import BUS
+
+        async def scenario():
+            payload = main_module.OrchestrateRequest(message="Explain closures in JavaScript.")
+            sessions = main_module.get_memory()
+            channel = BUS.open("run-detach")
+            stream = main_module._stream_run(
+                self.settings, payload, [], [], sessions, "run-detach", channel, channel.publish
+            )
+            opening = await stream.__anext__()
+            self.assertIn("event: open", opening)
+            await stream.aclose()  # the browser went away
+            self.assertIsNone(BUS.get("run-detach"))
+            for _ in range(100):  # the run is detached, not cancelled
+                if sessions.list():
+                    break
+                await asyncio.sleep(0.02)
+            return sessions.list()
+
+        listed = asyncio.run(scenario())
+        self.assertTrue(listed, "the turn should still be remembered")
+        self.assertEqual(listed[0]["turns"], 1)
+        turns = self.client.get(f"/sessions/{listed[0]['session_id']}").json()
+        self.assertTrue(turns["turns"][0]["assistant"]["ok"])
+
+    def test_the_bus_is_cleaned_up_after_the_stream(self):
+        from app.orchestrator.runbus import BUS
+
+        frames = self.frames({"message": "Explain closures in JavaScript."})
+        run_id = frames[0][1]["run_id"]
+        self.assertIsNone(BUS.get(run_id))

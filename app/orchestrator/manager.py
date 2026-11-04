@@ -39,7 +39,7 @@ from app.orchestrator.evaluator import EvaluationReport, evaluate_results
 from app.orchestrator.executor import run_plan, schedule
 from app.orchestrator.files import Attachment
 from app.orchestrator.planner import AGENTS, Plan, PlanStep, make_plan
-from app.orchestrator.trace import RunTrace
+from app.orchestrator.trace import RunTrace, new_run_id
 
 MANAGER_PROMPT = (
     "You are the manager of a small agent team. Your specialists have reported back; "
@@ -245,7 +245,15 @@ class Manager:
         synthesize: bool | None = None,
         review: bool | None = None,
         evaluate: bool | None = None,
+        run_id: str | None = None,
+        sink: Any = None,
     ) -> OrchestrationResult:
+        """Plan, wave, evaluate, review, write.
+
+        ``run_id`` lets the host name the run before it starts (so a live stream
+        can be addressed from the first event), and ``sink`` receives every trace
+        event as it is written — that is what ``POST /orchestrate/stream`` reads.
+        """
         started = time.perf_counter()
         attachments = attachments or []
         roster = [name for name in (agents or self.settings.orchestrator_roster) if name in AGENTS]
@@ -262,7 +270,7 @@ class Manager:
         )
         wants_optimize = bool(getattr(self.settings, "orchestrator_optimize", True))
 
-        trace = RunTrace()
+        trace = RunTrace(run_id=run_id or new_run_id(), sink=sink)
         trace.add(
             "run",
             "manager",

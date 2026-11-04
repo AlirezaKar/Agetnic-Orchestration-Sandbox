@@ -13,12 +13,14 @@ points at assets from a previous version.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -39,12 +41,15 @@ from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
 from app.orchestrator import (
+    BUS,
     AttachmentStore,
     FileError,
     OrchestrationRequest,
     OrchestratorService,
     decode_payload,
+    new_run_id,
     runlog,
+    thought as live_thought,
 )
 from app.search.registry import build_search_chain, describe_search_providers
 from app.version import VERSION
@@ -63,6 +68,7 @@ API_ROUTES = [
     "GET  /search/diagnose",
     "POST /chat",
     "POST /orchestrate                (manager + parallel agents)",
+    "POST /orchestrate/stream         (the same turn, streamed over SSE)",
     "POST /files                      (attachment upload)",
     "GET  /files                      (attachments in the store)",
     "POST /files/{id}/consent         (allow / refuse an attachment)",
@@ -306,6 +312,23 @@ def _remembered_error(
     files: list[dict[str, Any]] | None = None,
 ) -> JSONResponse:
     """A failed turn is a turn too: it is remembered, so the transcript stays honest."""
+    status, body = _remembered_error_body(
+        sessions, payload, mode=mode, status=status, kind=kind, exc=exc, files=files
+    )
+    return JSONResponse(status_code=status, content=body)
+
+
+def _remembered_error_body(
+    sessions: SessionMemory,
+    payload: Any,
+    *,
+    mode: str,
+    status: int,
+    kind: str,
+    exc: Exception,
+    files: list[dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Same contract as :func:`_remembered_error`, as ``(status, body)``."""
     body = _error_body(kind, exc)
     body["session"] = _remember(
         sessions,
@@ -316,7 +339,7 @@ def _remembered_error(
         ok=False,
         error={"status": status, "body": dict(body)},
     )
-    return JSONResponse(status_code=status, content=body)
+    return status, body
 
 
 # ------------------------------------------------------------------ UI
@@ -687,9 +710,8 @@ async def agents() -> dict[str, Any]:
     return _orchestrator(get_settings()).describe()
 
 
-@router.post("/orchestrate")
-async def orchestrate(payload: OrchestrateRequest) -> Any:
-    """Auto mode: manager plans, agents run in parallel, manager writes the answer."""
+def _orchestration_inputs(payload: OrchestrateRequest) -> Any:
+    """Files and consent, or the JSONResponse that ends the request early."""
     settings = get_settings()
     if not settings.orchestrator_enabled:
         return JSONResponse(
@@ -732,9 +754,20 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
                 ),
             },
         )
+    return attachments, _file_refs(attachments)
 
-    sessions = get_memory()
-    files = _file_refs(attachments)
+
+async def _orchestrate_turn(
+    settings: Any,
+    payload: OrchestrateRequest,
+    attachments: list[Any],
+    files: list[dict[str, Any]],
+    sessions: SessionMemory,
+    *,
+    run_id: str | None = None,
+    sink: Any = None,
+) -> tuple[int, dict[str, Any]]:
+    """One Auto turn, as ``(status, body)`` — shared by the plain and live routes."""
     service = _orchestrator(settings)
     request = OrchestrationRequest(
         message=payload.message,
@@ -747,15 +780,15 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
         evaluate=payload.evaluate,
     )
     try:
-        result = await service.run(request)
+        result = await service.run(request, run_id=run_id, sink=sink)
     except ConfigurationError as exc:
         logs.get_logger("orchestrator").warning("configuration error: %s", exc)
-        return _remembered_error(
+        return _remembered_error_body(
             sessions, payload, mode="auto", status=400, kind="configuration", exc=exc, files=files
         )
     except ProviderError as exc:
         logs.get_logger("orchestrator").warning("provider error [%s]: %s", exc.provider, exc)
-        return _remembered_error(
+        return _remembered_error_body(
             sessions, payload, mode="auto", status=502, kind="provider", exc=exc, files=files
         )
 
@@ -786,7 +819,141 @@ async def orchestrate(payload: OrchestrateRequest) -> Any:
         model=result.model,
         latency_ms=result.latency_ms,
     )
+    return 200, body
+
+
+@router.post("/orchestrate")
+async def orchestrate(payload: OrchestrateRequest) -> Any:
+    """Auto mode: manager plans, agents run in parallel, manager writes the answer."""
+    settings = get_settings()
+    prepared = _orchestration_inputs(payload)
+    if isinstance(prepared, JSONResponse):
+        return prepared
+    attachments, files = prepared
+    status, body = await _orchestrate_turn(
+        settings, payload, attachments, files, get_memory()
+    )
+    if status != 200:
+        return JSONResponse(status_code=status, content=body)
     return body
+
+
+# ------------------------------------------------------------- live stream
+def _sse(event: str, data: Any) -> str:
+    """One server-sent event. ``\n\n`` ends the frame; the client splits on it."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+def _reap_stream_run(task: asyncio.Task) -> None:
+    """A run whose reader left still finishes; keep its outcome out of the void."""
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logs.get_logger("orchestrator").exception(
+            "streamed run failed after its reader left", exc_info=error
+        )
+
+
+async def _stream_run(
+    settings: Any,
+    payload: OrchestrateRequest,
+    attachments: list[Any],
+    files: list[dict[str, Any]],
+    sessions: SessionMemory,
+    run_id: str,
+    channel: Any,
+    sink: Any,
+):
+    """Run the turn and relay its trace as it is written.
+
+    The run itself is untouched: same manager, same trace, same record. The
+    stream only *observes* it, so a client that disconnects mid-run costs nothing
+    but the socket — the run finishes and is stored in memory as usual.
+    """
+    task = asyncio.create_task(
+        _orchestrate_turn(
+            settings, payload, attachments, files, sessions, run_id=run_id, sink=sink
+        )
+    )
+    last_ping = 0.0
+    try:
+        yield _sse("open", {"run_id": run_id, "threshold_ms": 0})
+        while True:
+            # 250 ms is the shortest wait that still lets a cancel through on
+            # the way out; a quiet stretch is a keep-alive, not a stall
+            event = await channel.next(timeout=0.25)
+            if event is not None:
+                yield _sse("thought", live_thought(event))
+                last_ping = 0.0
+                continue
+            if task.done():
+                # nothing queued and nothing left to write: the run is over
+                break
+            # a quiet stretch: keep the socket warm so proxies do not drop it
+            now = time.monotonic()
+            if now - last_ping > 10.0:
+                last_ping = now
+                yield ": ping\n\n"
+        try:
+            status, body = await task
+        except Exception as exc:  # noqa: BLE001 - report it in the stream, never hang
+            logs.get_logger("orchestrator").exception("streamed run failed")
+            status, body = 500, {
+                "error": "internal",
+                "message": f"The run failed: {type(exc).__name__}: {exc}",
+                "hint": "The trace above shows how far it got; logs/error.log has the traceback.",
+            }
+        yield _sse("error" if status >= 400 else "result", body)
+    finally:
+        if not task.done():
+            # The reader went away. Two ways to react, and the choice matters:
+            # cancelling would throw away work the user already paid for, so the
+            # run is left to finish on its own — it still writes its record and
+            # still remembers the turn. Closing the channel makes the rest of
+            # its events cheap no-ops.
+            task.add_done_callback(_reap_stream_run)
+        BUS.close(run_id)
+        BUS.forget(run_id)
+
+
+@router.post("/orchestrate/stream")
+async def orchestrate_stream(payload: OrchestrateRequest) -> Any:
+    """Same turn as ``POST /orchestrate``, streamed as it happens.
+
+    ``text/event-stream`` frames:
+
+    ``open``    the run id, sent before any work starts
+    ``thought`` one trace event (planner, agent, tool, evaluator, manager), see
+                ``app/orchestrator/live.py`` for the shape
+    ``result``  the finished payload — byte for byte what ``POST /orchestrate``
+                returns, including ``session``
+    ``error``   the failure body, when the run could not finish
+
+    Validation errors (unknown file, missing consent, orchestrator disabled) are
+    still plain JSON with their status code: nothing is streamed for a request
+    that never started.
+    """
+    settings = get_settings()
+    prepared = _orchestration_inputs(payload)
+    if isinstance(prepared, JSONResponse):
+        return prepared
+    attachments, files = prepared
+
+    run_id = new_run_id()
+    channel = BUS.open(run_id)
+    sink = channel.publish
+    return StreamingResponse(
+        _stream_run(
+            settings, payload, attachments, files, get_memory(), run_id, channel, sink
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # nginx: do not buffer the stream
+        },
+    )
 
 
 @router.get("/runs")
