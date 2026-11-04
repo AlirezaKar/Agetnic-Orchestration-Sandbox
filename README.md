@@ -615,7 +615,10 @@ curl -N -s -X POST localhost:8000/orchestrate/stream \
 
 The run itself is untouched by the stream: same manager, same trace, same
 memory write. A browser that disconnects mid-run costs the socket, nothing more
-— the run finishes and is stored as usual. Validation errors (unknown file,
+— the run finishes and is stored as usual. The relay is one-way and defensive:
+because a thought is decoration and the run is the product, a projection that
+ever fails turns that one line into `plain_thought()` (who + what, no detail) and
+logs a warning, so **nothing about the stream can turn a good run into a 500**. Validation errors (unknown file,
 consent pending, orchestrator disabled) are still plain JSON with their status
 code, so nothing is streamed for a request that never started. `POST
 /orchestrate` keeps working exactly as before for scripts.
