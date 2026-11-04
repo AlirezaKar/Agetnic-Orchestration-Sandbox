@@ -22,6 +22,7 @@ from app.orchestrator.agents import (
     _safe_arithmetic,
 )
 from app.orchestrator.executor import run_plan, schedule
+from app.orchestrator.evaluator import _parse_evaluation, evaluate_results, keep_facts, rule_check
 from app.orchestrator.files import extract
 from app.orchestrator.manager import Manager, _parse_review, deterministic_answer
 from app.orchestrator import runlog
@@ -45,6 +46,9 @@ def settings_for(tmp_dir: str = "/tmp/agetnic-tests", **overrides) -> Settings:
         _env_file=None,
         orchestrator_planner="heuristic",
         orchestrator_synthesize=True,
+        # the base fixture counts model calls: the evaluator gate has its own
+        # tests (EvaluationTests), which turn it on explicitly
+        orchestrator_evaluate=False,
         orchestrator_review=False,
         orchestrator_log_runs=False,
         orchestrator_timeout=5.0,
@@ -74,18 +78,26 @@ class FakeModel:
         *,
         detail_plan: dict | None = None,
         review: dict | None = None,
+        evaluation: dict | None = None,
     ):
         self.content = content
         self.fail = fail
         self.calls: list[list[dict]] = []
         self.detail_plan = detail_plan
         self.review = review if review is not None else {"note": "nothing missing", "follow_up": []}
+        self.evaluation = evaluation
 
     async def complete(self, messages, tools=None, **kwargs):
         self.calls.append(messages)
         if self.fail:
             raise RuntimeError("provider exploded")
         system = messages[0]["content"] if messages else ""
+        if "You are the evaluator" in system:
+            # the gate between the agents and the manager
+            payload = self.evaluation
+            if payload is None:
+                payload = {"summary": "the reports are fine", "gaps": [], "reports": []}
+            return ModelResponse(content=json.dumps(payload), provider="fake", model="fake-1")
         if "The manager has already decided" in system:
             # DETAIL_PROMPT — the planner writes one brief per selected agent
             steps = self.detail_plan
@@ -1127,3 +1139,406 @@ class RunLogTests(unittest.TestCase):
         self.assertEqual(stored["run_id"], result.run_id)
         self.assertIn("orchestration", stored)
         self.assertTrue(stored["orchestration"]["trace"])
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  The evaluator–optimizer: the gate between the agents and the manager
+# ══════════════════════════════════════════════════════════════════════
+class RuleCheckTests(unittest.TestCase):
+    """The no-model half of the gate: it must be honest and cheap."""
+
+    def test_a_good_report_needs_no_change(self):
+        outcome = AgentOutcome(
+            agent="general",
+            status="ok",
+            answer="Closures capture their defining scope, so the inner function still "
+            "sees the variable after the outer call returned. That is why the counter "
+            "keeps counting between calls, which is the whole point of the pattern.",
+        )
+        item = rule_check(outcome)
+        self.assertEqual(item.verdict, "keep")
+        self.assertEqual(item.score, 5)
+        self.assertEqual(item.issues, [])
+        self.assertFalse(item.revised)
+
+    def test_an_empty_report_fails(self):
+        item = rule_check(AgentOutcome(agent="general", status="ok", answer="   "))
+        self.assertEqual(item.verdict, "fail")
+        self.assertEqual(item.score, 1)
+        self.assertIn("empty", item.issues[0])
+
+    def test_a_failed_agent_is_marked_failed(self):
+        item = rule_check(
+            AgentOutcome(agent="search", status="failed", error="timed out after 5s")
+        )
+        self.assertEqual(item.verdict, "fail")
+        self.assertIn("timed out", item.issues[0])
+
+    def test_a_thin_report_is_flagged(self):
+        item = rule_check(AgentOutcome(agent="general", status="ok", answer="It depends."))
+        self.assertEqual(item.verdict, "revise")
+        self.assertLess(item.score, 5)
+        self.assertIn("too thin", " ".join(item.issues))
+
+    def test_a_sourceless_search_report_is_flagged_when_sources_were_asked_for(self):
+        outcome = AgentOutcome(
+            agent="search",
+            status="ok",
+            answer="The latest release is 3.14. It landed in October and includes the new "
+            "template string syntax plus a faster interpreter loop in the hot paths.",
+        )
+        self.assertEqual(rule_check(outcome, wants_sources=True).verdict, "revise")
+        self.assertEqual(rule_check(outcome, wants_sources=False).verdict, "keep")
+
+    def test_a_data_report_that_forgot_its_numbers_is_flagged(self):
+        outcome = AgentOutcome(
+            agent="data",
+            status="ok",
+            answer="The months were compared and the growth is described in the table above "
+            "for every single row that was supplied in the spreadsheet.",
+            data={"computed": "mean=21.67; max=35 (Mar)"},
+        )
+        item = rule_check(outcome)
+        self.assertEqual(item.verdict, "revise")  # no digit anywhere, figures were computed
+        self.assertLess(item.score, 5)
+        self.assertIn("figures", " ".join(item.issues))
+
+    def test_a_rewrite_may_not_drop_a_source(self):
+        original = "See https://example.org/a for the details of the change and the dates."
+        self.assertFalse(keep_facts(original, "The change landed recently."))
+        self.assertTrue(
+            keep_facts(original, "The change landed recently (https://example.org/a).")
+        )
+
+    def test_an_empty_rewrite_is_never_accepted(self):
+        self.assertFalse(keep_facts("anything", "   "))
+
+
+class ParseEvaluationTests(unittest.TestCase):
+    def test_reads_a_clean_payload(self):
+        raw = json.dumps(
+            {
+                "summary": "one report needed work",
+                "gaps": ["no date"],
+                "reports": [
+                    {
+                        "agent": "search",
+                        "verdict": "revise",
+                        "score": 3,
+                        "issues": ["no date"],
+                        "rewrite": "Rewritten.",
+                    }
+                ],
+            }
+        )
+        parsed = _parse_evaluation(raw, ["search", "general"])
+        self.assertEqual(parsed["summary"], "one report needed work")
+        self.assertEqual(parsed["gaps"], ["no date"])
+        self.assertEqual(parsed["reports"]["search"]["verdict"], "revise")
+        self.assertEqual(parsed["reports"]["search"]["score"], 3)
+
+    def test_drops_unknown_agents_and_clamps_scores(self):
+        raw = json.dumps(
+            {
+                "reports": [
+                    {"agent": "nobody", "verdict": "keep", "score": 5},
+                    {"agent": "search", "verdict": "shrug", "score": 99, "issues": ["x"]},
+                ]
+            }
+        )
+        parsed = _parse_evaluation(raw, ["search"])
+        self.assertEqual(list(parsed["reports"]), ["search"])
+        self.assertEqual(parsed["reports"]["search"]["score"], 5)
+        self.assertEqual(parsed["reports"]["search"]["verdict"], "keep")
+
+    def test_survives_noise(self):
+        for raw in ("", "not json at all", "[1, 2, 3]", '{"reports": "nope"}'):
+            parsed = _parse_evaluation(raw, ["search"])
+            self.assertEqual(parsed["reports"], {})
+
+
+class EvaluatorStageTests(unittest.IsolatedAsyncioTestCase):
+    """`evaluate_results` on its own: scoring, rewriting, refusing, falling back."""
+
+    def _ctx(self, model):
+        trace = RunTrace()
+        ctx = AgentContext(
+            message="What is the latest Python release? Cite your sources.",
+            attachments=[],
+            model_chain=model,
+            search_chain=None,
+            settings=settings_for(orchestrator_evaluate=True),
+            trace=trace,
+        )
+        return ctx, trace
+
+    def _report(self, agent="search", answer="A report about Python."):
+        return AgentOutcome(agent=agent, status="ok", answer=answer, wave=1)
+
+    async def test_the_model_rewrite_replaces_the_report_for_the_manager(self):
+        model = FakeModel(
+            evaluation={
+                "summary": "the search report rambles",
+                "gaps": [],
+                "reports": [
+                    {
+                        "agent": "search",
+                        "verdict": "revise",
+                        "score": 3,
+                        "issues": ["buries the answer"],
+                        "rewrite": "Python 3.14 is the latest release (https://example.org/a).",
+                    }
+                ],
+            }
+        )
+        ctx, trace = self._ctx(model)
+        outcome = self._report(
+            answer="Well, you know, there are many releases, and the latest one is "
+            "https://example.org/a which is 3.14, roughly speaking."
+        )
+        report = await evaluate_results(
+            ctx.message, Plan(intent="x", summary="y", steps=[]), [outcome], ctx,
+            settings=ctx.settings,
+        )
+        self.assertTrue(report.ran)
+        self.assertEqual(report.method, "model")
+        self.assertEqual(report.revised, 1)
+        self.assertEqual(outcome.optimized, "Python 3.14 is the latest release (https://example.org/a).")
+        self.assertEqual(outcome.effective_answer, outcome.optimized)
+        self.assertTrue(outcome.evaluation["revised"])
+        self.assertEqual(outcome.answer[:3], "Wel")  # the original is untouched
+        stages = [event["stage"] for event in trace.to_list()]
+        self.assertIn("evaluate", stages)
+        titles = [event["title"] for event in trace.to_list()]
+        self.assertTrue(any("rewritten" in title for title in titles))
+
+    async def test_a_rewrite_that_drops_a_source_is_refused(self):
+        model = FakeModel(
+            evaluation={
+                "summary": "",
+                "gaps": [],
+                "reports": [
+                    {
+                        "agent": "search",
+                        "verdict": "revise",
+                        "score": 2,
+                        "issues": ["too long"],
+                        "rewrite": "Python 3.14 is the latest release.",
+                    }
+                ],
+            }
+        )
+        ctx, _ = self._ctx(model)
+        outcome = self._report(answer="Python 3.14 shipped — see https://example.org/a for the notes.")
+        report = await evaluate_results(
+            ctx.message, Plan(intent="x", summary="y", steps=[]), [outcome], ctx,
+            settings=ctx.settings,
+        )
+        self.assertEqual(report.revised, 0)
+        self.assertEqual(outcome.optimized, "")
+        self.assertEqual(outcome.effective_answer, outcome.answer)
+        self.assertIn("dropped evidence", " ".join(outcome.evaluation["issues"]))
+
+    async def test_without_a_model_the_rules_still_score(self):
+        ctx, trace = self._ctx(None)
+        outcome = self._report(answer="")
+        report = await evaluate_results(
+            ctx.message, Plan(intent="x", summary="y", steps=[]), [outcome], ctx,
+            settings=ctx.settings,
+        )
+        self.assertTrue(report.ran)
+        self.assertEqual(report.method, "rules")
+        self.assertEqual(report.model_calls, 0)
+        self.assertIn("no model", report.reason)
+        self.assertEqual(report.items[0].verdict, "fail")
+        self.assertTrue(report.summary)
+
+    async def test_a_broken_evaluator_falls_back_to_rules(self):
+        model = FakeModel(fail=True)
+        ctx, trace = self._ctx(model)
+        outcome = self._report(answer="x" * 200)
+        report = await evaluate_results(
+            ctx.message, Plan(intent="x", summary="y", steps=[]), [outcome], ctx,
+            settings=ctx.settings,
+        )
+        self.assertTrue(report.ran)
+        self.assertEqual(report.method, "rules")
+        self.assertIn("failed", report.reason)
+        self.assertTrue(any("failed" in event["title"].lower() for event in trace.to_list()))
+
+    async def test_optimization_can_be_switched_off(self):
+        model = FakeModel(
+            evaluation={
+                "reports": [
+                    {
+                        "agent": "search",
+                        "verdict": "revise",
+                        "score": 2,
+                        "issues": ["messy"],
+                        "rewrite": "Tidier text with the same facts.",
+                    }
+                ]
+            }
+        )
+        ctx, _ = self._ctx(model)
+        outcome = self._report(answer="messy text with the same facts")
+        report = await evaluate_results(
+            ctx.message, Plan(intent="x", summary="y", steps=[]), [outcome], ctx,
+            settings=ctx.settings, optimize=False,
+        )
+        self.assertEqual(report.items[0].verdict, "revise")  # still judged
+        self.assertEqual(report.revised, 0)  # but not rewritten
+        self.assertEqual(outcome.optimized, "")
+
+
+class ManagerEvaluationTests(unittest.IsolatedAsyncioTestCase):
+    """The pipeline order: agents → evaluator → manager review → (wave) → answer."""
+
+    def _manager(self, model, **settings):
+        return Manager(
+            settings=settings_for(orchestrator_evaluate=True, **settings),
+            model_chain=model,
+            search_chain=FakeSearchChain(),
+        )
+
+    @staticmethod
+    def _rewrite_all(text: str) -> dict:
+        return {
+            "summary": "tightened every report",
+            "gaps": ["no date was given"],
+            "reports": [
+                {"agent": agent, "verdict": "revise", "score": 4, "issues": ["wordy"],
+                 "rewrite": text}
+                for agent in ("document", "data", "search", "general")
+            ],
+        }
+
+    async def test_the_manager_reads_the_optimized_reports(self):
+        model = FakeModel(content="ok", evaluation=self._rewrite_all("TIGHTENED-REPORT"))
+        result = await self._manager(model).run(
+            "Summarise the attached policy and compute the total revenue in sales.csv.",
+            attachments=[doc_file(), csv_file()],
+        )
+        self.assertTrue(all(outcome.optimized == "TIGHTENED-REPORT" for outcome in result.results))
+        self.assertEqual(result.evaluation["revised"], len(result.results))
+
+        # the evaluator prompt came after the agents and before the synthesis
+        prompts = model.prompts
+        evaluator_at = next(i for i, text in enumerate(prompts) if "Evaluator prompt" not in text and "User request" in text and "Reports to evaluate" in text)
+        synthesis_at = next(i for i, text in enumerate(prompts) if "Specialist reports (already evaluated)" in text)
+        self.assertLess(evaluator_at, synthesis_at)
+
+        synthesis = prompts[synthesis_at]
+        self.assertIn("TIGHTENED-REPORT", synthesis)
+        self.assertIn("already evaluated", synthesis)
+        self.assertIn("no date was given", synthesis)  # the evaluator's gaps
+        self.assertIn("evaluated 4/5, revise", synthesis)
+
+    async def test_the_review_sees_the_evaluation_and_the_new_wave_is_evaluated(self):
+        model = FakeModel(
+            content="ok",
+            evaluation=self._rewrite_all("TIGHTENED-REPORT"),
+            review={
+                "note": "the data report needs a second pass",
+                "follow_up": [{"agent": "data", "task": "recheck the totals", "reason": "gap"}],
+            },
+        )
+        result = await self._manager(model, orchestrator_review=True).run(
+            "What is the latest Python release, and why does it matter?",
+            attachments=[],
+        )
+        review_prompt = next(
+            call[1]["content"] for call in model.calls
+            if "reviewing what came back" in call[0]["content"]
+        )
+        self.assertIn("Evaluator's summary", review_prompt)
+        self.assertIn("rewritten by the evaluator", review_prompt)
+
+        self.assertEqual(result.review["rounds"], 1)
+        self.assertTrue(result.review["follow_up"])
+        # round 1 scored the first wave, round 2 scored the follow-up wave
+        self.assertEqual(result.evaluation["rounds"], 2)
+        self.assertEqual(result.evaluation["method"], "model")
+        # the follow-up wave came back through the gate too
+        self.assertEqual(result.results[-1].agent, "data")
+        # the follow-up is its own wave, after everything that already ran
+        self.assertGreater(result.results[-1].wave, 1)
+        self.assertGreaterEqual(len(result.waves), 2)
+        for outcome in result.results:
+            self.assertTrue(outcome.evaluation, outcome.agent)
+        self.assertTrue(result.results[-1].optimized)
+
+    async def test_every_round_of_the_gate_costs_one_call(self):
+        model = FakeModel(evaluation={"reports": []})
+        await self._manager(model, orchestrator_review=False).run(
+            "Explain closures in JavaScript.", attachments=[]
+        )
+        evaluator_calls = [text for text in model.calls if "You are the evaluator" in text[0]["content"]]
+        self.assertEqual(len(evaluator_calls), 1)
+
+    async def test_the_gate_can_be_switched_off_per_request(self):
+        model = FakeModel()
+        result = await self._manager(model).run(
+            "Explain closures in JavaScript.", attachments=[], evaluate=False
+        )
+        self.assertFalse(result.evaluation["requested"])
+        self.assertFalse(result.evaluation["ran"])
+        self.assertIn("disabled", result.evaluation["reason"])
+        self.assertFalse(any("You are the evaluator" in call[0]["content"] for call in model.calls))
+        self.assertTrue(any(
+            event["stage"] == "evaluate" and "skipped" in event["title"].lower()
+            for event in result.trace.to_list()
+        ))
+
+    async def test_the_payload_carries_the_evaluation(self):
+        model = FakeModel(evaluation=self._rewrite_all("TIGHTENED-REPORT"))
+        result = await self._manager(model).run("Explain closures.", attachments=[])
+        payload = result.to_dict()["orchestration"]
+        evaluation = payload["evaluation"]
+        for key in ("requested", "ran", "method", "quality", "revised", "items", "summary", "gaps"):
+            self.assertIn(key, evaluation)
+        self.assertEqual(evaluation["quality"], 4.0)
+        self.assertTrue(all(item["verdict"] == "revise" for item in evaluation["items"]))
+        self.assertTrue(payload["agents"][0]["optimized"])
+        self.assertTrue(payload["agents"][0]["evaluation"]["revised"])
+
+    async def test_a_failed_agent_is_reported_as_failed_by_the_evaluator(self):
+        async def boom(step, ctx):
+            raise RuntimeError("nope")
+
+        model = FakeModel(evaluation={"reports": []})
+        manager = self._manager(model)
+        with mock.patch.dict(agents_module.AGENT_RUNNERS, {"general": boom}):
+            result = await manager.run("Explain event loops.", attachments=[])
+        item = result.evaluation["items"][0]
+        self.assertEqual(item["verdict"], "fail")
+        self.assertEqual(result.evaluation["failed"], 1)
+
+    async def test_review_rounds_are_bounded(self):
+        model = FakeModel(
+            review={
+                "note": "one more",
+                "follow_up": [{"agent": "data", "task": "recheck", "reason": "gap"}],
+            },
+            evaluation={"reports": []},
+        )
+        result = await self._manager(
+            model, orchestrator_review=True, orchestrator_review_rounds=2
+        ).run(
+            "What is the latest Python release, and why does it matter?", attachments=[]
+        )
+        reviews = [
+            call for call in model.calls if "reviewing what came back" in call[0]["content"]
+        ]
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual(result.review["rounds"], 2)
+        self.assertEqual(result.evaluation["rounds"], 3)  # wave 1 + two follow-ups
+
+    async def test_the_deterministic_merge_uses_the_optimized_text(self):
+        model = FakeModel(evaluation=self._rewrite_all("TIGHTENED-REPORT"))
+        result = await self._manager(model, orchestrator_synthesize=False).run(
+            "Explain closures in JavaScript.", attachments=[]
+        )
+        self.assertFalse(result.synthesized)
+        self.assertIn("TIGHTENED-REPORT", result.answer)
+        self.assertNotIn("GENERAL: ok", result.answer)

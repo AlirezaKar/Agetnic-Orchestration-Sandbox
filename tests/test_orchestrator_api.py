@@ -22,6 +22,18 @@ class FakeModel:
 
     async def complete(self, messages, tools=None, **kwargs):
         system = messages[0]["content"]
+        if "You are the evaluator" in system:
+            return ModelResponse(
+                content=(
+                    '{"summary": "one report needed tightening", "gaps": ["no date"], '
+                    '"reports": [{"agent": "document", "verdict": "revise", "score": 4, '
+                    '"issues": ["buries the answer"], '
+                    '"rewrite": "Refunds are allowed within 30 days."}]}'
+                ),
+                provider="fake",
+                model="fake-1",
+                usage={},
+            )
         if "manager of a small agent team" in system:
             text = "Manager summary."
         elif "document analyst" in system:
@@ -132,6 +144,10 @@ class OrchestratorApiTests(unittest.TestCase):
         self.assertEqual(body["planner"], "heuristic")
         self.assertIn("review", body)
         self.assertTrue(body["enabled"])
+        # the evaluator gate is advertised too
+        self.assertTrue(body["evaluate"])
+        self.assertTrue(body["optimize"])
+        self.assertEqual(body["review_rounds"], 1)
 
     # ------------------------------------------------------- /orchestrate
     def test_orchestrate_runs_agents_and_returns_a_plan(self):
@@ -192,6 +208,44 @@ class OrchestratorApiTests(unittest.TestCase):
             json={"message": "Explain closures.", "synthesize": False},
         ).json()
         self.assertFalse(body["orchestration"]["synthesized"])
+
+    def test_orchestrate_evaluates_before_the_manager_reads(self):
+        upload = self.client.post(
+            "/files", json={"name": "policy.md", "text": "Refunds are allowed within 30 days."}
+        ).json()
+        body = self.client.post(
+            "/orchestrate",
+            json={
+                "message": "Summarise the refund policy in the attached file.",
+                "file_ids": [upload["id"]],
+            },
+        ).json()
+        evaluation = body["orchestration"]["evaluation"]
+        self.assertTrue(evaluation["requested"])
+        self.assertTrue(evaluation["ran"])
+        self.assertEqual(evaluation["method"], "model")
+        self.assertEqual(evaluation["quality"], 4.0)
+        self.assertEqual(evaluation["revised"], 1)
+        self.assertEqual(evaluation["gaps"], ["no date"])
+        agent = body["orchestration"]["agents"][0]
+        self.assertTrue(agent["revised"])
+        self.assertEqual(agent["optimized"], "Refunds are allowed within 30 days.")
+        stages = [event["stage"] for event in body["orchestration"]["trace"]]
+        self.assertIn("evaluate", stages)
+        # the gate sits between the agents and the synthesis
+        self.assertLess(stages.index("agent"), stages.index("evaluate"))
+        self.assertLess(stages.index("evaluate"), stages.index("synthesis"))
+
+    def test_orchestrate_can_switch_the_evaluator_off(self):
+        body = self.client.post(
+            "/orchestrate",
+            json={"message": "Explain closures.", "evaluate": False},
+        ).json()
+        evaluation = body["orchestration"]["evaluation"]
+        self.assertFalse(evaluation["requested"])
+        self.assertFalse(evaluation["ran"])
+        self.assertIn("disabled", evaluation["reason"])
+        self.assertEqual(evaluation["items"], [])
 
     def test_orchestrate_503_when_disabled(self):
         self.settings.orchestrator_enabled = False

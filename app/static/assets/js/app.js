@@ -1094,6 +1094,12 @@
       const bits = [];
       if (orch.model) bits.push(orch.provider + "/" + orch.model);
       bits.push((orch.plan.agents || []).length + " agent(s) in " + (orch.waves || []).length + " wave(s)");
+      const gate = orch.evaluation || {};
+      if (gate.ran) {
+        bits.push(
+          "evaluator " + gate.quality + "/5" + (gate.revised ? " · " + gate.revised + " revised" : "")
+        );
+      }
       if (orch.model_calls) bits.push(orch.model_calls + " model call(s)");
       bits.push(orch.parallel_ms + " ms agents");
       bits.push(orch.latency_ms + " ms total");
@@ -1168,9 +1174,10 @@
         "p",
         "welcome-lead",
         text ||
-          "Run a prompt through the manager, watch the specialists work in parallel waves, and " +
-            "see exactly how the answer was assembled. Every stage stays observable — the plan, " +
-            "the prompts, the tool calls and the run record."
+          "Run a prompt through the manager, watch the specialists work in parallel waves, see " +
+            "their reports evaluated and tightened, and follow exactly how the answer was " +
+            "assembled. Every stage stays observable — the plan, the prompts, the tool calls, " +
+            "the evaluator's verdicts and the run record."
       )
     );
 
@@ -1179,7 +1186,8 @@
       [
         ["01", "Manager plans", "The manager reads the request, picks the specialists and writes each one's brief."],
         ["02", "Agents execute", "Document, search, data and general agents work in parallel waves with tools."],
-        ["03", "Manager synthesizes", "It reviews what came back, may ask for one more step, then writes the answer."],
+        ["03", "Evaluator checks", "Every report is scored, gaps are named and the weak ones are rewritten before anyone reads them."],
+        ["04", "Manager synthesizes", "It reviews the tightened reports, may ask for another wave, then writes the answer."],
       ].forEach(([number, title, copy]) => {
         const card = el("article", "architecture-step");
         const top = el("div", "step-top");
@@ -1338,13 +1346,14 @@
     planner: "P",
     agent: "A",
     tool: "⚙",
+    evaluate: "⚖",
     synthesis: "✎",
     merge: "⇄",
     done: "✓",
   };
 
   function actorTone(actor) {
-    return ["manager", "planner"].includes(actor) ? "core" : "agent-" + actor;
+    return ["manager", "planner", "evaluator"].includes(actor) ? "core" : "agent-" + actor;
   }
 
   function preBlock(text, cls) {
@@ -1413,10 +1422,53 @@
       ["files", Array.isArray(detail.files) ? detail.files.map((f) => (f.name || f)).join(", ") : detail.files],
       ["roster", Array.isArray(detail.roster) ? detail.roster.join(", ") : detail.roster],
       ["planner", detail.planner],
+      ["round", detail.round],
+      ["quality", detail.quality],
+      ["method", detail.method],
+      ["revised", detail.revised],
       ["review", detail.review],
       ["synthesize", detail.synthesize],
       ["has model", detail.has_model],
     ];
+    if (Array.isArray(detail.items) && detail.items.some((item) => item && item.verdict)) {
+      (detail.items || []).forEach((item) => {
+        if (!item || !item.verdict) return;
+        const card = el("div", "trace-card eval-card");
+        const row = el("div", "trace-card-row");
+        row.appendChild(el("strong", null, item.label || item.agent));
+        row.appendChild(
+          el(
+            "span",
+            "trace-duration",
+            item.verdict + " · " + item.score + "/5" + (item.revised ? " · rewritten" : "")
+          )
+        );
+        card.appendChild(row);
+        if (item.issues && item.issues.length) {
+          card.appendChild(el("p", null, item.issues.join(" · ")));
+        }
+        body.appendChild(card);
+      });
+      rendered = true;
+    }
+    if (Array.isArray(detail.gaps) && detail.gaps.length) {
+      body.appendChild(el("div", "trace-sub", "gaps the team did not close"));
+      body.appendChild(preBlock("- " + detail.gaps.join("\n- ")));
+      rendered = true;
+    }
+    if (detail.before && detail.after) {
+      body.appendChild(el("div", "trace-sub", "before · the agent's own report"));
+      body.appendChild(preBlock(detail.before));
+      body.appendChild(el("div", "trace-sub", "after · what the manager reads"));
+      body.appendChild(preBlock(detail.after));
+      rendered = true;
+    }
+    if (detail.summary && !detail.steps) {
+      body.appendChild(el("div", "trace-sub", "summary"));
+      body.appendChild(preBlock(detail.summary));
+      rendered = true;
+    }
+
     const chips = renderChips(pairs);
     if (chips) {
       body.appendChild(chips);
@@ -1504,6 +1556,11 @@
     return row;
   }
 
+  function evaluationFor(orch, agent) {
+    const items = (orch.evaluation && orch.evaluation.items) || [];
+    return items.find((item) => item.agent === agent) || null;
+  }
+
   function renderPlanSummary(panel, orch) {
     const plan = orch.plan || {};
     const box = el("div", "plan-summary");
@@ -1523,6 +1580,13 @@
       if (step.depends_on && step.depends_on.length) {
         chip.appendChild(el("span", "wave", "← " + step.depends_on.join(",")));
       }
+      const verdict = evaluationFor(orch, step.agent);
+      if (verdict) {
+        const tone = verdict.verdict === "fail" ? " bad" : verdict.verdict === "revise" ? " warn" : "";
+        chip.appendChild(
+          el("span", "verdict" + tone, verdict.revised ? "revised " + verdict.score + "/5" : verdict.score + "/5")
+        );
+      }
       chip.title = step.task || "";
       chips.appendChild(chip);
     });
@@ -1539,6 +1603,17 @@
     head.appendChild(el("span", "orch-title", "How this answer was built"));
     head.appendChild(el("span", "orch-chip", (orch.plan.agents || []).join(" → ") || "no agents"));
     head.appendChild(el("span", "orch-chip", (orch.waves || []).length + " wave(s)"));
+    const evaluation = orch.evaluation || {};
+    if (evaluation.requested && evaluation.ran) {
+      const tone = evaluation.quality >= 4 ? " good" : evaluation.failed ? " bad" : " warn";
+      head.appendChild(
+        el(
+          "span",
+          "orch-chip" + tone,
+          "evaluator " + evaluation.quality + "/5" + (evaluation.revised ? " · " + evaluation.revised + " revised" : "")
+        )
+      );
+    }
     if (orch.synthesized) head.appendChild(el("span", "orch-chip good", "manager synthesis"));
     head.appendChild(
       el("span", "orch-time", orch.parallel_ms + " ms agents · " + orch.latency_ms + " ms total")
@@ -1575,12 +1650,41 @@
       openInspector();
     });
 
+    if (evaluation.requested && evaluation.ran) {
+      const note = el("div", "orch-note eval-note");
+      note.appendChild(el("strong", null, "Evaluator · "));
+      const judged = (evaluation.items || []).length;
+      note.appendChild(
+        document.createTextNode(
+          (evaluation.summary || "reviewed " + judged + " report(s)") +
+            (evaluation.method === "rules" ? " (rule check — no model)" : "")
+        )
+      );
+      if (evaluation.gaps && evaluation.gaps.length) {
+        const gaps = el("div", "orch-note-sub", "gaps: " + evaluation.gaps.join(" · "));
+        note.appendChild(gaps);
+      }
+      const revised = (evaluation.items || []).filter((item) => item.revised);
+      if (revised.length) {
+        note.appendChild(
+          el(
+            "div",
+            "orch-note-sub",
+            "rewritten: " + revised.map((item) => item.label || item.agent).join(", ")
+          )
+        );
+      }
+      panel.appendChild(note);
+    } else if (evaluation.requested === false && evaluation.reason) {
+      panel.appendChild(el("div", "orch-note", "Evaluator · " + evaluation.reason));
+    }
     if (orch.review && orch.review.asked) {
       const note = el("div", "orch-note");
       note.appendChild(el("strong", null, "Manager review · "));
       note.appendChild(
         document.createTextNode(
-          (orch.review.note || orch.review.reason || "done") +
+          (orch.review.rounds > 1 ? "round " + orch.review.rounds + " — " : "") +
+            (orch.review.note || orch.review.reason || "done") +
             (orch.review.follow_up && orch.review.follow_up.length
               ? " — asked for " + orch.review.follow_up.map((f) => f.agent).join(", ")
               : " — no extra work needed")
@@ -1881,18 +1985,60 @@
     const orch = payload.orchestration;
     if (orch) {
       const head = section("Run summary");
+      const evaluation = orch.evaluation || {};
+      const metrics = [
+        [String((orch.plan.agents || []).length), "agents"],
+        [String((orch.waves || []).length), "waves"],
+        [(orch.latency_ms || 0) + " ms", "total"],
+      ];
+      if (evaluation.ran) {
+        metrics.splice(2, 0, [
+          String(evaluation.quality) + (evaluation.revised ? " (" + evaluation.revised + "✎)" : ""),
+          "evaluator /5",
+        ]);
+      }
       head.appendChild(
         summaryCard(
           (orch.plan && (orch.plan.intent || orch.plan.summary)) || payload.answer ? "Orchestrated run" : "Run",
           true,
-          [
-            [String((orch.plan.agents || []).length), "agents"],
-            [String((orch.waves || []).length), "waves"],
-            [(orch.latency_ms || 0) + " ms", "total"],
-          ]
+          metrics
         )
       );
       box.appendChild(head);
+
+      if (evaluation.requested) {
+        const gate = section(
+          "Evaluation",
+          evaluation.ran ? evaluation.method + " · " + evaluation.quality + "/5" : "skipped"
+        );
+        if (evaluation.summary) {
+          const card = el("div", "trace-card");
+          card.appendChild(el("p", null, evaluation.summary));
+          gate.appendChild(card);
+        }
+        (evaluation.items || []).forEach((item) => {
+          const card = el("div", "trace-card eval-card");
+          const row = el("div", "trace-card-row");
+          row.appendChild(el("strong", null, item.label || item.agent));
+          row.appendChild(
+            el(
+              "span",
+              "trace-duration",
+              item.verdict + " · " + item.score + "/5" + (item.revised ? " · rewritten" : "")
+            )
+          );
+          card.appendChild(row);
+          if (item.issues && item.issues.length) card.appendChild(el("p", null, item.issues.join(" · ")));
+          gate.appendChild(card);
+        });
+        if (evaluation.gaps && evaluation.gaps.length) {
+          gate.appendChild(el("p", "trace-card", "gaps: " + evaluation.gaps.join(" · ")));
+        }
+        if (!evaluation.ran && evaluation.reason) {
+          gate.appendChild(el("p", "trace-card", evaluation.reason));
+        }
+        box.appendChild(gate);
+      }
 
       const steps = section("Timeline", (orch.trace || []).length + " events");
       const timeline = el("div", "timeline");

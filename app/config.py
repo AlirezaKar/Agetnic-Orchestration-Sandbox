@@ -170,9 +170,18 @@ class Settings(BaseSettings):
     # heuristic = rules only, no planner call at all
     # llm       = the model picks the agents and writes their briefs
     orchestrator_planner: str = "auto"
-    # After the agents report, let the manager ask for more work (one small call,
-    # only when more than one agent ran) before it writes the final answer.
+    # The gate between the agents and the manager: one small call scores every
+    # report, lists what is missing and rewrites the weak ones before the manager
+    # (and its review) read anything. Rules-only when there is no model.
+    orchestrator_evaluate: bool = True
+    # Accept the evaluator's rewritten reports. Off = score and flag only, the
+    # agents' own wording reaches the manager.
+    orchestrator_optimize: bool = True
+    # After the evaluated reports arrive, let the manager ask for more work before
+    # it writes the final answer. A follow-up wave goes back through the evaluator.
     orchestrator_review: bool = True
+    # How many times the manager may ask for another wave in one run.
+    orchestrator_review_rounds: int = 1
     # Longest string the browser receives per trace entry; the log file keeps it all.
     orchestrator_trace_chars: int = 4000
     # Keep a JSON record of every run in logs/orchestrator/.
@@ -278,7 +287,10 @@ class Settings(BaseSettings):
             "agent_max_steps": self.agent_max_steps,
             "orchestrator_planner": self.orchestrator_planner,
             "orchestrator_agents": self.orchestrator_roster,
+            "orchestrator_evaluate": self.orchestrator_evaluate,
+            "orchestrator_optimize": self.orchestrator_optimize,
             "orchestrator_review": self.orchestrator_review,
+            "orchestrator_review_rounds": self.orchestrator_review_rounds,
             "harness_memory": self.harness_memory,
             "memory_dir": self.memory_dir,
             "memory_history_turns": self.memory_history_turns,

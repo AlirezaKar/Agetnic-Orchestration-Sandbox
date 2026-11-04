@@ -238,6 +238,19 @@
   font-size: 9px; color: #b9cbf3;
 }
 .agent-chip .wave { font: 8px ui-monospace, monospace; color: var(--muted); }
+/* four pipeline cards now (plan · agents · evaluator · synthesis) */
+.architecture { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1100px) {
+  .architecture { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+  .architecture { grid-template-columns: 1fr; }
+}
+
+/* the evaluator's verdict, worn on the agent's own chip */
+.agent-chip .verdict { font: 8px ui-monospace, monospace; color: var(--mint); }
+.agent-chip .verdict.warn { color: var(--amber); }
+.agent-chip .verdict.bad { color: var(--red); }
 
 .trace-rows { display: grid; }
 .trace-row { border-bottom: 1px solid var(--line); }
@@ -413,12 +426,19 @@ body.dragging .composer { border-color: rgba(124, 156, 255, .6); box-shadow: 0 0
   border: 1px solid var(--line-strong); color: #9fb2d1; background: rgba(21, 31, 47, .7);
 }
 .orch-chip.good { color: #7fd6bd; border-color: rgba(80, 214, 176, .28); background: rgba(80, 214, 176, .08); }
+.orch-chip.warn { color: #e2b872; border-color: rgba(226, 184, 114, .28); background: rgba(226, 184, 114, .08); }
+.orch-chip.bad { color: #f08c93; border-color: rgba(240, 140, 147, .28); background: rgba(240, 140, 147, .08); }
 .orch-time { margin-left: auto; font: 8.5px ui-monospace, monospace; color: var(--muted); white-space: nowrap; }
 .orch-note, .orch-log {
   padding: 7px 11px; border-top: 1px solid var(--line);
   font-size: 9px; line-height: 1.55; color: #97a9c4;
 }
 .orch-note strong { color: #c3d2e7; font-weight: 620; }
+.orch-note-sub {
+  margin-top: 3px; font-size: 8.5px; line-height: 1.5;
+  font-family: ui-monospace, monospace; color: var(--muted);
+}
+.eval-card .trace-card-row strong { font-size: 10px; }
 .orch-log { font-family: ui-monospace, monospace; font-size: 8.5px; color: #7f92ae; }
 
 /* trace detail primitives */

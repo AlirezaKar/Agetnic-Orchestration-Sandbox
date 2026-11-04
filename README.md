@@ -12,8 +12,10 @@ A small backend skeleton where **the model is pluggable** (free providers only) 
   free-key backends that need no server either (Tavily, Serper, Exa, Google CSE), and
   SearXNG only as an opt-in self-hosted option.
 - **Auto mode**: a manager plans the request, runs the needed agents (document ·
-  web search · data · general) **in parallel**, and writes one answer from their
-  reports. Attach a file and the document agent reads it.
+  web search · data · general) **in parallel**, an **evaluator scores and
+  tightens every report before the manager sees it**, and the manager then
+  writes one answer — asking for another wave first if the gap is real. Attach a
+  file and the document agent reads it.
 - Built-in way to **verify** all of it: `python -m scripts.doctor`, `GET /diagnose`,
   `GET /search/diagnose`, plus an offline test suite.
 
@@ -352,17 +354,29 @@ The single-agent loop in §6 is one model with two tools. Auto mode adds a lead:
 2. plan          rules select the agents ─► LLM writes each agent's brief + who waits for whom
 3. delegate      wave 1: independent agents run in parallel
                  wave 2: an agent that depends on another receives its result as input
-4. review        the manager reads the reports and may ask for one more agent task
-5. wrap up       the manager writes one answer from all reports (or merges them deterministically)
+4. evaluate      the evaluator scores every report, names the gaps and rewrites the weak ones
+5. review        the manager reads the *evaluated* reports and may ask for another wave
+                 (that wave goes back through the evaluator before anyone reads it)
+6. wrap up       the manager writes one answer from all reports (or merges them deterministically)
 ```
 
 ```
                      ┌── Document analyst ── attachments, quotes ──┐
-prompt ─► MANAGER ─► PLANNER ─┼── Web researcher ──── URLs, sources ─┼─► MANAGER ─► answer
-                     ├── Data analyst ────── exact figures ──────┤   review     (synthesis)
-                     └── Generalist ──────── own knowledge ──────┘   + follow-up
-                          wave 1 in parallel → wave 2 uses wave 1
+prompt ─► MANAGER ─► PLANNER ─┼── Web researcher ──── URLs, sources ─┼─► EVALUATOR ─► MANAGER ─► answer
+                     ├── Data analyst ────── exact figures ──────┤   score +        review     (synthesis)
+                     └── Generalist ──────── own knowledge ──────┘   rewrite        + new wave?
+                          wave 1 in parallel → wave 2 uses wave 1        ▲             │
+                                                                        └── the new wave ┘
 ```
+
+The evaluator is the reason the review is worth having: it is one thing to see
+forty lines of agent output, and another to read "the web report has no date,
+the data report dropped its figures" and decide about *that*. Its rewrite only
+reorganises what the agent already wrote — a rewrite that loses a URL or a
+figure the original had is discarded (see `keep_facts` in
+`app/orchestrator/evaluator.py`). Every report keeps both versions in the run
+record: `agents[i].answer` (what the agent said) and `agents[i].optimized`
+(what the manager read).
 
 | Piece | Where | What it decides |
 |---|---|---|
@@ -372,6 +386,7 @@ prompt ─► MANAGER ─► PLANNER ─┼── Web researcher ──── UR
 | Manager | `app/orchestrator/manager.py` | classify → plan → waves → review → one answer (+ sources, errors, timings) |
 | Planner | `app/orchestrator/planner.py` | which agents run, the brief each one gets, and the dependency graph |
 | Executor | `app/orchestrator/executor.py` | waves: `asyncio.gather` + semaphore + per-agent timeout; failures stay isolated |
+| Evaluator | `app/orchestrator/evaluator.py` | scores each report (verdict, 1–5, issues), names the gaps, rewrites the weak ones; rules-only when there is no model |
 | Agents | `app/orchestrator/agents.py` | document / search / data / general, one signature, one result type |
 | Trace | `app/orchestrator/trace.py` | every step of the run: prompts, tool calls, tool results, replies |
 | Run log | `app/orchestrator/runlog.py` | one unclipped JSON record per run in `logs/orchestrator/` |
@@ -447,7 +462,14 @@ curl -s -X POST localhost:8000/orchestrate -H 'content-type: application/json' \
     },
     "waves": [{"wave": 1, "agents": ["document"]},
               {"wave": 2, "agents": ["general"], "depends_on": {"general": ["document"]}}],
-    "review": {"asked": true, "note": "the file answer is enough", "follow_up": []},
+    "evaluation": {
+      "requested": true, "ran": true, "method": "model", "rounds": 1,
+      "summary": "the file report buries the rule", "gaps": ["no effective date"],
+      "quality": 4.0, "revised": 1, "failed": 0, "model_calls": 1,
+      "items": [{"agent": "document", "label": "Document analyst", "verdict": "revise",
+                 "score": 4, "issues": ["buries the rule"], "revised": true, "usable": true}]
+    },
+    "review": {"asked": true, "rounds": 1, "note": "the file answer is enough", "follow_up": []},
     "trace": [
       {"seq": 2, "stage": "planner", "actor": "planner", "title": "Selected the agents by rule", "detail": {"selected": ["…"]}},
       {"seq": 3, "stage": "planner", "actor": "planner", "title": "Planner prompt (writes each agent's brief)",
@@ -469,12 +491,14 @@ curl -s -X POST localhost:8000/orchestrate -H 'content-type: application/json' \
 | selection | rules over wording, attachments, numbers — free, ~0 ms | `ORCHESTRATOR_PLANNER=llm` lets the model choose instead |
 | briefs | **the model** writes one task per selected agent + the dependencies (`auto`) | `ORCHESTRATOR_PLANNER=heuristic` = rules write the briefs, no planner call at all |
 | agents | one call each, in parallel **waves** (wall clock ≈ the slowest) | `ORCHESTRATOR_MAX_PARALLEL`, `ORCHESTRATOR_TIMEOUT` |
-| review | one small call, only when more than one agent ran | `ORCHESTRATOR_REVIEW=false` |
+| **evaluate** | one small call over all reports, before the manager reads them | `ORCHESTRATOR_EVALUATE=false`; `ORCHESTRATOR_OPTIMIZE=false` keeps the scoring but discards the rewrites |
+| review | one small call, only when more than one agent ran | `ORCHESTRATOR_REVIEW=false`, `ORCHESTRATOR_REVIEW_ROUNDS=n` |
 | wrap-up | one synthesis call | `ORCHESTRATOR_SYNTHESIZE=false` → deterministic labelled merge |
 
-So a two-agent run costs four model calls (planner + 2 agents + review +
-synthesis is five if the review is asked for) — visible in every trace entry and
-in `orchestration.model_calls`.
+So a two-agent run costs five model calls: planner (with `auto`), two agents,
+the evaluator, the synthesis — and a sixth if the manager asks for a review.
+Every one of them is visible in the trace, and `orchestration.model_calls` counts
+them all.
 
 **Dependencies.** The planner may say "the generalist waits for the document
 analyst". The executor then runs the generalist in wave 2, and hands it the
@@ -659,7 +683,7 @@ in-process memory and reports `writable: false` in `/health`.
 | `GET` | `/files` | attachments currently in the store (+ how many wait for permission) |
 | `POST` | `/files/{id}/consent` | the user's answer: `{"granted": true}` allows, `false` deletes (§5 Attachments) |
 | `DELETE` | `/files/{id}` | remove one attachment |
-| `GET` | `/agents` | agent roster, planner mode, review/synthesis flags, readiness |
+| `GET` | `/agents` | agent roster, planner mode, evaluator/review/synthesis flags, readiness |
 | `GET` | `/runs` | recent orchestration runs from `logs/orchestrator/` (plan, agents, model calls, timing) |
 | `GET` | `/runs/{run_id}` | one run, full unclipped trace (prompts, tool calls, results) |
 | `GET` | `/sessions` | conversations in memory (title, turns, last message, `?q=` filter) |
@@ -711,7 +735,8 @@ app/
     contracts.py       ports: model chain, search chain, agent loop, settings, request
     host.py            the only file that imports the app (logger, log dir, loop, settings)
     README.md          the service contract + the porting checklist
-    manager.py         classify -> plan -> waves -> review -> synthesis, totals, errors
+    manager.py         classify -> plan -> waves -> evaluate -> review -> synthesis, totals, errors
+    evaluator.py       score + rewrite each report before the manager reads it (rules fallback)
     planner.py         rules + LLM planner, per-agent briefs, dependency graph
     executor.py        waves: asyncio.gather + semaphore + timeout, failures isolated
     agents.py          document / search / data / general workers + retrieval

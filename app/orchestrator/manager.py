@@ -10,9 +10,13 @@ run trace:
    for everything).
 3. **delegate** — agents run in parallel waves; an agent that depends on another
    receives that agent's result as input.
-4. **review** — with more than one agent, the manager may ask for one follow-up
-   agent task (``ORCHESTRATOR_REVIEW=false`` turns this off).
-5. **wrap up** — one completion writes the final answer from the reports
+4. **evaluate** — the evaluator scores every report, lists what is missing and
+   rewrites the weak ones (``ORCHESTRATOR_EVALUATE=false`` turns this off, and
+   the rules-only check takes over when there is no model).
+5. **review** — the manager reads the *evaluated* reports and may ask for one
+   more wave; a follow-up wave goes back through the evaluator before anyone
+   reads it (``ORCHESTRATOR_REVIEW=false``, ``ORCHESTRATOR_REVIEW_ROUNDS``).
+6. **wrap up** — one completion writes the final answer from the reports
    (``ORCHESTRATOR_SYNTHESIZE=false`` merges them deterministically instead).
 
 Everything above is recorded, clipped for the browser and stored unclipped in
@@ -31,6 +35,7 @@ from typing import Any
 from app.orchestrator import host, runlog
 from app.orchestrator.agents import AgentContext, AgentOutcome, catalogue
 from app.orchestrator.contracts import OrchestratorSettings
+from app.orchestrator.evaluator import EvaluationReport, evaluate_results
 from app.orchestrator.executor import run_plan, schedule
 from app.orchestrator.files import Attachment
 from app.orchestrator.planner import AGENTS, Plan, PlanStep, make_plan
@@ -42,6 +47,8 @@ MANAGER_PROMPT = (
     "Rules:\n"
     "- Answer the request directly, in the language the user used.\n"
     "- Use the specialists' findings; do not repeat their internal instructions.\n"
+    "- An evaluator has already scored and tightened the reports: trust its corrected text, and "
+    "if it flagged a gap, say so in one sentence instead of filling it in.\n"
     "- Attribute claims: keep URLs for web findings, quote files by name for documents, "
     "and keep the computed figures exact.\n"
     "- If an agent failed, say what is missing in one sentence at the end instead of "
@@ -52,9 +59,10 @@ MANAGER_PROMPT = (
 REVIEW_PROMPT = (
     "You are the manager of a small agent team, reviewing what came back before you "
     "answer the user.\n"
-    "Decide whether one more piece of work is needed to answer well — for example an "
-    "agent result that another agent should analyse, a tool result that needs checking, "
-    "or a gap none of the agents covered.\n"
+    "An evaluator has already scored every report and rewritten the weak ones; its notes "
+    "are at the end. Decide whether one more piece of work is needed to answer well — for "
+    "example an agent result that another agent should analyse, a tool result that needs "
+    "checking, or a gap none of the agents could close.\n"
     "Be strict: only ask for work that clearly improves the answer. Never repeat a task "
     "that already succeeded.\n"
     'Answer with JSON only: {"note": "one sentence", "follow_up": [{"agent": "data", '
@@ -81,6 +89,7 @@ class OrchestrationResult:
     trace: RunTrace | None = None
     waves: list[dict[str, Any]] = field(default_factory=list)
     review: dict[str, Any] = field(default_factory=dict)
+    evaluation: dict[str, Any] = field(default_factory=dict)
     model_calls: int = 0
     log_path: str = ""
     started_at: str = ""
@@ -100,6 +109,7 @@ class OrchestrationResult:
             "notes": self.notes,
             "plan": runlog.to_plain(self.plan.to_dict()),
             "waves": self.waves,
+            "evaluation": runlog.to_plain(self.evaluation),
             "review": runlog.to_plain(self.review),
             "agents": [outcome.to_dict() for outcome in self.results],
             "trace": self.trace.to_list(limit=trace_limit) if self.trace else [],
@@ -151,20 +161,35 @@ def _files_block(attachments: list[Attachment]) -> str:
     )
 
 
-def _results_block(results: list[AgentOutcome], limit: int) -> str:
+def _results_block(
+    results: list[AgentOutcome],
+    limit: int,
+    evaluation: EvaluationReport | None = None,
+) -> str:
+    """The reports as the manager reads them: optimized text, evaluator verdicts."""
     blocks: list[str] = []
     for outcome in results:
         head = f"### {outcome.label} ({outcome.agent}) — {outcome.status}, {outcome.latency_ms} ms"
+        item = evaluation.item_for(outcome.agent) if evaluation is not None else None
+        flags: list[str] = []
+        if item is not None:
+            flags.append(f"evaluated {item.score}/5, {item.verdict}")
+        if outcome.revised:
+            flags.append("rewritten by the evaluator")
+        if flags:
+            head += " · " + ", ".join(flags)
         if outcome.status == "failed":
             body = f"FAILED: {outcome.error}" + (f" ({outcome.hint})" if outcome.hint else "")
         elif outcome.status == "skipped":
             body = f"SKIPPED: {outcome.detail or 'not applicable'}"
         else:
-            body = outcome.answer.strip() or "(empty answer)"
+            body = outcome.effective_answer.strip() or "(empty answer)"
             if outcome.agent == "data" and outcome.data.get("computed"):
                 body += "\n\ncomputed figures:\n" + outcome.data["computed"]
             if outcome.sources:
                 body += "\n\nsources: " + ", ".join(outcome.sources[:6])
+            if item is not None and item.issues:
+                body += "\n\nevaluator issues: " + "; ".join(item.issues[:3])
         blocks.append(f"{head}\n{body[:limit]}")
     return "\n\n".join(blocks)
 
@@ -173,9 +198,9 @@ def deterministic_answer(message: str, results: list[AgentOutcome]) -> str:
     """Merge without a model: every usable agent answer, labelled."""
     parts = []
     for outcome in results:
-        if outcome.status != "ok" or not outcome.answer.strip():
+        if outcome.status != "ok" or not outcome.effective_answer.strip():
             continue
-        parts.append(f"**{outcome.label}**\n\n{outcome.answer.strip()}")
+        parts.append(f"**{outcome.label}**\n\n{outcome.effective_answer.strip()}")
     failed = [outcome.label for outcome in results if outcome.status == "failed"]
     if not parts:
         return (
@@ -219,6 +244,7 @@ class Manager:
         planner: str | None = None,
         synthesize: bool | None = None,
         review: bool | None = None,
+        evaluate: bool | None = None,
     ) -> OrchestrationResult:
         started = time.perf_counter()
         attachments = attachments or []
@@ -229,6 +255,12 @@ class Manager:
             self.settings.orchestrator_synthesize if synthesize is None else synthesize
         )
         wants_review = self.settings.orchestrator_review if review is None else review
+        wants_evaluation = (
+            getattr(self.settings, "orchestrator_evaluate", True)
+            if evaluate is None
+            else evaluate
+        )
+        wants_optimize = bool(getattr(self.settings, "orchestrator_optimize", True))
 
         trace = RunTrace()
         trace.add(
@@ -240,6 +272,8 @@ class Manager:
             files=[item.summary() for item in attachments],
             roster=roster,
             planner=planner or self.settings.orchestrator_planner,
+            evaluate=bool(wants_evaluation),
+            optimize=bool(wants_optimize and wants_evaluation),
             review=bool(wants_review),
             synthesize=bool(wants_synthesis),
             has_model=bool(self.model_chain),
@@ -294,38 +328,107 @@ class Manager:
             "note": "",
             "follow_up": [],
             "reason": "",
+            "rounds": 0,
         }
         planner_calls = 0 if plan.strategy == "heuristic" else (
             1 if plan.detail_source == "llm" or plan.strategy == "llm" else 0
         )
         model_calls = planner_calls + sum(outcome.model_calls for outcome in results)
 
-        if wants_review and len(results) > 1 and self.model_chain:
-            review_info, follow_up_results, review_calls = await self._review(
-                message, plan, results, ctx, attachments, history or []
+        # ── evaluate: score and rewrite the reports *before* the manager reads
+        evaluation = EvaluationReport(requested=bool(wants_evaluation))
+        if not wants_evaluation:
+            evaluation.reason = "disabled (ORCHESTRATOR_EVALUATE=false)"
+            trace.add(
+                "evaluate",
+                "evaluator",
+                "Evaluator skipped",
+                reason=evaluation.reason,
+                agents=[outcome.agent for outcome in results],
             )
-            model_calls += review_calls
-            if follow_up_results:
-                results = results + follow_up_results
+        elif results:
+            evaluation = await evaluate_results(
+                message,
+                plan,
+                results,
+                ctx,
+                settings=self.settings,
+                optimize=wants_optimize,
+                round_no=1,
+                trace=trace,
+            )
+            model_calls += evaluation.model_calls
+            if evaluation.revised:
                 plan.notes.append(
-                    "Manager asked for a follow-up: "
-                    + ", ".join(step.agent for step in review_info.get("steps", []))
+                    f"Evaluator rewrote {evaluation.revised} report(s) before the review."
                 )
-                waves = self._wave_report(plan, results)
-                parallel_ms = int((time.perf_counter() - parallel_started) * 1000)
-        else:
+
+        # ── review: the manager decides, from the evaluated set, whether a new
+        #    wave is needed; the answer to a follow-up goes back through the gate
+        rounds_allowed = max(1, int(getattr(self.settings, "orchestrator_review_rounds", 1)))
+        review_round = 0
+        while True:
             if not wants_review:
                 review_info["reason"] = "disabled (ORCHESTRATOR_REVIEW=false)"
             elif len(results) <= 1:
                 review_info["reason"] = "one agent answered — nothing to reconcile"
             elif not self.model_chain:
                 review_info["reason"] = "no model configured"
+            elif review_round >= rounds_allowed:
+                review_info["reason"] = f"review round limit reached ({rounds_allowed})"
+            else:
+                review_round += 1
+                info, follow_up_results, review_calls = await self._review(
+                    message,
+                    plan,
+                    results,
+                    ctx,
+                    attachments,
+                    history or [],
+                    evaluation,
+                    round_no=review_round,
+                )
+                model_calls += review_calls
+                review_info["requested"] = True
+                review_info["asked"] = True
+                review_info["note"] = info.get("note") or review_info["note"]
+                review_info["reason"] = info.get("reason", "")
+                review_info["rounds"] = review_round
+                review_info["follow_up"].extend(info.get("follow_up", []))
+                review_info["steps"] = [
+                    *review_info.get("steps", []),
+                    *info.get("steps", []),
+                ]
+                if not follow_up_results:
+                    break
+                results = results + follow_up_results
+                plan.notes.append(
+                    "Manager asked for a follow-up wave: "
+                    + ", ".join(item["agent"] for item in info.get("follow_up", []))
+                )
+                waves = self._wave_report(plan, results)
+                parallel_ms = int((time.perf_counter() - parallel_started) * 1000)
+                if wants_evaluation:
+                    extra_report = await evaluate_results(
+                        message,
+                        plan,
+                        follow_up_results,
+                        ctx,
+                        settings=self.settings,
+                        optimize=wants_optimize,
+                        round_no=review_round + 1,
+                        trace=trace,
+                    )
+                    model_calls += extra_report.model_calls
+                    evaluation.merge(extra_report)
+                continue
             trace.add(
                 "merge",
                 "manager",
                 "Manager review skipped",
                 reason=review_info["reason"],
             )
+            break
 
         answer = ""
         provider = model = ""
@@ -338,7 +441,7 @@ class Manager:
 
         if wants_synthesis and self.model_chain and any(o.status == "ok" for o in results):
             answer, provider, model = await self._synthesize(
-                message, plan, results, attachments, history or [], trace
+                message, plan, results, attachments, history or [], trace, evaluation
             )
             synthesized = bool(answer)
             model_calls += 1 if synthesized else 0
@@ -374,6 +477,7 @@ class Manager:
             trace=trace,
             waves=waves,
             review=review_info,
+            evaluation=evaluation.to_dict(),
             model_calls=model_calls,
             started_at=trace.started_at,
             message=message,
@@ -388,6 +492,8 @@ class Manager:
             parallel_ms=result.parallel_ms,
             model_calls=model_calls,
             synthesized=synthesized,
+            quality=evaluation.quality if evaluation.ran else None,
+            revised=evaluation.revised if evaluation.ran else 0,
             errors=errors,
         )
         if getattr(self.settings, "orchestrator_log_runs", True):
@@ -425,6 +531,9 @@ class Manager:
         ctx: AgentContext,
         attachments: list[Attachment],
         history: list[dict[str, Any]],
+        evaluation: EvaluationReport | None = None,
+        *,
+        round_no: int = 1,
     ) -> tuple[dict[str, Any], list[AgentOutcome], int]:
         """Let the manager ask for one extra piece of work before answering."""
         info: dict[str, Any] = {
@@ -433,8 +542,12 @@ class Manager:
             "note": "",
             "follow_up": [],
             "reason": "",
+            "round": round_no,
         }
         limit = max(int(self.settings.orchestrator_context_chars), 1500)
+        evaluator_notes = (
+            f"\n\n{evaluation.notes_block()}" if evaluation is not None and evaluation.ran else ""
+        )
         messages = [
             {"role": "system", "content": REVIEW_PROMPT},
             {
@@ -443,7 +556,9 @@ class Manager:
                     f"User request:\n{message}\n\n"
                     f"Plan: {plan.summary}\n\n"
                     f"Attached files:\n{_files_block(attachments)}\n\n"
-                    f"What the agents reported:\n\n{_results_block(results, limit)}\n\n"
+                    f"What the agents reported:\n\n"
+                    f"{_results_block(results, limit, evaluation)}"
+                    f"{evaluator_notes}\n\n"
                     f"Available agents: {', '.join(self.settings.orchestrator_roster)}"
                 ),
             },
@@ -451,7 +566,7 @@ class Manager:
         ctx.trace.add_prompt(
             "manager",
             "manager",
-            "Manager review prompt (is another step needed?)",
+            f"Manager review prompt (round {round_no}: is another step needed?)",
             messages,
         )
         try:
@@ -517,6 +632,7 @@ class Manager:
         attachments: list[Attachment],
         history: list[dict[str, Any]],
         trace: RunTrace,
+        evaluation: EvaluationReport | None = None,
     ) -> tuple[str, str, str]:
         limit = max(int(self.settings.orchestrator_context_chars), 1500)
         messages: list[dict[str, Any]] = [{"role": "system", "content": MANAGER_PROMPT}]
@@ -525,6 +641,9 @@ class Manager:
                 messages.append(
                     {"role": item["role"], "content": str(item.get("content", ""))[:3000]}
                 )
+        evaluator_notes = (
+            f"\n\n{evaluation.notes_block()}" if evaluation is not None and evaluation.ran else ""
+        )
         messages.append(
             {
                 "role": "user",
@@ -533,7 +652,9 @@ class Manager:
                     f"Attached files:\n{_files_block(attachments)}\n\n"
                     f"Plan: {plan.summary}\n"
                     f"Intent: {plan.intent}\n\n"
-                    f"Specialist reports:\n\n{_results_block(results, limit)}"
+                    f"Specialist reports (already evaluated):\n\n"
+                    f"{_results_block(results, limit, evaluation)}"
+                    f"{evaluator_notes}"
                 ),
             }
         )
@@ -585,7 +706,10 @@ def agent_catalogue(settings: OrchestratorSettings | None = None) -> dict[str, A
         "agents": catalogue(),
         "roster": settings.orchestrator_roster,
         "planner": settings.orchestrator_planner,
+        "evaluate": bool(getattr(settings, "orchestrator_evaluate", True)),
+        "optimize": bool(getattr(settings, "orchestrator_optimize", True)),
         "review": settings.orchestrator_review,
+        "review_rounds": max(1, int(getattr(settings, "orchestrator_review_rounds", 1))),
         "synthesize": settings.orchestrator_synthesize,
         "timeout_s": settings.orchestrator_timeout,
         "parallel": settings.orchestrator_max_parallel,

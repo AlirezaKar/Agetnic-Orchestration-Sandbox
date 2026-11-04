@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Stages, in the order the UI paints them.
-STAGES = ("run", "manager", "planner", "agent", "tool", "synthesis", "merge", "done")
+STAGES = ("run", "manager", "planner", "agent", "tool", "evaluate", "synthesis", "merge", "done")
 
 
 def _now() -> str:
