@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.orchestrator.live import category_for, thought
+from app.orchestrator.live import category_for, plain_thought, thought
 from app.orchestrator.runbus import BUS, END, Channel, RunBus
 from app.orchestrator.trace import RunTrace
 
@@ -265,6 +265,59 @@ class ThoughtTests(unittest.TestCase):
         self.assertEqual(out["detail"]["latency_ms"], 812)
         self.assertEqual(out["detail"]["wave"], 2)
         self.assertEqual(out["detail"]["tools"], ["web_search"])
+
+    # The field that crashed a live 0.15.0 run: ``tool_calls`` is a *list* on a
+    # model step and a plain *count* on the "agent finished" event. The stream
+    # must survive either, and a thought may never raise.
+    def test_tool_calls_as_a_count_does_not_break_the_projection(self):
+        for count in (0, 1, 3):
+            out = thought(
+                event("agent", "search", "Web researcher finished: ok", status="ok", tool_calls=count)
+            )
+            self.assertEqual(out["kind"], "note")
+            self.assertNotIn("tools", out["detail"])
+            self.assertEqual(out["detail"]["status"], "ok")
+
+    def test_tool_calls_as_a_list_still_becomes_the_tools_chip(self):
+        out = thought(
+            event("agent", "search", "finished", tool_calls=[{"name": "web_search"}, {"name": "fetch_url"}])
+        )
+        self.assertEqual(out["detail"]["tools"], ["web_search", "fetch_url"])
+
+    def test_odd_shapes_in_the_detail_are_survived(self):
+        """Fields that are sometimes rows are sometimes not: never a crash."""
+        cases = [
+            {"items": {"search": 4}},
+            {"items": "nope"},
+            {"items": 2},
+            {"agents": 2},
+            {"agents": {"search": "ok"}},
+            {"tool_calls": "web_search"},
+            {"tool_calls": 1},
+            {"tool_calls": None},
+            {"gaps": 3},
+        ]
+        for detail in cases:
+            with self.subTest(detail=detail):
+                out = thought(event("evaluate", "evaluator", "Evaluator reviewed 1 report(s)", **detail))
+                self.assertIsInstance(out["detail"], dict)
+                for key in ("items", "agents", "tools", "gaps"):
+                    self.assertNotIn(key, out["detail"])
+
+    def test_a_single_gap_written_as_text_is_still_shown(self):
+        out = thought(event("evaluate", "evaluator", "reviewed", gaps="the publication date"))
+        self.assertEqual(out["detail"]["gaps"], ["the publication date"])
+
+    # The fallback the stream uses when the projection *does* fail: it cannot
+    # raise, and it keeps the line the reader needs (who, when, what).
+    def test_a_plain_thought_never_touches_the_detail(self):
+        out = plain_thought(
+            event("agent", "search", "Model reply (step 1)", content=object(), tool_calls=object())
+        )
+        self.assertEqual(out["kind"], "status")
+        self.assertEqual(out["text"], "Model reply (step 1)")
+        self.assertEqual(out["category"], "agent")
+        self.assertEqual(out["detail"], {})
 
     def test_a_done_event_says_how_the_run_ended(self):
         out = thought(event("done", "manager", "Run finished", latency_ms=8100, model_calls=6))

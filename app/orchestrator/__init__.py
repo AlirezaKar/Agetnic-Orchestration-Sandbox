@@ -57,7 +57,7 @@ from app.orchestrator.files import (
     decode_payload,
     extract,
 )
-from app.orchestrator.live import thought
+from app.orchestrator.live import plain_thought, thought
 from app.orchestrator.manager import Manager, OrchestrationResult, agent_catalogue
 from app.orchestrator.planner import AGENTS, Plan, PlanStep, heuristic_plan, make_plan
 from app.orchestrator.runbus import BUS, END, Channel, RunBus
@@ -94,5 +94,6 @@ __all__ = [
     "heuristic_plan",
     "make_plan",
     "new_run_id",
+    "plain_thought",
     "thought",
 ]

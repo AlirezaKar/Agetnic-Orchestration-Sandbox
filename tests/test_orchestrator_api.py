@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.config import Settings, get_settings
-from app.llm.base import ModelResponse
+from app.llm.base import ModelResponse, ToolCall
 from app.search.base import SearchResponse, SearchResult
 
 
@@ -504,6 +504,87 @@ class OrchestrateStreamTests(_ApiCase):
         self.assertEqual(listed[0]["turns"], 1)
         turns = self.client.get(f"/sessions/{listed[0]['session_id']}").json()
         self.assertTrue(turns["turns"][0]["assistant"]["ok"])
+
+    # The live bug, end to end: an agent that really calls web_search, so the
+    # trace records ``tool_calls: 1`` (a count, not a list) on its last event.
+    # v0.15.0 answered that with a 500 in the middle of the run.
+    def test_a_run_that_really_uses_a_tool_streams_to_the_answer(self):
+        class ToolModel:
+            providers: list = []
+            skipped: dict = {}
+
+            async def complete(self, messages, tools=None, **kwargs):
+                used = any(message.get("role") == "tool" for message in messages)
+                if tools and not used:
+                    return ModelResponse(
+                        content="",
+                        provider="fake",
+                        model="fake-1",
+                        usage={},
+                        tool_calls=[ToolCall(name="web_search", arguments={"query": "latest release"})],
+                    )
+                return ModelResponse(
+                    content="Python 3.14 is the latest (https://python.org/downloads).",
+                    provider="fake",
+                    model="fake-1",
+                    usage={},
+                )
+
+        with mock.patch.object(main_module, "build_chain", lambda settings=None: ToolModel()):
+            frames = self.frames({"message": "What is the latest Python release? Cite sources."})
+
+        self.assertEqual(frames[-1][0], "result")
+        body = frames[-1][1]
+        self.assertTrue(body["answer"].startswith("Python 3.14"))
+        self.assertEqual(body["orchestration"]["agents"][0]["tool_calls"], 1)
+
+        thoughts = [item for kind, item in frames if kind == "thought"]
+        search = [item for item in thoughts if item["group"] == "agent:search"]
+        self.assertTrue(any(item["kind"] == "tool" for item in search), "the tool call should be a thought")
+        finished = [item for item in search if "finished" in item["title"].lower()]
+        self.assertTrue(finished, "the agent should report how it ended")
+        # the count must not be mistaken for a list of calls
+        self.assertNotIn("tools", finished[0]["detail"])
+        self.assertEqual(finished[0]["detail"]["status"], "ok")
+
+    def test_a_projection_that_raises_costs_one_thought_not_the_run(self):
+        """A thought is decoration; the answer must still arrive."""
+        real = main_module.live_thought
+        calls = {"n": 0}
+
+        def flaky(event):
+            calls["n"] += 1
+            if calls["n"] == 3:  # exactly one event explodes
+                raise TypeError("'int' object is not iterable")
+            return real(event)
+
+        with mock.patch.object(main_module, "live_thought", flaky):
+            frames = self.frames({"message": "Explain closures in JavaScript."})
+        self.assertGreater(calls["n"], 3)
+        self.assertEqual(frames[-1][0], "result")
+        self.assertTrue(frames[-1][1]["answer"])
+        thoughts = [body for kind, body in frames if kind == "thought"]
+        self.assertEqual(len(thoughts), calls["n"])  # the failed one became a plain line
+        plain = [item for item in thoughts if item["detail"] == {}]
+        self.assertTrue(plain, "the fallback thought should be in the stream")
+
+    def test_the_event_shape_that_broke_0_15_0_projects_cleanly(self):
+        """``tool_calls`` is a count on the agent-finished event (the live crash)."""
+        from app.orchestrator.live import thought
+
+        finished = {
+            "seq": 9,
+            "stage": "agent",
+            "actor": "search",
+            "title": "Web researcher finished: ok",
+            "offset_ms": 812,
+            "at": "2026-11-04T10:34:45+00:00",
+            "detail": {"status": "ok", "latency_ms": 812, "wave": 1, "tool_calls": 1, "model_calls": 2},
+        }
+        out = thought(finished)
+        self.assertEqual(out["kind"], "note")
+        self.assertEqual(out["detail"]["status"], "ok")
+        self.assertNotIn("tools", out["detail"])
 
     def test_the_bus_is_cleaned_up_after_the_stream(self):
         from app.orchestrator.runbus import BUS

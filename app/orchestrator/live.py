@@ -75,6 +75,16 @@ def category_for(event: dict[str, Any]) -> tuple[str, str, str]:
     return "manager", "manager", "Manager"
 
 
+def _is_list(value: Any) -> bool:
+    """A non-empty list — the shape every "rows" field is expected to have.
+
+    The trace repeats field names with different shapes (``tool_calls`` is a list
+    of calls on a model step and a plain count on the "agent finished" event), so
+    every collection is checked here instead of trusted.
+    """
+    return isinstance(value, (list, tuple)) and bool(value)
+
+
 def _clip(text: Any, limit: int) -> str:
     value = str(text or "")
     if len(value) <= limit:
@@ -127,21 +137,26 @@ def _kind_and_text(
         return "tool", tool
 
     if stage == "evaluate":
-        items = detail.get("items") or []
-        if items:
+        items = detail.get("items")
+        rows = [item for item in items if isinstance(item, dict)] if _is_list(items) else []
+        if rows:
             scored = ", ".join(
-                f"{item.get('label') or item.get('agent')} {item.get('score')}/5"
-                for item in items
-                if isinstance(item, dict)
+                f"{item.get('label') or item.get('agent')} {item.get('score')}/5" for item in rows
             )
             summary = str(detail.get("summary") or "")
             text = f"{summary} — {scored}" if summary else scored
-            if detail.get("gaps"):
-                text += " · gaps: " + ", ".join(str(gap) for gap in detail["gaps"][:3])
+            gaps = detail.get("gaps")
+            if _is_list(gaps):
+                text += " · gaps: " + ", ".join(str(gap) for gap in gaps[:3])
+            elif isinstance(gaps, str) and gaps.strip():
+                text += " · gaps: " + gaps.strip()
             return "verdict", _clip(text, limit)
         if detail.get("before") or detail.get("chars_before") is not None:
-            issues = detail.get("issues") or []
-            why = "; ".join(str(issue) for issue in issues[:3]) or "tightened"
+            issues = detail.get("issues")
+            reasons = [str(issue) for issue in issues[:3]] if _is_list(issues) else []
+            if not reasons and isinstance(issues, str) and issues.strip():
+                reasons = [issues.strip()]
+            why = "; ".join(reasons) or "tightened"
             return "rewrite", _clip(
                 f"rewrote {detail.get('agent', '')}: {why} "
                 f"({detail.get('chars_before', 0)} → {detail.get('chars_after', 0)} chars)",
@@ -161,7 +176,7 @@ def _kind_and_text(
     if stage in ("run", "merge", "done"):
         agents = detail.get("agents")
         text = title
-        if isinstance(agents, list) and agents:
+        if _is_list(agents):
             text += " · " + ", ".join(str(agent) for agent in agents)
         if detail.get("reason"):
             text += " · " + str(detail["reason"])
@@ -199,9 +214,17 @@ def _detail_out(
         if value is None or value == "" or value == []:
             continue
         out[key] = _clip(value, limit) if isinstance(value, str) else value
-    if isinstance(detail.get("agents"), list):
-        out["agents"] = [str(agent) for agent in detail["agents"]][:8]
-    if isinstance(detail.get("items"), list):
+    # Every field below is repeated elsewhere in the trace with a *different*
+    # shape: ``tool_calls`` is a list of calls on a model step and a plain count
+    # on the "agent finished" event, and the rest can arrive as a string or a
+    # dict when an agent degrades. A projection may never raise — a thought is
+    # decoration, the run is the product — so each one is checked, not assumed.
+    agents = detail.get("agents")
+    if _is_list(agents):
+        out["agents"] = [str(agent) for agent in agents][:8]
+
+    items = detail.get("items")
+    if _is_list(items):
         out["items"] = [
             {
                 "agent": item.get("agent"),
@@ -210,18 +233,51 @@ def _detail_out(
                 "score": item.get("score"),
                 "revised": bool(item.get("revised")),
             }
-            for item in detail["items"]
+            for item in items
             if isinstance(item, dict)
         ]
-    if detail.get("gaps"):
-        out["gaps"] = [str(gap) for gap in detail["gaps"]][:4]
-    if detail.get("tool_calls"):
+
+    gaps = detail.get("gaps")
+    if _is_list(gaps):
+        out["gaps"] = [str(gap) for gap in gaps][:4]
+    elif isinstance(gaps, str) and gaps.strip():
+        out["gaps"] = [gaps.strip()][:4]
+
+    tools = detail.get("tool_calls")
+    if _is_list(tools):
         out["tools"] = [
             str(call.get("name") or "")
-            for call in detail["tool_calls"]
+            for call in tools
             if isinstance(call, dict)
         ][:6]
     return out
+
+
+def plain_thought(event: dict[str, Any]) -> dict[str, Any]:
+    """The smallest honest thought: who, when, and the title.
+
+    Nothing here can raise — it is the fallback the stream uses when projecting
+    an event fails, so one odd payload cannot cost the watcher the whole run.
+    """
+    try:
+        category, group, label = category_for(event)
+    except Exception:  # pragma: no cover - category_for only reads strings
+        category, group, label = "manager", "manager", "Manager"
+    title = str(event.get("title") or "")
+    return {
+        "seq": event.get("seq"),
+        "stage": event.get("stage"),
+        "actor": event.get("actor"),
+        "category": category,
+        "group": group,
+        "label": label,
+        "kind": "status",
+        "title": title,
+        "text": _clip(title, THOUGHT_CHARS),
+        "offset_ms": event.get("offset_ms", 0),
+        "at": event.get("at", ""),
+        "detail": {},
+    }
 
 
 def thought(event: dict[str, Any], *, limit: int = THOUGHT_CHARS) -> dict[str, Any]:

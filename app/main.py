@@ -49,6 +49,7 @@ from app.orchestrator import (
     decode_payload,
     new_run_id,
     runlog,
+    plain_thought,
     thought as live_thought,
 )
 from app.search.registry import build_search_chain, describe_search_providers
@@ -844,6 +845,27 @@ def _sse(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
+def _project(event: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Project one trace event, never raising.
+
+    A thought is decoration; the run is the product. If an event carries a shape
+    the projection did not expect, the watcher gets the plain line (who + what)
+    and a warning goes to the log — the stream keeps going and the answer still
+    arrives. This is the counterpart of the ``try/except`` around ``trace.sink``.
+    """
+    try:
+        return live_thought(event)
+    except Exception:  # noqa: BLE001 - a watcher must never break a run
+        logs.get_logger("orchestrator").warning(
+            "stream run=%s: could not project trace event %r (%s)",
+            run_id,
+            event.get("title"),
+            event.get("stage"),
+            exc_info=True,
+        )
+        return plain_thought(event)
+
+
 def _reap_stream_run(task: asyncio.Task) -> None:
     """A run whose reader left still finishes; keep its outcome out of the void."""
     if task.cancelled():
@@ -884,7 +906,7 @@ async def _stream_run(
             # the way out; a quiet stretch is a keep-alive, not a stall
             event = await channel.next(timeout=0.25)
             if event is not None:
-                yield _sse("thought", live_thought(event))
+                yield _sse("thought", _project(event, run_id))
                 last_ping = 0.0
                 continue
             if task.done():
