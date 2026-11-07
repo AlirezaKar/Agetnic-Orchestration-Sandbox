@@ -42,6 +42,15 @@ Typical host wiring — this is all ``app/main.py`` does::
 """
 
 from app.orchestrator.agents import AgentContext, AgentOutcome, catalogue
+from app.orchestrator.audit import (
+    LEVELS as AUDIT_LEVELS,
+    catalogue as audit_catalogue,
+    load_latest as load_audit,
+    run_audit,
+    scorecard_markdown as audit_markdown,
+    write_scorecard as write_audit,
+)
+
 from app.orchestrator.contracts import (
     AgentLoop,
     AgentLoopFactory,
@@ -70,6 +79,7 @@ __all__ = [
     "AgentLoop",
     "AgentLoopFactory",
     "AgentOutcome",
+    "AUDIT_LEVELS",
     "Attachment",
     "AttachmentStore",
     "FileError",
@@ -88,12 +98,17 @@ __all__ = [
     "RunTrace",
     "SearchChain",
     "agent_catalogue",
+    "audit_catalogue",
+    "audit_markdown",
     "catalogue",
     "decode_payload",
     "extract",
     "heuristic_plan",
+    "load_audit",
     "make_plan",
     "new_run_id",
     "plain_thought",
+    "run_audit",
     "thought",
+    "write_audit",
 ]

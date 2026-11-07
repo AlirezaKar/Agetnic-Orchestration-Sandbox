@@ -23,6 +23,12 @@ A small backend skeleton where **the model is pluggable** (free providers only) 
   verdict behind it. The answer still arrives once, in its own bubble.
 - Built-in way to **verify** all of it: `python -m scripts.doctor`, `GET /diagnose`,
   `GET /search/diagnose`, plus an offline test suite.
+- **You can evaluate the orchestration itself**: the **Evaluate** button (or
+  `POST /audit/run`) runs eighteen checks over the real pipeline — selection,
+  briefs, waves, isolation, timeouts, the evaluator gate, the review loop, the
+  record, the stream, grounding, repeatability, odd input — one by one, offline,
+  in about a third of a second, and hands back one scorecard as rows on screen
+  and as JSON (`logs/audit/<audit_id>.json`, §5 Evaluating the orchestration).
 
 > Note: this repository was an empty stub (`README.md` only) when this work started, so the
 > whole backend was scaffolded here rather than patched. Everything below is new code.
@@ -394,6 +400,7 @@ record: `agents[i].answer` (what the agent said) and `agents[i].optimized`
 | Evaluator | `app/orchestrator/evaluator.py` | scores each report (verdict, 1–5, issues), names the gaps, rewrites the weak ones; rules-only when there is no model |
 | Agents | `app/orchestrator/agents.py` | document / search / data / general, one signature, one result type |
 | Trace | `app/orchestrator/trace.py` | every step of the run: prompts, tool calls, tool results, replies |
+| **Self-audit** | `app/orchestrator/audit.py` | eighteen checks over the parts above, through scripted ports: one scorecard, no key, no network |
 | Run log | `app/orchestrator/runlog.py` | one unclipped JSON record per run in `logs/orchestrator/` |
 | Memory | `app/memory.py` | the conversation itself: every user turn + answer in `memory/`, replayable |
 | Attachments | `app/orchestrator/files.py` | upload decoding, extraction, on-disk store |
@@ -623,6 +630,65 @@ consent pending, orchestrator disabled) are still plain JSON with their status
 code, so nothing is streamed for a request that never started. `POST
 /orchestrate` keeps working exactly as before for scripts.
 
+### Evaluating the orchestration itself (the Evaluate button)
+
+Everything above answers *what did this run do*. The audit answers a different
+question: **is the machine that produced it still sound?** It runs the real
+pipeline through its four ports with scripted models, search and agent loops,
+so it needs **no key and no network**, finishes in about a third of a second,
+and never writes a run record or touches the conversation memory.
+
+Press **Evaluate** in the top bar (or `POST /audit/run`). The panel lists all
+eighteen checks *before* anything runs, then fills them in one at a time as the
+verdicts land — a check per part of the machine, not one global score:
+
+| Level | What it proves |
+|---|---|
+| `plan` | selection coverage on a golden set, model-written briefs (and the fallback when the model's JSON is broken), wave scheduling incl. dependency chains and cycles |
+| `execute` | a failing agent is isolated, a slow one is fenced by the timeout, a dependent step really runs in a later wave |
+| `gate` | the no-model evaluator's verdicts, and that a rewrite cannot drop a URL the report had |
+| `manager` | one agent means no review; a real review runs once and is capped; with no model the manager merges instead of inventing |
+| `record` | the run record serialises with every promised field; the live stream delivers each event once, in order, projectable |
+| `outcome` | the answer cites only sources the run found; the same request plans identically five times |
+| `robust` | a 200 000-character file, an empty prompt, an invented agent name; instructions hidden in an attachment cannot re-plan the run |
+| `live` | *(opt-in)* LLM planner vs the rules, and the per-stage cost of a real run — `skip` with the reason when no key is set |
+
+```
+GET  /audit          the catalogue + the last scorecard (what the panel shows on open)
+POST /audit/run      run every check → the scorecard ({"live": true} adds the live ones)
+GET  /audit/stream   the same run, streamed: open · start · check · result · error
+GET  /audit/last     the newest scorecard on disk
+```
+
+Each check reports `status` (`pass` · `warn` · `fail` · `skip`), the `detail`
+sentence you read in the row, `ms`, `metrics` (the numbers the verdict came
+from, shown in the row's *metrics* disclosure) and `findings` (every line the
+verdict rests on). The whole scorecard is one JSON object, shown in the panel's
+JSON tab, copyable, downloadable, and written to `logs/audit/`:
+
+```
+logs/audit/<audit_id>.json     the machine record (and latest.json, a copy)
+logs/audit/<audit_id>.md       the same as a markdown table, for a changelog or a diff
+```
+
+From a terminal, for CI:
+
+```bash
+python -m scripts.audit                 # table, exit 1 on any failure
+python -m scripts.audit --json          # scorecard on stdout
+python -m scripts.audit --live          # also the two checks that call a model
+python -m scripts.audit --only gate.rules,plan.waves
+```
+
+Two rules make the result trustworthy. **A check never calls the network**, so a
+red line always means the code changed rather than a provider having a bad
+minute. And **a check that raises is reported as a failure, not an exception** —
+the audit survives its own bugs and shows you the traceback as a finding.
+
+Because the checks exercise the ports rather than the vendors, they are the
+orchestration layer's own tests: swap the model provider, the search backend or
+the file store, and the audit still describes *your* orchestration.
+
 ### Attachments
 
 `POST /files {"name", "data_b64"}` (the UI base64-encodes what the browser
@@ -747,6 +813,10 @@ in-process memory and reports `writable: false` in `/health`.
 | `POST` | `/files/{id}/consent` | the user's answer: `{"granted": true}` allows, `false` deletes (§5 Attachments) |
 | `DELETE` | `/files/{id}` | remove one attachment |
 | `GET` | `/agents` | agent roster, planner mode, evaluator/review/synthesis flags, readiness |
+| `GET` | `/audit` | the self-audit catalogue + the last scorecard (§5 Evaluating the orchestration) |
+| `POST` | `/audit/run` | run every check offline (scripted ports) → scorecard; `{"live": true}` adds the model checks, `{"only": [...]}` narrows it |
+| `GET` | `/audit/stream` | the same run as SSE (`open`, `start`, `check`, `result`, `error`) — what the Evaluate panel reads |
+| `GET` | `/audit/last` | the newest scorecard from `logs/audit/` |
 | `GET` | `/runs` | recent orchestration runs from `logs/orchestrator/` (plan, agents, model calls, timing) |
 | `GET` | `/runs/{run_id}` | one run, full unclipped trace (prompts, tool calls, results) |
 | `GET` | `/sessions` | conversations in memory (title, turns, last message, `?q=` filter) |
