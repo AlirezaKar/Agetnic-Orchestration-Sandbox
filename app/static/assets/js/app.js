@@ -3115,6 +3115,475 @@
     });
   }
 
+  /* ─────────────────────── self-audit (Evaluate) ───────────── */
+  // One button, eighteen checks, one scorecard. The list is known before a run
+  // (GET /audit), so the panel opens as a visible checklist instead of a
+  // spinner; a run then fills each row as its verdict lands. Offline by
+  // default — the checks drive the real pipeline through scripted ports — and
+  // the two live checks are opt-in and skip loudly when no key is configured.
+  const AUDIT = {
+    specs: [],
+    levels: [],
+    results: {},      // id → check record from the current/last run
+    running: false,
+    tab: "results",
+    card: null,
+    live: false,
+    liveAvailable: false,
+    queue: [],        // verdicts waiting to be revealed, one at a time
+    draining: null,
+    pending: null,    // the finished scorecard, held until the last row is shown
+    startedAt: 0,
+  };
+
+  function auditTone(status) {
+    if (status === "pass") return "ok";
+    if (status === "warn") return "warn";
+    if (status === "fail") return "bad";
+    return "";
+  }
+
+  function auditTotal() {
+    return AUDIT.specs.length;
+  }
+
+  function auditSettled() {
+    return Object.keys(AUDIT.results).length;
+  }
+
+  function auditSpec(id) {
+    return AUDIT.specs.find((spec) => spec.id === id) || null;
+  }
+
+  function auditMetricsValue(value) {
+    if (value === null || value === undefined) return "—";
+    if (typeof value === "boolean") return value ? "yes" : "no";
+    if (Array.isArray(value)) return value.length ? value.join(", ") : "—";
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
+  }
+
+  function auditRow(spec, result) {
+    const status = result ? result.status : AUDIT.running ? "queued" : "queued";
+    const row = el("div", "audit-row");
+    row.dataset.status = status;
+    row.dataset.id = spec.id;
+    row.appendChild(el("span", "audit-dot"));
+
+    const main = el("div", "audit-row-main");
+    const title = el("div", "audit-row-title");
+    title.appendChild(el("span", null, spec.title));
+    title.appendChild(el("code", null, spec.id));
+    main.appendChild(title);
+    main.appendChild(el("div", "audit-row-proves", spec.proves));
+
+    if (result && result.detail) main.appendChild(el("div", "audit-row-detail", result.detail));
+    if (result && result.findings && result.findings.length) {
+      const list = el("ul", "audit-row-findings");
+      result.findings.slice(0, 6).forEach((finding) => list.appendChild(el("li", null, finding)));
+      main.appendChild(list);
+    }
+
+    const meta = el("div", "audit-row-meta");
+    if (spec.needs && spec.needs !== "nothing") {
+      const chip = el("span", "audit-chip");
+      chip.appendChild(document.createTextNode("needs "));
+      chip.appendChild(el("b", null, spec.needs));
+      meta.appendChild(chip);
+    }
+    if (spec.live) meta.appendChild(el("span", "audit-chip", "live"));
+    if (result && result.metrics && Object.keys(result.metrics).length) {
+      const details = el("details", "audit-metrics");
+      details.appendChild(el("summary", null, "metrics"));
+      const table = el("table");
+      Object.keys(result.metrics).forEach((key) => {
+        const tr = el("tr");
+        tr.appendChild(el("th", null, key));
+        tr.appendChild(el("td", null, auditMetricsValue(result.metrics[key])));
+        table.appendChild(tr);
+      });
+      details.appendChild(table);
+      main.appendChild(details);
+    }
+    if (meta.childNodes.length) main.appendChild(meta);
+    row.appendChild(main);
+    row.appendChild(el("span", "audit-row-ms", result ? String(result.ms) + " ms" : ""));
+
+    if (status === "fail") row.appendChild(el("span", "sr-only", "failed"));
+    return row;
+  }
+
+  function renderAudit() {
+    const host = $("audit-results");
+    if (!host) return;
+    host.textContent = "";
+    if (!AUDIT.specs.length) {
+      const empty = el("div", "audit-empty");
+      empty.appendChild(document.createTextNode("The audit catalogue did not load. "));
+      empty.appendChild(el("span", null, "Check the backend with Run diagnostics, then reopen this panel."));
+      host.appendChild(empty);
+      return;
+    }
+    const order = AUDIT.levels.length
+      ? AUDIT.levels
+      : [{ id: "plan", title: "Planning" }];
+    order.forEach((level) => {
+      const specs = AUDIT.specs.filter((spec) => spec.level === level.id);
+      if (!specs.length) return;
+      const group = el("div", "audit-level");
+      group.appendChild(el("div", "audit-level-head", level.title.split(" — ")[0]));
+      specs.forEach((spec) => group.appendChild(auditRow(spec, AUDIT.results[spec.id])));
+      host.appendChild(group);
+    });
+    renderAuditSummary();
+  }
+
+  function renderAuditSummary() {
+    const host = $("audit-summary");
+    if (!host) return;
+    const card = AUDIT.card;
+    host.textContent = "";
+    if (!card) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    const summary = card.summary || {};
+    const score = el("span", "audit-score " + (card.status || "pass"));
+    score.textContent =
+      (card.status === "pass" ? "✓ all clear" : card.status === "warn" ? "! warnings" : "× failures");
+    host.appendChild(score);
+    [
+      ["pass", summary.pass || 0],
+      ["warn", summary.warn || 0],
+      ["fail", summary.fail || 0],
+      ["skip", summary.skip || 0],
+    ].forEach(([name, count]) => {
+      const chip = el("span", "audit-chip");
+      chip.appendChild(document.createTextNode(name + " "));
+      chip.appendChild(el("b", null, String(count)));
+      host.appendChild(chip);
+    });
+    const time = el("span", "audit-chip");
+    time.appendChild(document.createTextNode("total "));
+    time.appendChild(el("b", null, (card.ms || 0) + " ms"));
+    host.appendChild(time);
+    const mode = el("span", "audit-chip");
+    mode.appendChild(document.createTextNode(card.environment && card.environment.live_models ? "live" : "offline"));
+    host.appendChild(mode);
+    if (card.audit_id) {
+      const id = el("span", "audit-chip");
+      id.appendChild(el("b", null, card.audit_id));
+      host.appendChild(id);
+    }
+    if (card.files && card.files.json) {
+      host.appendChild(el("span", "audit-chip", "saved · " + String(card.files.json).split("/").pop()));
+    }
+  }
+
+  function auditProgress() {
+    const total = auditTotal();
+    const settled = auditSettled();
+    const fill = $("audit-bar-fill");
+    if (fill) {
+      fill.style.width = total ? Math.round((settled / total) * 100) + "%" : "0%";
+      fill.classList.toggle("done", !AUDIT.running && settled === total && total > 0);
+    }
+    const count = $("audit-count");
+    if (!count) return;
+    if (AUDIT.running) {
+      const waiting = AUDIT.specs.find((spec) => !AUDIT.results[spec.id]);
+      count.textContent = settled + "/" + total + (waiting ? " · " + waiting.title.toLowerCase() + "…" : " · finishing…");
+      return;
+    }
+    if (AUDIT.card) {
+      count.textContent = settled + "/" + total + " · " + (AUDIT.card.ms || 0) + " ms";
+      return;
+    }
+    count.textContent = total ? "ready · " + total + " checks" : "idle";
+  }
+
+  function renderAuditJson() {
+    const view = $("audit-json");
+    if (!view) return;
+    view.textContent = AUDIT.card
+      ? JSON.stringify(AUDIT.card, null, 2)
+      : '{\n  "hint": "Run the audit to produce a scorecard."\n}';
+  }
+
+  function setAuditTab(tab) {
+    AUDIT.tab = tab === "json" ? "json" : "results";
+    document.querySelectorAll(".audit-tab").forEach((button) => {
+      const active = button.dataset.auditTab === AUDIT.tab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    const results = $("audit-results");
+    const json = $("audit-json");
+    if (results) results.classList.toggle("panel-hidden", AUDIT.tab !== "results");
+    if (json) json.classList.toggle("panel-hidden", AUDIT.tab !== "json");
+  }
+
+  function openAudit() {
+    const modal = $("audit-modal");
+    if (!modal) return;
+    modal.classList.remove("panel-hidden");
+    const live = $("audit-live");
+    if (live) {
+      live.checked = AUDIT.live;
+      live.disabled = !AUDIT.liveAvailable;
+      const wrap = $("audit-live-wrap");
+      if (wrap) {
+        wrap.classList.toggle("disabled", !AUDIT.liveAvailable);
+        wrap.title = AUDIT.liveAvailable
+          ? "Also call the configured model: planner agreement + stage latency"
+          : "No model provider configured — live checks would skip";
+      }
+    }
+    setAuditTab(AUDIT.tab);
+    renderAudit();
+    renderAuditJson();
+    auditProgress();
+    if (!AUDIT.specs.length) loadAuditCatalogue();
+    const run = $("btn-audit-run");
+    if (run) run.focus();
+  }
+
+  function closeAudit() {
+    const modal = $("audit-modal");
+    if (modal) modal.classList.add("panel-hidden");
+  }
+
+  async function loadAuditCatalogue() {
+    const { ok, data } = await api("/audit");
+    if (!ok) {
+      setBadge("badge-audit", "Audit  unavailable", "bad");
+      return;
+    }
+    AUDIT.specs = data.checks || [];
+    AUDIT.levels = data.levels || [];
+    AUDIT.liveAvailable = Boolean(data.live_available);
+    const env = data.environment || {};
+    const sub = $("audit-sub");
+    if (sub) {
+      // say what this host is wired to, so a skip is never a surprise
+      sub.textContent =
+        "Offline checks drive the real pipeline through scripted ports: no key, no network, under a second." +
+        " · planner " + (env.planner || "?") +
+        " · evaluator " + (env.evaluate === false ? "off" : "on") +
+        " · review " + (env.review === false ? "off" : "on") +
+        " · model " + (env.model_ready ? "ready" : "no key (live checks skip)");
+    }
+    if (data.last) {
+      applyAuditCard(data.last);
+    } else {
+      setBadge("badge-audit", "Audit: not run", "");
+    }
+    renderAudit();
+    renderAuditJson();
+    auditProgress();
+  }
+
+  function applyAuditCard(card, options) {
+    const quiet = options && options.quiet;
+    AUDIT.card = card;
+    AUDIT.results = {};
+    (card.checks || []).forEach((row) => {
+      AUDIT.results[row.id] = row;
+    });
+    AUDIT.running = false;
+    const summary = card.summary || {};
+    const total = summary.total || (card.checks || []).length;
+    let text = "Audit: " + (summary.pass || 0) + "/" + total + " pass";
+    if (summary.fail) text += " · " + summary.fail + " fail";
+    else if (summary.warn) text += " · " + summary.warn + " warn";
+    setBadge("badge-audit", text, auditTone(card.status));
+    renderAudit();
+    renderAuditJson();
+    auditProgress();
+    if (!quiet) {
+      const note = $("audit-note");
+      if (note) {
+        note.textContent =
+          "Scorecard saved to " +
+          ((card.files && card.files.json) || "logs/audit") +
+          " — and to latest.json, so the next version can be diffed against this one.";
+      }
+    }
+  }
+
+  // Verdicts arrive faster than a reader can follow (most checks take ~1 ms), so
+  // they are revealed one at a time. Ordering still matches the run: `start`
+  // marks the row that is running, the drain reveals the finished ones.
+  function queueAuditReveal(record) {
+    AUDIT.queue.push(record);
+    if (AUDIT.draining) return;
+    AUDIT.draining = setInterval(() => {
+      const next = AUDIT.queue.shift();
+      if (!next) {
+        clearInterval(AUDIT.draining);
+        AUDIT.draining = null;
+        // the verdicts are all on screen: publish the scorecard they came from
+        if (AUDIT.pending) finishAudit();
+        return;
+      }
+      if (AUDIT.results[next.id]) return;
+      AUDIT.results[next.id] = next;
+      renderAudit();
+      auditProgress();
+    }, 90);
+  }
+
+  function finishAudit() {
+    const card = AUDIT.pending;
+    AUDIT.pending = null;
+    if (!card) return;
+    applyAuditCard(card);
+    const summary = card.summary || {};
+    toast(
+      "Audit finished: " + (summary.pass || 0) + " passed" +
+        (summary.skip ? " · " + summary.skip + " skipped" : "") +
+        (summary.fail ? " · " + summary.fail + " failed" : ""),
+      auditTone(card.status) || ""
+    );
+  }
+
+  async function runAudit() {
+    if (AUDIT.running) return;
+    AUDIT.running = true;
+    AUDIT.card = null;
+    AUDIT.results = {};
+    AUDIT.queue = [];
+    AUDIT.pending = null;
+    AUDIT.startedAt = performance.now();
+    if (AUDIT.draining) {
+      clearInterval(AUDIT.draining);
+      AUDIT.draining = null;
+    }
+    setBadge("badge-audit", "Audit  running…", "warn");
+    renderAudit();
+    renderAuditSummary();
+    renderAuditJson();
+    auditProgress();
+
+    const live = AUDIT.live && AUDIT.liveAvailable;
+    const path = "/audit/stream" + (live ? "?live=1" : "");
+    let response;
+    try {
+      response = await fetch(apiUrl(path), { headers: { Accept: "text/event-stream" } });
+    } catch (error) {
+      AUDIT.running = false;
+      setBadge("badge-audit", "Audit  failed", "bad");
+      toast("Cannot reach the backend: " + error.message, "bad");
+      renderAudit();
+      return;
+    }
+    if (!response.ok) {
+      AUDIT.running = false;
+      setBadge("badge-audit", "Audit  failed", "bad");
+      toast("The audit did not start (HTTP " + response.status + ")", "warn");
+      renderAudit();
+      return;
+    }
+
+    let done = false;
+    const consume = (frame) => {
+      const parsed = readSseFrame(frame);
+      if (!parsed) return;
+      if (parsed.event === "start") {
+        const row = document.querySelector('.audit-row[data-id="' + parsed.data.id + '"]');
+        if (row) row.dataset.status = "running";
+        auditProgress();
+      } else if (parsed.event === "check") {
+        queueAuditReveal(parsed.data);
+      } else if (parsed.event === "result") {
+        done = true;
+        // hold the scorecard until the reveal queue has caught up, so the last
+        // rows animate in instead of the whole list snapping to its final state
+        AUDIT.pending = parsed.data;
+        if (!AUDIT.queue.length && !AUDIT.draining) finishAudit();
+      } else if (parsed.event === "error") {
+        done = true;
+        AUDIT.running = false;
+        AUDIT.pending = null;
+        AUDIT.queue = [];
+        setBadge("badge-audit", "Audit  failed", "bad");
+        toast(parsed.data.message || "The audit failed", "bad");
+        renderAudit();
+      }
+    };
+
+    if (!response.body || !response.body.getReader || typeof TextDecoder !== "function") {
+      (await response.text()).split("\n\n").forEach(consume);
+    } else {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        let chunk;
+        try {
+          chunk = await reader.read();
+        } catch (_) {
+          break;
+        }
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        let cut = buffer.indexOf("\n\n");
+        while (cut >= 0) {
+          consume(buffer.slice(0, cut));
+          buffer = buffer.slice(cut + 2);
+          cut = buffer.indexOf("\n\n");
+        }
+      }
+    }
+    if (!done && AUDIT.running) {
+      // the socket closed without a verdict: say so instead of spinning forever
+      AUDIT.running = false;
+      setBadge("badge-audit", "Audit  interrupted", "warn");
+      toast("The audit stream closed early", "warn");
+      renderAudit();
+      auditProgress();
+    }
+  }
+
+  function auditJsonText() {
+    return AUDIT.card ? JSON.stringify(AUDIT.card, null, 2) : "";
+  }
+
+  async function copyAuditJson() {
+    const text = auditJsonText();
+    if (!text) {
+      toast("Run the audit first", "warn");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Scorecard copied");
+    } catch (_) {
+      setAuditTab("json");
+      toast("Clipboard blocked — the JSON is in the JSON tab", "warn");
+    }
+  }
+
+  function downloadAuditJson() {
+    const text = auditJsonText();
+    if (!text) {
+      toast("Run the audit first", "warn");
+      return;
+    }
+    const name = (AUDIT.card.audit_id || "audit") + ".json";
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Downloaded " + name);
+  }
+
   /* ────────────────────────────── wire up ──────────────────── */
   function wire() {
     const retry = $("conn-banner-retry");
@@ -3197,6 +3666,24 @@
     on("btn-new-session", "click", newSession);
     on("btn-diag-top", "click", runDiagnostics);
     on("btn-diag-side", "click", runDiagnostics);
+    on("btn-audit-top", "click", openAudit);
+    on("btn-close-audit", "click", closeAudit);
+    on("btn-audit-close", "click", closeAudit);
+    on("btn-audit-run", "click", runAudit);
+    on("btn-audit-copy", "click", copyAuditJson);
+    on("btn-audit-download", "click", downloadAuditJson);
+    on("audit-live", "change", (event) => {
+      AUDIT.live = Boolean(event.target.checked);
+    });
+    document.querySelectorAll(".audit-tab").forEach((button) => {
+      button.addEventListener("click", () => setAuditTab(button.dataset.auditTab));
+    });
+    const auditBackdrop = $("audit-modal");
+    if (auditBackdrop) {
+      auditBackdrop.addEventListener("click", (event) => {
+        if (event.target === auditBackdrop) closeAudit();
+      });
+    }
     on("btn-providers", "click", openProviders);
     on("btn-providers-close", "click", closeProvidersModal);
     on("btn-close-providers", "click", closeProvidersModal);
@@ -3292,6 +3779,7 @@
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         closeProvidersModal();
+        closeAudit();
         const sidebar = $("sidebar");
         if (sidebar && sidebar.classList.contains("open")) sidebar.classList.remove("open");
       }
@@ -3330,6 +3818,7 @@
       loadProviders();
       loadAgents();
       loadRunLog();
+      loadAuditCatalogue();
       loadSessions().then(async () => {
         const last = store.getItem(STORAGE.session);
         if (last) await openSession(last);
@@ -3344,7 +3833,8 @@
           modes: MODES.map((mode) => mode.id),
           endpoints: [
             "/health", "/providers", "/agents", "/chat", "/orchestrate",
-            "/files", "/search", "/diagnose", "/search/diagnose",
+            "/files", "/search", "/diagnose", "/search/diagnose", "/audit", "/audit/run",
+            "/audit/stream",
             "/sessions", "/sessions/{id}",
           ],
         },

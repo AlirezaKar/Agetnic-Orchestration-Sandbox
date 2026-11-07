@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#090d14" />
-  <meta name="agetnic-version" content="0.15.1" />
+  <meta name="agetnic-version" content="0.16.0" />
   <meta name="description" content="Agentic Orchestration Studio — a controlled workspace for testing agent workflows, search providers and execution traces." />
   <title>Agetnic Orchestration Sandbox — Agentic Orchestration Studio</title>
   <script>
@@ -22,10 +22,10 @@
        stale caches after an upgrade. -->
   <!-- A data: icon keeps the browser from asking /favicon.ico at all. -->
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.15.1" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.15.1" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.16.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.16.0" />
   <!-- light palette: maps every colour of the dark design; loads last so it can win -->
-  <link rel="stylesheet" href="assets/css/theme.css?v=0.15.1" />
+  <link rel="stylesheet" href="assets/css/theme.css?v=0.16.0" />
 </head>
 <body>
   <!-- Connection / asset diagnostics: shown by app.js, never by the server -->
@@ -56,12 +56,17 @@
         <div class="status-pill" id="pill-llm"><span class="dot"></span><code id="badge-llm">LLM&nbsp; checking…</code></div>
         <div class="status-pill search-pill" id="pill-search"><span class="dot"></span><code id="badge-search">SEARCH&nbsp; checking…</code></div>
         <div class="status-pill" id="pill-diag"><span class="dot"></span><code id="badge-diag">Diag: not run</code></div>
+        <div class="status-pill" id="pill-audit"><span class="dot"></span><code id="badge-audit">Audit: not run</code></div>
         <button class="btn icon-only theme-toggle" id="btn-theme" aria-pressed="false"
                 title="Switch to light mode" aria-label="Switch to light mode">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><path d="M12 2.6v2.2M12 19.2v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.4 19.6 6 18M18 6l1.6-1.6"/></svg>
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5Z"/></svg>
         </button>
         <button class="btn" id="btn-providers">Providers</button>
+        <button class="btn" id="btn-audit-top" title="Check the orchestration itself: 18 checks, offline in about a second">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 4h6a1 1 0 0 1 1 1v1H8V5a1 1 0 0 1 1-1Z"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="m8.5 13.5 2.2 2.2 4.3-4.6"/></svg>
+          Evaluate
+        </button>
         <button class="btn" id="btn-diag-top">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13a8 8 0 1 0 2.4-5.7L4 9"/><path d="M4 4v5h5M12 8v4l3 2"/></svg>
           Run diagnostics
@@ -369,6 +374,57 @@
 
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
 
+  <!-- Self-audit: every part of the orchestration, checked one by one -->
+  <div class="modal-backdrop panel-hidden" id="audit-modal" role="presentation">
+    <section class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="audit-title">
+      <div class="modal-head">
+        <div class="audit-head">
+          <strong id="audit-title">Self-audit — the orchestration, part by part</strong>
+          <span class="audit-sub" id="audit-sub">Checks run offline against scripted ports: no key, no network, under a second.</span>
+        </div>
+        <button class="btn icon-only ghost" id="btn-close-audit" aria-label="Close self-audit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+
+      <div class="audit-toolbar">
+        <button class="btn primary" id="btn-audit-run">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 5.5v13l11-6.5-11-6.5Z"/></svg>
+          Run audit
+        </button>
+        <label class="audit-live" id="audit-live-wrap" title="Also call the configured model: planner agreement + stage latency">
+          <input type="checkbox" id="audit-live" />
+          <span>Include live model checks</span>
+        </label>
+        <div class="audit-progress">
+          <div class="audit-bar"><span id="audit-bar-fill"></span></div>
+          <span class="audit-count" id="audit-count">idle</span>
+        </div>
+        <div class="audit-tabs" role="tablist" aria-label="Audit views">
+          <button class="audit-tab active" type="button" role="tab" data-audit-tab="results" aria-selected="true">Results</button>
+          <button class="audit-tab" type="button" role="tab" data-audit-tab="json" aria-selected="false">JSON</button>
+        </div>
+        <button class="btn ghost" id="btn-audit-copy" title="Copy the scorecard as JSON">Copy JSON</button>
+        <button class="btn ghost" id="btn-audit-download" title="Download the scorecard">Download</button>
+      </div>
+
+      <div class="audit-summary" id="audit-summary" hidden></div>
+
+      <div class="modal-body audit-body">
+        <div id="audit-results" class="audit-results"></div>
+        <pre id="audit-json" class="json-view panel-hidden">{}</pre>
+      </div>
+
+      <div class="modal-foot">
+        <p class="modal-note" id="audit-note">
+          Offline checks drive the real pipeline through its four ports with scripted models,
+          so a red line means the code changed — never that a provider had a bad minute.
+        </p>
+        <button class="btn" id="btn-audit-close">Close</button>
+      </div>
+    </section>
+  </div>
+
   <!-- Providers modal: every free option with key/model links -->
   <div class="modal-backdrop panel-hidden" id="providers-modal" role="presentation">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="providers-title">
@@ -389,6 +445,6 @@
     </section>
   </div>
 
-  <script src="assets/js/app.js?v=0.15.1" defer></script>
+  <script src="assets/js/app.js?v=0.16.0" defer></script>
 </body>
 </html>

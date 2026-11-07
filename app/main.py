@@ -41,7 +41,12 @@ from app.search.base import SearchError
 from app.search.presets import SEARCH_PRESETS
 from app.search.providers import PROVIDER_CLASSES
 from app.orchestrator import (
+    AUDIT_LEVELS,
     BUS,
+    audit_catalogue,
+    load_audit,
+    run_audit,
+    write_audit,
     AttachmentStore,
     FileError,
     OrchestrationRequest,
@@ -158,6 +163,14 @@ class OrchestrateRequest(BaseModel):
     # store this exchange, both sides, exactly as the page rendered it.
     session_id: str | None = None
     remember: bool = True
+
+
+class AuditRequest(BaseModel):
+    """A self-audit run: offline by default, live only when asked for."""
+
+    live: bool = False
+    #: Restrict to these check ids (empty = every check).
+    only: list[str] = Field(default_factory=list)
 
 
 class SearchRequest(BaseModel):
@@ -974,6 +987,198 @@ async def orchestrate_stream(payload: OrchestrateRequest) -> Any:
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # nginx: do not buffer the stream
+        },
+    )
+
+
+# ---------------------------------------------------------------- self-audit
+def _audit_dir() -> Path:
+    """Where scorecards live: ``<logs>/audit``, beside the run records."""
+    return logs.log_dir() / "audit"
+
+
+def _describe(settings: Any) -> dict[str, Any]:
+    """What this host is wired to, never raising.
+
+    Offline checks need no port at all, and a host whose provider is
+    misconfigured must still be able to audit itself — so a failure to build the
+    ports is reported as "not ready", not as an error that hides the audit.
+    """
+    try:
+        return _orchestrator(settings).describe()
+    except Exception as exc:  # noqa: BLE001 - reported as a finding, not a crash
+        return {"model_ready": False, "search_ready": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _audit_ports(settings: Any) -> tuple[Any, Any]:
+    """The live ports for the opt-in checks; ``(None, None)`` when nothing is wired."""
+    describe = _describe(settings)
+    if not describe.get("model_ready"):
+        return None, None
+    try:
+        models = build_chain(settings)
+    except Exception:  # noqa: BLE001 - a broken provider is exactly what the audit reports
+        return None, None
+    search = None
+    if describe.get("search_ready"):
+        try:
+            search = build_search_chain(settings)
+        except Exception:  # noqa: BLE001 - live search checks degrade to "no search"
+            search = None
+    return models, search
+
+
+async def _audit_and_save(
+    settings: Any,
+    *,
+    live: bool,
+    only: list[str] | None = None,
+    on_event: Any = None,
+) -> dict[str, Any]:
+    """Run the audit, write the scorecard, and return it with the file paths."""
+    models, search = _audit_ports(settings) if live else (None, None)
+    scorecard = await run_audit(
+        settings,
+        live=live,
+        models=models,
+        search=search,
+        only=only or None,
+        on_event=on_event,
+        version=VERSION,
+    )
+    scorecard["files"] = write_audit(scorecard, _audit_dir())
+    scorecard["live_available"] = bool(_describe(settings).get("model_ready"))
+    return scorecard
+
+
+@router.get("/audit")
+async def audit_catalogue_route() -> dict[str, Any]:
+    """What the self-audit checks, plus the last scorecard.
+
+    Static and free: the page calls this on load to label the button ("18 checks,
+    last run passed") without running anything.
+    """
+    settings = get_settings()
+    describe = _describe(settings)
+    checks = audit_catalogue()
+    return {
+        "version": VERSION,
+        "total": len(checks),
+        "checks": checks,
+        "levels": [{"id": level, "title": title} for level, title in AUDIT_LEVELS],
+        "last": load_audit(_audit_dir()),
+        "live_available": bool(describe.get("model_ready")),
+        "environment": {
+            "model_ready": bool(describe.get("model_ready")),
+            "search_ready": bool(describe.get("search_ready")),
+            "planner": str(getattr(settings, "orchestrator_planner", "")),
+            "evaluate": bool(getattr(settings, "orchestrator_evaluate", False)),
+            "review": bool(getattr(settings, "orchestrator_review", False)),
+        },
+    }
+
+
+@router.post("/audit/run")
+async def audit_run(payload: AuditRequest | None = None) -> Any:
+    """Run every check and return the scorecard (JSON, plus a markdown twin on disk).
+
+    Offline by default: the checks drive the real pipeline through scripted ports,
+    so this needs no key, no network and no patience — it finishes in well under a
+    second. ``live: true`` adds the two checks that call a real model, and those
+    report ``skip`` (with the reason) when no provider is configured.
+    """
+    settings = get_settings()
+    request = payload or AuditRequest()
+    return await _audit_and_save(settings, live=request.live, only=request.only)
+
+
+@router.get("/audit/last")
+async def audit_last() -> Any:
+    """The newest scorecard on disk — the audit trail a version can be judged by."""
+    latest = load_audit(_audit_dir())
+    if latest is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "no_audit",
+                "message": "No self-audit has run yet.",
+                "hint": "POST /audit/run, or press Evaluate in the page.",
+            },
+        )
+    return latest
+
+
+async def _stream_audit(settings: Any, *, live: bool, only: list[str]) -> Any:
+    """Run the audit and relay each check as it finishes.
+
+    Frames: ``open`` (how many checks), ``start`` (one check began), ``check``
+    (its verdict, metrics and findings), ``result`` (the whole scorecard — the
+    same body ``POST /audit/run`` returns), ``error`` when the audit itself fails.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def publish(event: dict[str, Any]) -> None:
+        queue.put_nowait(event)
+
+    task = asyncio.create_task(
+        _audit_and_save(settings, live=live, only=only, on_event=publish)
+    )
+    last_ping = 0.0
+    try:
+        yield _sse("open", {"total": len(audit_catalogue()), "live": live})
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=0.25)
+            except asyncio.TimeoutError:
+                event = None
+            if event is not None:
+                if event.get("type") == "done":
+                    # the scorecard travels in the result frame, not as a duplicate
+                    continue
+                body = {key: value for key, value in event.items() if key != "type"}
+                yield _sse(str(event.get("type") or "check"), body)
+                last_ping = 0.0
+                continue
+            if task.done():
+                break
+            now = time.monotonic()
+            if now - last_ping > 10.0:
+                last_ping = now
+                yield ": ping\n\n"
+        try:
+            scorecard = await task
+        except Exception as exc:  # noqa: BLE001 - the stream must end, not hang
+            logs.get_logger("orchestrator").exception("self-audit failed")
+            yield _sse(
+                "error",
+                {
+                    "error": "internal",
+                    "message": f"The audit failed: {type(exc).__name__}: {exc}",
+                    "hint": "logs/error.log has the traceback.",
+                },
+            )
+            return
+        yield _sse("result", scorecard)
+    finally:
+        if not task.done():
+            task.add_done_callback(_reap_stream_run)
+
+
+@router.get("/audit/stream")
+async def audit_stream(live: bool = False, only: str = "") -> Any:
+    """The audit, streamed check by check (``text/event-stream``).
+
+    The page uses this so the list fills in as the checks finish instead of
+    freezing on a spinner; the final frame is the same scorecard as the POST.
+    """
+    checks = [item.strip() for item in only.split(",") if item.strip()]
+    return StreamingResponse(
+        _stream_audit(get_settings(), live=live, only=checks),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         },
     )
 

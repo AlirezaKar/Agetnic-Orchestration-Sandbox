@@ -68,7 +68,7 @@ async def _run_one(
                 status="failed",
                 task=step.task,
                 reason=step.reason,
-                error=f"timed out after {timeout:.0f}s",
+                error=f"timed out after {timeout:g}s",
                 hint="Raise ORCHESTRATOR_TIMEOUT, or ask a narrower question.",
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
