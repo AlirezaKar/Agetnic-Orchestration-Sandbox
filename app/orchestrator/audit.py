@@ -1106,19 +1106,27 @@ async def robust_injection(ctx: AuditContext) -> Result:
 @check(
     "live.planner",
     "live",
-    "LLM planner vs rules",
-    "the model planner agrees with the rules often enough to be worth its latency",
+    "LLM planner vs the golden set",
+    "the model planner covers the agents a request cannot be answered without",
     needs="a model provider (key + model in .env)",
     live=True,
 )
 async def live_planner(ctx: AuditContext) -> Result:
+    """Score the model planner the way ``plan.selection`` scores the rules.
+
+    Exact set equality with the rules is the wrong bar — the model is allowed
+    to disagree with the heuristics, it is not allowed to miss an agent the
+    request cannot be answered without, or pick one the request rules out.
+    A reply the parser rejects falls back to the rules; that counts against
+    the model, and five fallbacks mean the model planner never planned at all.
+    """
     if ctx.live_models is None:
         return skipped("no model provider — set a key in .env to run this check")
     started = time.perf_counter()
-    agreements = 0
-    details: list[str] = []
     sample = GOLDEN_PLAN[:5]
-    for message, expected, with_file in sample:
+    required = covered = contradictions = fallbacks = 0
+    details: list[str] = []
+    for message, must, must_not, with_file in sample:
         attachments = [extract(*CONTRACT)] if with_file else []
         plan = await make_plan(
             message,
@@ -1128,17 +1136,40 @@ async def live_planner(ctx: AuditContext) -> Result:
             strategy="llm",
         )
         got = set(plan.agents)
-        agreements += int(got == expected)
-        if got != expected:
-            details.append(f"{message[:44]!r}: rules {sorted(expected)} vs model {sorted(got)}")
+        if plan.detail_source != "llm":
+            fallbacks += 1
+        required += len(must)
+        covered += len(must & got)
+        contradictions += len(must_not & got)
+        if must - got:
+            details.append(f"{message[:44]!r}: missed {sorted(must - got)}")
+        if must_not & got:
+            details.append(f"{message[:44]!r}: picked {sorted(must_not & got)} (ruled out)")
     ms = int((time.perf_counter() - started) * 1000)
-    rate = agreements / len(sample)
-    metrics = {"prompts": len(sample), "agreement": round(rate, 3), "ms": ms,
-               "ms_per_plan": round(ms / max(len(sample), 1))}
-    detail = f"{agreements}/{len(sample)} plans agreed with the rules ({metrics['ms_per_plan']} ms each)"
-    if rate >= 0.8:
+    coverage = covered / required if required else 1.0
+    metrics = {
+        "prompts": len(sample),
+        "coverage": round(coverage, 3),
+        "required_agents": required,
+        "missed_agents": required - covered,
+        "contradictions": contradictions,
+        "fallbacks_to_rules": fallbacks,
+        "ms": ms,
+        "ms_per_plan": round(ms / max(len(sample), 1)),
+    }
+    detail = (
+        f"coverage {coverage:.0%} of {required} required agents · "
+        f"{contradictions} contradiction(s) · {metrics['ms_per_plan']} ms per plan"
+    )
+    if fallbacks == len(sample):
+        return warn(
+            "every model reply was unusable — the rules planned instead",
+            details,
+            **metrics,
+        )
+    if coverage >= 0.9 and contradictions <= 1:
         return ok(detail, **metrics)
-    if rate >= 0.6:
+    if coverage >= 0.7:
         return warn(detail, details, **metrics)
     return bad(detail, details, **metrics)
 

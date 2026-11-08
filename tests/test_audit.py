@@ -40,6 +40,34 @@ def audit_sync(*args, **kwargs):
     return asyncio.run(run_audit(*args, **kwargs))
 
 
+class GoldenPlanner:
+    """A scripted 'provider' that answers the planner prompt from the golden set.
+
+    It finds the golden prompt inside the request and replies with exactly the
+    agents that prompt cannot be answered without (or a fixed roster when
+    ``agents`` is given), so the live planner checks can run with no key.
+    """
+
+    def __init__(self, agents: list[str] | None = None):
+        self.agents = agents
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, **kwargs):
+        self.calls += 1
+        text = str(messages[-1].get("content", ""))
+        picked = list(self.agents or [])
+        if not picked:
+            for message, must, _must_not, _with_file in audit.GOLDEN_PLAN:
+                if message in text:
+                    picked = sorted(must)
+                    break
+        steps = [
+            {"agent": agent, "task": f"scripted task for {agent}", "reason": "golden set"}
+            for agent in (picked or ["general"])
+        ]
+        return audit._Reply(json.dumps({"steps": steps}))
+
+
 def settings_for(tmp: str, **overrides) -> Settings:
     base = dict(
         _env_file=None,
@@ -125,6 +153,58 @@ class AuditEngineTests(unittest.TestCase):
             self.assertEqual(row["status"], "skip")
             self.assertIn("key", row["detail"].lower())
         self.assertTrue(card["live_requested"])
+
+    def test_the_live_checks_run_offline_with_a_scripted_planner(self) -> None:
+        """The regression that shipped in 0.16.0: ``live.planner`` was only ever
+        executed on a machine with a key, so a crash in it reached the user
+        first. A scripted model playing the planner keeps the live code path in
+        CI — no live row may skip, and no row may report its own traceback."""
+        card = audit_sync(
+            self.settings,
+            live=True,
+            models=GoldenPlanner(),
+            search=FakeSearchChain(),
+            log_dir=self.work,
+        )
+        live_rows = {row["id"]: row for row in card["checks"] if row["live"]}
+        self.assertEqual(set(live_rows), {"live.planner", "live.latency"})
+        for row in live_rows.values():
+            self.assertNotEqual(row["status"], "skip", row["id"])
+            self.assertNotIn("the check itself raised", row["detail"], row["id"])
+
+    def test_live_planner_passes_when_the_model_covers_the_golden_set(self) -> None:
+        card = audit_sync(
+            self.settings, live=True, models=GoldenPlanner(),
+            only=["live.planner"], log_dir=self.work,
+        )
+        row = card["checks"][0]
+        self.assertEqual(row["status"], "pass", row["detail"])
+        self.assertEqual(row["metrics"]["coverage"], 1.0)
+        self.assertEqual(row["metrics"]["contradictions"], 0)
+        self.assertEqual(row["metrics"]["fallbacks_to_rules"], 0)
+
+    def test_live_planner_warns_when_every_reply_is_unusable(self) -> None:
+        """A model that never produces a parseable plan falls back to the rules
+        five times out of five — coverage then measures the rules, not the
+        model, and saying 'pass' would be a lie."""
+        card = audit_sync(
+            self.settings, live=True, models=FakeModel(content="not json, sorry"),
+            only=["live.planner"], log_dir=self.work,
+        )
+        row = card["checks"][0]
+        self.assertEqual(row["status"], "warn", row["detail"])
+        self.assertEqual(row["metrics"]["fallbacks_to_rules"], row["metrics"]["prompts"])
+        self.assertIn("unusable", row["detail"])
+
+    def test_live_planner_fails_when_the_model_misses_required_agents(self) -> None:
+        card = audit_sync(
+            self.settings, live=True, models=GoldenPlanner(agents=["general"]),
+            only=["live.planner"], log_dir=self.work,
+        )
+        row = card["checks"][0]
+        self.assertEqual(row["status"], "fail", row["detail"])
+        self.assertLess(row["metrics"]["coverage"], 0.7)
+        self.assertTrue(row["findings"])
 
     def test_the_caller_supplies_the_version(self) -> None:
         card = audit_sync(self.settings, only=["plan.waves"], version="9.9.9", log_dir=self.work)
