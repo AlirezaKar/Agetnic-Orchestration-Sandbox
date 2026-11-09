@@ -183,6 +183,52 @@ async function scenarioNormalHost() {
     !!w.document.querySelector('#inspector #diag-summary')
   );
 
+  // ── navbar dropdowns + ARAS wiring panel (v0.18.0)
+  console.log('');
+  console.log('C2  navbar dropdowns, ARAS wiring panel, copy buttons');
+  const statusMenu = w.document.getElementById('menu-status');
+  const toolsMenu = w.document.getElementById('menu-tools');
+  check('the top bar has a Status dropdown', !!w.document.getElementById('btn-menu-status'));
+  check('the top bar has a Tools dropdown', !!w.document.getElementById('btn-menu-tools'));
+  w.document.getElementById('btn-menu-status').click();
+  check('clicking Status opens its dropdown', statusMenu.classList.contains('open'));
+  check(
+    'the status pills live inside the Status dropdown',
+    !!statusMenu.querySelector('#pill-llm') && !!statusMenu.querySelector('#pill-search') &&
+    !!statusMenu.querySelector('#pill-aras') && !!statusMenu.querySelector('#pill-diag') &&
+    !!statusMenu.querySelector('#pill-audit')
+  );
+  w.document.getElementById('btn-menu-tools').click();
+  check('opening Tools closes Status', toolsMenu.classList.contains('open') && !statusMenu.classList.contains('open'));
+  check(
+    'Tools holds providers / ARAS / diagnostics / evaluate',
+    ['btn-providers', 'btn-aras-top', 'btn-diag-top', 'btn-audit-top']
+      .every((id) => !!toolsMenu.querySelector('#' + id))
+  );
+
+  w.document.getElementById('btn-aras-top').click();
+  await sleep(900);
+  check('choosing a tool closes the dropdown', !toolsMenu.classList.contains('open'));
+  check(
+    'the ARAS wiring modal opens',
+    !w.document.getElementById('aras-modal').classList.contains('panel-hidden')
+  );
+  const arasBody = w.document.getElementById('aras-body').textContent;
+  check('the wiring report rendered', /ARAS|model chain|configured/i.test(arasBody), arasBody.slice(0, 70));
+  check('the ARAS pill reports the check', !/not checked/.test(text(w, 'badge-aras')), text(w, 'badge-aras'));
+  check('the ARAS panel has its copy button', !!w.document.getElementById('btn-aras-copy'));
+  check('the ARAS panel has a proof-run button', !!w.document.getElementById('btn-aras-proof'));
+  w.document.getElementById('btn-aras-close').click();
+  check(
+    'the ARAS modal closes',
+    w.document.getElementById('aras-modal').classList.contains('panel-hidden')
+  );
+  check(
+    'the diagnostics report carries a copy button',
+    !!w.document.querySelector('#diag-summary .diag-copy-row button')
+  );
+  check('the providers modal has a copy button', !!w.document.getElementById('btn-providers-copy'));
+
   // ── D: reload. A brand-new window with the same remembered session id
   // must redraw the conversation exactly as it was, with no model call.
   const match = /s-\d{8}-\d{6}-[0-9a-f]+/.exec(pill);

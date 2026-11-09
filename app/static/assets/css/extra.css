@@ -977,3 +977,49 @@ body.resizing .gutter { cursor: col-resize; }
   .audit-row[data-status="running"] .audit-dot { animation: none; }
   .audit-bar > span { transition: none; }
 }
+
+/* ── navbar dropdown menus (v0.18.0): Status ▾ and Tools ▾ ───────────── */
+.nav-menu { position: relative; }
+.nav-menu-btn { gap: 6px; }
+.nav-menu-btn .caret { width: 11px; height: 11px; transition: transform .18s ease; }
+.nav-menu.open .nav-menu-btn .caret { transform: rotate(180deg); }
+.nav-menu-btn > .dot {
+  width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%;
+  background: var(--muted); box-shadow: none;
+}
+.nav-menu-btn > .dot.ok { background: var(--mint); box-shadow: 0 0 10px rgba(80, 214, 176, .34); }
+.nav-menu-btn > .dot.warn { background: var(--amber); }
+.nav-menu-btn > .dot.bad { background: var(--red); box-shadow: 0 0 10px rgba(255, 133, 141, .34); }
+.nav-menu-panel {
+  position: absolute; top: calc(100% + 7px); right: 0; z-index: 40;
+  min-width: 228px; padding: 6px; display: none; flex-direction: column; gap: 4px;
+  border: 1px solid var(--line-strong); border-radius: 12px;
+  background: var(--surface-2, rgba(18, 26, 40, .98));
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .45);
+}
+.nav-menu.open .nav-menu-panel { display: flex; }
+.nav-menu-panel .status-pill.menu-row {
+  height: 30px; width: 100%; border-radius: 9px; justify-content: flex-start;
+}
+.nav-menu-panel .menu-item {
+  display: flex; align-items: center; gap: 9px; width: 100%; height: 32px; padding: 0 10px;
+  border: 0; border-radius: 9px; background: transparent; color: var(--text-2);
+  font: inherit; font-size: 11px; cursor: pointer; text-align: left; white-space: nowrap;
+  transition: .15s ease;
+}
+.nav-menu-panel .menu-item:hover { background: var(--surface-hover); color: var(--text); }
+.nav-menu-panel .menu-item svg { width: 14px; height: 14px; flex: 0 0 14px; }
+
+/* ── ARAS wiring panel ───────────────────────────────────────────────── */
+.aras-section { margin: 12px 0 4px; font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.aras-section:first-child { margin-top: 0; }
+.aras-verdict {
+  margin-top: 10px; padding: 9px 12px; border-radius: 10px; font-size: 11px; line-height: 1.55;
+  border: 1px solid rgba(80, 214, 176, .3); background: rgba(23, 65, 59, .2); color: #8de8ce;
+}
+.aras-verdict.bad { border-color: rgba(255, 133, 141, .3); background: rgba(72, 28, 32, .26); color: #ff9ea4; }
+.aras-verdict.warn { border-color: rgba(239, 189, 114, .3); background: rgba(72, 56, 26, .26); color: #edc07a; }
+
+/* a small copy-report button that sits above diagnostics rows */
+.diag-copy-row { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.diag-copy-row .btn { height: 24px; padding: 0 9px; font-size: 9px; }

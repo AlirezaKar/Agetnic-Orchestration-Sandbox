@@ -498,6 +498,24 @@
       if (tone === "ok") pill.classList.add("success");
       else if (tone) pill.classList.add(tone);
     }
+    updateStatusDot();
+  }
+
+  // The Status ▾ button carries one dot that summarises every pill inside
+  // its dropdown: red beats amber beats green beats grey.
+  function updateStatusDot() {
+    const dot = $("menu-status-dot");
+    const menu = $("menu-status");
+    if (!dot || !menu) return;
+    const pills = menu.querySelectorAll(".status-pill");
+    let tone = "";
+    pills.forEach((pill) => {
+      if (pill.classList.contains("bad")) tone = "bad";
+      else if (pill.classList.contains("warn") && tone !== "bad") tone = "warn";
+      else if (pill.classList.contains("success") && !tone) tone = "ok";
+    });
+    dot.classList.remove("ok", "warn", "bad");
+    if (tone) dot.classList.add(tone);
   }
 
   function setHealth(key, value, status) {
@@ -2286,6 +2304,25 @@
     state.diagnostics = data;
     summary.textContent = "";
 
+    // every report window carries its own copy button — this one copies the
+    // latest full /diagnose JSON, errors and hints included
+    if (ok) {
+      const copyRow = el("div", "diag-copy-row");
+      const copyBtn = el("button", "btn ghost", "Copy report JSON");
+      copyBtn.type = "button";
+      copyBtn.title = "Copy the latest GET /diagnose report";
+      copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(state.diagnostics, null, 2));
+          toast("Diagnostics report copied");
+        } catch (_) {
+          toast("Clipboard blocked — the JSON tab has the report", "warn");
+        }
+      });
+      copyRow.appendChild(copyBtn);
+      summary.appendChild(copyRow);
+    }
+
     if (!ok) {
       summary.appendChild(el("div", "pdesc", "Diagnostics failed: " + errorText({ ok, status: 0, data })));
       setBadge("badge-diag", "Diag  failed", "bad");
@@ -2336,6 +2373,15 @@
       const ragReady = data.aras.rag_ready ? "rag ready" : "rag off";
       const dataReady = data.aras.data_ready ? "data ready" : "data off";
       summary.appendChild(el("div", "pdesc", "aras wiring · " + ragReady + " · " + dataReady));
+      const arasChecked = data.aras.checked || [];
+      const arasUp = arasChecked.filter((report) => report.ok).length;
+      if (arasChecked.length) {
+        setBadge(
+          "badge-aras",
+          "ARAS  " + arasUp + "/" + arasChecked.length + " up",
+          arasUp === arasChecked.length ? "ok" : arasUp ? "warn" : "bad"
+        );
+      }
     }
     (data.hints || []).forEach((hint) => summary.appendChild(el("div", "pdesc", "→ " + hint)));
 
@@ -2443,6 +2489,241 @@
       if (preset.notes) card.appendChild(el("div", "pc-note", preset.notes));
       body.appendChild(card);
     });
+  }
+
+  async function copyProvidersJson() {
+    if (!state.fullProviders) await loadProviders();
+    const text = state.fullProviders ? JSON.stringify(state.fullProviders, null, 2) : "";
+    if (!text) {
+      toast("No providers report yet", "warn");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Providers report copied");
+    } catch (_) {
+      toast("Clipboard blocked — use GET /providers instead", "warn");
+    }
+  }
+
+  /* ─────────────── navbar dropdowns (Status ▾ / Tools ▾) ────── */
+  function closeMenus(except) {
+    document.querySelectorAll(".nav-menu.open").forEach((menu) => {
+      if (menu === except) return;
+      menu.classList.remove("open");
+      const btn = menu.querySelector(".nav-menu-btn");
+      if (btn) btn.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function wireMenus() {
+    document.querySelectorAll(".nav-menu").forEach((menu) => {
+      const btn = menu.querySelector(".nav-menu-btn");
+      if (!btn) return;
+      btn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const open = menu.classList.toggle("open");
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        if (open) closeMenus(menu);
+      });
+      // a chosen tool closes the menu; the status rows stay put for reading
+      menu.querySelectorAll(".menu-item").forEach((item) => {
+        item.addEventListener("click", () => closeMenus());
+      });
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest || !event.target.closest(".nav-menu")) closeMenus();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeMenus();
+    });
+  }
+
+  /* ──────────── ARAS wiring panel (is it actually used?) ────── */
+  const ARAS = { report: null, proof: null, busy: false };
+
+  function openArasModal() {
+    $("aras-modal").classList.remove("panel-hidden");
+    $("aras-modal").classList.add("open");
+  }
+
+  function closeArasModal() {
+    $("aras-modal").classList.remove("open");
+    $("aras-modal").classList.add("panel-hidden");
+  }
+
+  function arasRow(ok, name, detail, pillText) {
+    // same look as the diagnostics rows — one dot, one name, one detail
+    return diagRow(ok, name, detail, pillText);
+  }
+
+  function renderArasReport() {
+    const body = $("aras-body");
+    const report = ARAS.report;
+    body.textContent = "";
+    if (!report) {
+      body.appendChild(el("span", "muted", "Press “Check wiring” to call GET /aras."));
+      return;
+    }
+
+    const configured = report.configured || [];
+    if (!configured.length) {
+      body.appendChild(el(
+        "div", "pdesc",
+        "No ARAS service is configured — fill the ARAS block in .env (URL + per-service tokens) " +
+        "and restart. Until then every request uses the public fallback providers."
+      ));
+      setBadge("badge-aras", "ARAS  not configured", "warn");
+      return;
+    }
+
+    // level 1 — wiring: is ARAS actually in the chains?
+    body.appendChild(el("div", "aras-section", "Wiring (config)"));
+    body.appendChild(arasRow(!!report.router_in_model_chain, "router :8101 leads the model chain",
+      report.router_in_model_chain ? "every model call tries ARAS first" : "not in the chain — check ARAS_ROUTER_TOKEN / LLM_PROVIDER"));
+    body.appendChild(arasRow(!!report.web_in_search_chain, "web :8108 in the search chain",
+      report.web_in_search_chain ? "" : "not in the chain — check ARAS_WEB_TOKEN / SEARCH_PROVIDERS"));
+    body.appendChild(arasRow(!!report.rag_ready, "retrieval :8105 → document agent (RAG)",
+      report.rag_ready ? "collection wired" : "needs ARAS_RETRIEVAL_TOKEN + ARAS_COLLECTION"));
+    body.appendChild(arasRow(!!report.data_ready, "data :8107 → data agent",
+      report.data_ready ? "" : "needs ARAS_DATA_TOKEN + ARAS_TENANT/OWNER + ARAS_DATA_SOURCE_ID", report.data_ready ? "" : "optional"));
+
+    // level 2 — health: does each configured service answer?
+    body.appendChild(el("div", "aras-section", "Health (live, GET /aras)"));
+    const checked = report.checked || [];
+    let up = 0;
+    checked.forEach((service) => {
+      if (service.ok) up += 1;
+      body.appendChild(arasRow(
+        !!service.ok,
+        service.service + " · " + ((report.endpoints || {})[service.service] || ""),
+        service.ok ? service.latency_ms + " ms" : ""
+      ));
+      if (!service.ok && service.error) body.appendChild(el("div", "pdesc", service.error));
+    });
+    (report.skipped || []).forEach((name) => {
+      body.appendChild(arasRow(false, name, "not configured", "skip"));
+    });
+
+    const allHttp = checked.length > 0 && checked.every(
+      (service) => !service.ok && /^HTTP /.test(service.error || "")
+    );
+    if (allHttp) {
+      body.appendChild(el(
+        "div", "pdesc",
+        "→ Every service answered an HTTP error: something IS replying, so the tunnel is not " +
+        "closed. A VPN or system proxy may be intercepting 127.0.0.1 — unset HTTP_PROXY/HTTPS_PROXY " +
+        "(or add 127.0.0.1 to NO_PROXY) and compare with: curl http://127.0.0.1:8101/api/v1/health/"
+      ));
+    }
+
+    setBadge(
+      "badge-aras",
+      "ARAS  " + up + "/" + checked.length + " up",
+      up === checked.length && checked.length ? "ok" : up ? "warn" : "bad"
+    );
+
+    // level 3 — proof: the run record of a real request
+    if (ARAS.proof) {
+      body.appendChild(el("div", "aras-section", "Proof run (POST /orchestrate)"));
+      const proof = ARAS.proof;
+      if (proof.error) {
+        body.appendChild(el("div", "aras-verdict bad", "Proof run failed: " + proof.error));
+      } else {
+        (proof.agents || []).forEach((agent) => {
+          body.appendChild(arasRow(
+            agent.provider === "aras",
+            agent.agent + " → " + (agent.provider || "?") + " · " + (agent.model || "?"),
+            (agent.latency_ms || 0) + " ms",
+            agent.provider === "aras" ? "aras" : "fallback"
+          ));
+        });
+        const viaAras = (proof.agents || []).length &&
+          (proof.agents || []).every((agent) => agent.provider === "aras");
+        body.appendChild(el(
+          "div",
+          "aras-verdict" + (viaAras ? "" : " warn"),
+          viaAras
+            ? "Proof: this run was answered by ARAS (" + (proof.model || "") + ") — the wiring is live and used."
+            : "This run was answered by “" + (proof.provider || "?") + "”, not ARAS — the stack is " +
+              "configured but a fallback provider answered. Check the health rows above."
+        ));
+      }
+    }
+  }
+
+  async function checkAras() {
+    if (ARAS.busy) return;
+    ARAS.busy = true;
+    $("aras-state").textContent = "checking…";
+    setBadge("badge-aras", "ARAS  checking…", "warn");
+    const { ok, data } = await api("/aras");
+    ARAS.busy = false;
+    if (!ok) {
+      $("aras-state").textContent = "failed";
+      setBadge("badge-aras", "ARAS  check failed", "bad");
+      $("aras-body").textContent = "";
+      $("aras-body").appendChild(el("div", "pdesc", "GET /aras failed: " + errorText({ ok, status: 0, data })));
+      return;
+    }
+    ARAS.report = data;
+    $("aras-state").textContent = "checked " + new Date().toLocaleTimeString();
+    renderArasReport();
+  }
+
+  async function arasProofRun() {
+    if (ARAS.busy) return;
+    ARAS.busy = true;
+    $("aras-state").textContent = "proof run…";
+    const { ok, data } = await api("/orchestrate", {
+      method: "POST",
+      body: JSON.stringify({
+        message: "Reply with the single word: ok",
+        agents: ["general"],
+        synthesize: false,
+        review: false,
+        evaluate: false,
+        remember: false,
+      }),
+    });
+    ARAS.busy = false;
+    if (!ok) {
+      ARAS.proof = { error: errorText({ ok, status: 0, data }) };
+    } else {
+      const orchestration = data.orchestration || {};
+      ARAS.proof = {
+        provider: data.provider,
+        model: data.model,
+        run_id: data.run_id,
+        agents: (orchestration.agents || []).map((agent) => ({
+          agent: agent.agent,
+          provider: agent.provider,
+          model: agent.model,
+          latency_ms: agent.latency_ms,
+        })),
+      };
+    }
+    $("aras-state").textContent = "proof done";
+    renderArasReport();
+  }
+
+  async function copyArasJson() {
+    if (!ARAS.report) {
+      toast("Run “Check wiring” first", "warn");
+      return;
+    }
+    const text = JSON.stringify({ report: ARAS.report, proof: ARAS.proof }, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("ARAS report copied");
+    } catch (_) {
+      toast("Clipboard blocked — use GET /aras instead", "warn");
+    }
+  }
+
+  function openAras() {
+    openArasModal();
+    checkAras();
   }
 
   /* ─────────────────────── harness memory ──────────────────── */
@@ -3698,6 +3979,14 @@
     on("btn-providers", "click", openProviders);
     on("btn-providers-close", "click", closeProvidersModal);
     on("btn-close-providers", "click", closeProvidersModal);
+    on("btn-providers-copy", "click", copyProvidersJson);
+    on("btn-aras-top", "click", openAras);
+    on("btn-aras-check", "click", checkAras);
+    on("btn-aras-proof", "click", arasProofRun);
+    on("btn-aras-copy", "click", copyArasJson);
+    on("btn-aras-close", "click", closeArasModal);
+    on("btn-close-aras", "click", closeArasModal);
+    wireMenus();
     on("btn-refresh-search", "click", () => {
       state.fullProviders = null;
       loadProviders();
@@ -3786,10 +4075,17 @@
         if (event.target === providers) closeProvidersModal();
       });
     }
+    const arasBackdrop = $("aras-modal");
+    if (arasBackdrop) {
+      arasBackdrop.addEventListener("click", (event) => {
+        if (event.target === arasBackdrop) closeArasModal();
+      });
+    }
 
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         closeProvidersModal();
+        closeArasModal();
         closeAudit();
         const sidebar = $("sidebar");
         if (sidebar && sidebar.classList.contains("open")) sidebar.classList.remove("open");

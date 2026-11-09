@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from app.config import Settings
+from app.config import Settings, trust_env_for
 
 #: service → the unauthenticated health path (they differ per service)
 HEALTH_PATHS: dict[str, str] = {
@@ -86,8 +86,13 @@ class ArasClient:
         return headers
 
     def _client(self) -> httpx.AsyncClient:
+        # trust_env=False on loopback: a VPN/system proxy must never answer
+        # for the SSH tunnel (it replies 503 for every service at once).
         return httpx.AsyncClient(
-            timeout=self.timeout, transport=self._transport, follow_redirects=False
+            timeout=self.timeout,
+            transport=self._transport,
+            follow_redirects=False,
+            trust_env=trust_env_for(self.base_url or ""),
         )
 
     def _require(self) -> None:
@@ -166,7 +171,13 @@ class ArasClient:
             async with self._client() as client:
                 response = await client.get(url)
             ok = response.status_code == 200
-            detail = "" if ok else f"HTTP {response.status_code}"
+            if ok:
+                detail = ""
+            else:
+                # the first line of the body names who actually answered —
+                # a proxy's error page looks nothing like a Django service
+                snippet = " ".join((response.text or "").split())[:160]
+                detail = f"HTTP {response.status_code}" + (f" — {snippet}" if snippet else "")
         except httpx.HTTPError as exc:
             ok, detail = False, f"{type(exc).__name__}: {exc}"
         return {
@@ -413,12 +424,12 @@ def pdf_reader(settings: Settings):
     timeout = settings.aras_timeout
 
     def read(name: str, data: bytes) -> tuple[str, int | None]:
-        response = httpx.post(
-            f"{endpoint}/api/v1/ocr/",
-            files={"file": (name, data, "application/pdf")},
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=timeout,
-        )
+        with httpx.Client(timeout=timeout, trust_env=trust_env_for(endpoint)) as client:
+            response = client.post(
+                f"{endpoint}/api/v1/ocr/",
+                files={"file": (name, data, "application/pdf")},
+                headers={"Authorization": f"Bearer {token}"},
+            )
         if response.status_code >= 400:
             raise ArasError("ocr", f"HTTP {response.status_code}: {response.text[:200]}",
                             status=response.status_code)
@@ -448,7 +459,7 @@ async def status(settings: Settings, transport: httpx.AsyncBaseTransport | None 
     checked.extend(await asyncio.gather(*(client.health() for client in others)))
     return {
         "configured": configured,
-        "skipped": [name for name in CLIENTS if name not in configured],
+        "skipped": [name for name in ("router", *CLIENTS) if name not in configured],
         "checked": checked,
         "rag_ready": settings.aras_rag_ready,
         "data_ready": settings.aras_data_ready,

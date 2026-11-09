@@ -42,6 +42,25 @@ DEFAULT_UA = (
 )
 
 
+def trust_env_for(url: str) -> bool:
+    """Should an HTTP client honour ``HTTP(S)_PROXY`` for this URL? Not loopback.
+
+    A VPN or system proxy that answers for ``127.0.0.1`` turns every tunnelled
+    ARAS call — and local Ollama / LM Studio — into the proxy's own error page:
+    the user sees HTTP 503 from seven services at once while the tunnel is
+    perfectly fine. Loopback traffic therefore never goes through a proxy;
+    public hosts keep ``trust_env=True`` so a proxy still works where it is
+    genuinely needed.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(url).hostname or "").strip("[]").lower()
+    except ValueError:
+        return True
+    return host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
 def split_csv(value: str | None) -> list[str]:
     """Parse ``"a, b;c"`` into ``["a", "b", "c"]`` (order preserved, deduped)."""
     if not value:
