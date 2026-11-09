@@ -838,6 +838,15 @@ ARAS_COLLECTION=alireza_notes       # the RAG collection
 
 # 3. verify — one call checks every configured service's /health
 curl -s localhost:8000/aras | python3 -m json.tool
+
+# or without the server (works on Windows cmd too; stdlib only, proxy-proof):
+python scripts/aras_smoke.py        # tunnel -> health -> tokens, one verdict per service
+```
+
+On Windows the tunnel command is the same, written on one line:
+
+```
+ssh -N -o ServerAliveInterval=30 -L 8101:127.0.0.1:8101 -L 8102:127.0.0.1:8102 -L 8103:127.0.0.1:8103 -L 8104:127.0.0.1:8104 -L 8105:127.0.0.1:8105 -L 8107:127.0.0.1:8107 -L 8108:127.0.0.1:8108 <user>@<aras-server>
 ```
 
 The rules, so behaviour stays predictable:
@@ -962,6 +971,7 @@ scripts/
   doctor.py            model + search + optional agent, one command
   check_providers.py   table, links, --ping, --models
   check_search.py      diagnose backends, run a real query
+  aras_smoke.py        standalone ARAS access probe: tunnel, health, tokens (stdlib only, copy it anywhere)
 tests/                 offline tests (MockTransport, no keys)
 docs/redesign/         the design reference the UI was built on (preview.png + prototype)
 ```
