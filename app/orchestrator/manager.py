@@ -222,11 +222,16 @@ class Manager:
         model_chain: Any = None,
         search_chain: Any = None,
         agent_loop: Any = None,
+        knowledge: Any = None,
+        data_backend: Any = None,
         log_dir: Any = None,
     ) -> None:
         self.settings = settings if settings is not None else host.default_settings()
         self.model_chain = model_chain
         self.search_chain = search_chain
+        # optional ports — None keeps the pre-port behaviour everywhere
+        self.knowledge = knowledge
+        self.data_backend = data_backend
         # factory for the single-agent tool loop (the `search` agent's collaborator)
         self.agent_loop = agent_loop or host.agent_loop()
         # None = the host's log directory (runlog resolves it)
@@ -296,6 +301,8 @@ class Manager:
             history=history or [],
             trace=trace,
             agent_loop=self.agent_loop,
+            knowledge=self.knowledge,
+            data_backend=self.data_backend,
         )
         plan = await make_plan(
             message,

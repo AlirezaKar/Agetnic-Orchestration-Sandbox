@@ -37,6 +37,19 @@ class SearchPreset:
 
 
 SEARCH_PRESETS: dict[str, SearchPreset] = {
+    "aras": SearchPreset(
+        name="aras",
+        label="ARAS web service (the other app's search)",
+        key_env=("ARAS_WEB_TOKEN",),
+        key_url="(issued with the ARAS access package — ARAS_WEB_TOKEN or ARAS_TOKEN in .env)",
+        docs_url="POST /v1/search/ on port 8108 — see the ARAS access README",
+        free_tier="Private service (SearXNG + Crawl4AI behind one token).",
+        needs_server=True,
+        needs_key=True,
+        notes="Leads the chain automatically once configured; reach it through the "
+        "SSH tunnel (ssh -L 8108:127.0.0.1:8108 ...). Engine timeouts return 503 "
+        "and the chain falls back to the public backends.",
+    ),
     "ddg": SearchPreset(
         name="ddg",
         label="DuckDuckGo (HTML, no key)",

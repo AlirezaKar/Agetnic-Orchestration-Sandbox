@@ -58,6 +58,7 @@ from app.orchestrator import (
     thought as live_thought,
 )
 from app.search.registry import build_search_chain, describe_search_providers
+from app import aras
 from app.version import VERSION
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -87,6 +88,7 @@ API_ROUTES = [
     "PATCH /sessions/{id}             (rename a conversation)",
     "DELETE /sessions/{id}            (forget a conversation)",
     "GET  /diagnose",
+    "GET  /aras",
     "GET  /                           (test harness UI)",
     "GET  /assets/…                   (css + js)",
 ]
@@ -623,6 +625,9 @@ async def upload_file(payload: FileUploadRequest) -> Any:
             payload.model_dump(),
             max_chars=settings.files_max_chars,
             max_mb=settings.files_max_mb,
+            # PDFs go through the ARAS OCR service when it is configured;
+            # the local pypdf parse remains the fallback either way.
+            pdf_reader=aras.pdf_reader(settings),
         )
     except FileError as exc:
         return _file_error(exc)
@@ -641,6 +646,24 @@ async def upload_file(payload: FileUploadRequest) -> Any:
     )
     body = dict(attachment.summary())
     body["stored"] = store.writable
+    # Opt-in: index the accepted upload into the ARAS collection as well, so
+    # the knowledge store the document agent retrieves from keeps growing.
+    if (
+        attachment.consent
+        and settings.aras_auto_ingest
+        and settings.aras_configured("ingestion")
+        and settings.aras_collection.strip()
+    ):
+        try:
+            ingested = await aras.ArasIngestionClient(settings).ingest(
+                f"{Path(attachment.name).stem}.txt",
+                attachment.text.encode("utf-8"),
+                collection=settings.aras_collection.strip(),
+            )
+            body["aras_ingest"] = ingested
+        except aras.ArasError as exc:
+            body["aras_ingest"] = {"success": False, "error": str(exc)}
+            logs.get_logger("files").warning("aras ingest failed for %s: %s", attachment.name, exc)
     if not store.writable:
         body["warning"] = (
             "the server could not write FILES_DIR, so this file is kept in memory "
@@ -715,6 +738,8 @@ def _orchestrator(settings) -> OrchestratorService:
         models=build_chain(settings),
         search=build_search_chain(settings),
         agent_loop=WebSearchAgent,
+        knowledge=aras.build_knowledge(settings),
+        data_backend=aras.build_data_backend(settings),
     )
 
 
@@ -1289,6 +1314,27 @@ async def sessions_delete(session_id: str) -> Any:
     return {"deleted": session_id}
 
 
+@router.get("/aras")
+async def aras_status() -> dict[str, Any]:
+    """The ARAS microservices this host is wired to: config + live health.
+
+    No secrets: endpoints and readiness only. ``checked`` carries one health
+    probe per configured service (the unauthenticated /health route each
+    service exposes), so this answers "is the tunnel up" in one call.
+    """
+    settings = get_settings()
+    report = await aras.status(settings)
+    report["version"] = VERSION
+    report["endpoints"] = {
+        name: settings.aras_endpoint(name) for name in settings.aras_services_configured
+    }
+    report["router_in_model_chain"] = "aras" in [
+        p.name for p in build_chain(settings).providers
+    ]
+    report["web_in_search_chain"] = "aras" in settings.search_chain
+    return report
+
+
 @router.get("/diagnose")
 async def diagnose(
     provider: str | None = None,
@@ -1327,6 +1373,8 @@ async def diagnose(
         else:
             search_out.append(report)
 
+    aras_report = await aras.status(settings) if settings.aras_services_configured else None
+
     return {
         "version": VERSION,
         "model": model_report,
@@ -1336,12 +1384,35 @@ async def diagnose(
             "ok": [r["provider"] for r in search_out if r.get("ok")],
             "failed": [r["provider"] for r in search_out if not r.get("ok")],
         },
-        "hints": _hints(settings, model_report, search_out),
+        "aras": aras_report,
+        "hints": _hints(settings, model_report, search_out, aras_report),
     }
 
 
-def _hints(settings, model: dict[str, Any], search: list[dict[str, Any]]) -> list[str]:
+def _hints(
+    settings,
+    model: dict[str, Any],
+    search: list[dict[str, Any]],
+    aras_report: dict[str, Any] | None = None,
+) -> list[str]:
     hints: list[str] = []
+    if aras_report:
+        down = [c["service"] for c in aras_report.get("checked", []) if not c.get("ok")]
+        if down:
+            hints.append(
+                f"ARAS service(s) not answering: {', '.join(down)}. Is the SSH tunnel "
+                "open? (ssh -L <port>:127.0.0.1:<port> ... — see GET /aras for detail)"
+            )
+        if not aras_report.get("rag_ready") and "retrieval" in aras_report.get("configured", []):
+            hints.append(
+                "ARAS retrieval is configured but ARAS_COLLECTION is empty, so the "
+                "document agent cannot retrieve — name the collection (e.g. alireza_notes)."
+            )
+        if not aras_report.get("data_ready") and "data" in aras_report.get("configured", []):
+            hints.append(
+                "ARAS data is configured but needs ARAS_TENANT + ARAS_OWNER + "
+                "ARAS_DATA_SOURCE_ID before the data agent can query it."
+            )
     if not model.get("ok"):
         hints.append(
             "Model not answering: set LLM_PROVIDER and the matching key in .env "

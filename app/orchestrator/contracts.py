@@ -6,7 +6,7 @@ another part of this repository, so the package can be lifted into a project
 that has a different model client, a different search backend and a different
 settings object — as long as they look like the shapes below.
 
-Four ports:
+Four required ports:
 
 | Port | What the orchestrator does with it |
 |---|---|
@@ -14,6 +14,13 @@ Four ports:
 | :class:`SearchChain` | `await chain.search(query, limit)` — used by the search agent through the agent loop |
 | :class:`AgentLoopFactory` | builds the single-agent tool loop the *search* agent delegates to |
 | :class:`OrchestratorSettings` | the settings keys the orchestrator reads (a plain object with these attributes is enough) |
+
+Two optional ports (default ``None`` — nothing changes until a host wires them):
+
+| Port | What the orchestrator does with it |
+|---|---|
+| :class:`KnowledgeStore` | `await store.retrieve(query, limit)` — the document agent's source when a request has no attachment |
+| :class:`DataBackend` | `await backend.query(question)` — the data agent's analytics service when there is nothing local to compute |
 
 Nothing in the package calls a concrete class from this repository: the host
 passes these four in (see ``service.py``), which is why the whole directory can
@@ -83,6 +90,35 @@ class AgentLoopFactory(Protocol):
         settings: Any,
         observer: Any = None,
     ) -> AgentLoop: ...
+
+
+class KnowledgeStore(Protocol):
+    """Optional port: an indexed knowledge base the document agent may search.
+
+    When a request arrives with no attachment, a host that wires this port in
+    (the ARAS retrieval service, a vector store, anything) gives the document
+    agent a second source: ``retrieve`` returns hits shaped
+    ``{"text", "source", "document_id", "score", ...}``. ``None`` (the default
+    everywhere) keeps the old behaviour: no attachment → the agent skips.
+    """
+
+    async def retrieve(self, query: str, limit: int = 5) -> list[dict[str, Any]]: ...
+
+    def describe(self) -> dict[str, Any]: ...
+
+
+class DataBackend(Protocol):
+    """Optional port: a natural-language analytics service for the data agent.
+
+    ``query`` answers a question from tables that live on the other side of
+    the port (the ARAS data service and its registered sources). The local
+    deterministic computation over attached tables stays first; the port is
+    only consulted when the request brings nothing to compute on.
+    """
+
+    async def query(self, question: str) -> dict[str, Any]: ...
+
+    def describe(self) -> dict[str, Any]: ...
 
 
 @runtime_checkable

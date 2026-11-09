@@ -174,6 +174,18 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+def _read_pdf(name: str, data: bytes, pdf_reader: Any = None) -> tuple[str, int | None]:
+    """The injected reader first (if any); the local parse as the fallback."""
+    if pdf_reader is not None:
+        try:
+            text, pages = pdf_reader(name, data)
+        except Exception:
+            text, pages = "", None  # the local parse decides the outcome
+        if (text or "").strip():
+            return str(text), pages
+    return _parse_pdf(data)
+
+
 def _parse_pdf(data: bytes) -> tuple[str, int | None]:
     try:
         from pypdf import PdfReader  # noqa: PLC0415 - optional dependency
@@ -305,8 +317,21 @@ def _kind_for(suffix: str) -> str:
     return "text"
 
 
-def extract(name: str, data: bytes, *, max_chars: int = 200_000, max_mb: float = 10.0) -> Attachment:
-    """Turn raw bytes into an :class:`Attachment` with parsed text."""
+def extract(
+    name: str,
+    data: bytes,
+    *,
+    max_chars: int = 200_000,
+    max_mb: float = 10.0,
+    pdf_reader: Any = None,
+) -> Attachment:
+    """Turn raw bytes into an :class:`Attachment` with parsed text.
+
+    ``pdf_reader`` is an optional port: ``reader(name, data) -> (text, pages)``.
+    A host that has a better PDF engine (an OCR service, say) injects it here;
+    when it fails or returns nothing the local ``pypdf`` parse still runs, so a
+    dead service can never make an upload worse than the default.
+    """
     if not name:
         raise FileError("A file needs a name.")
     size = len(data)
@@ -326,7 +351,7 @@ def extract(name: str, data: bytes, *, max_chars: int = 200_000, max_mb: float =
     meta: dict[str, Any] = {}
 
     if suffix == ".pdf":
-        text, pages = _parse_pdf(data)
+        text, pages = _read_pdf(name, data, pdf_reader)
     elif suffix == ".docx":
         text = _parse_docx(data)
     elif suffix == ".xlsx":
@@ -386,6 +411,7 @@ def decode_payload(
     *,
     max_chars: int = 200_000,
     max_mb: float = 10.0,
+    pdf_reader: Any = None,
 ) -> Attachment:
     """Accept ``{name, data_b64}`` or ``{name, text}`` from the API/UI."""
     name = str(payload.get("name") or "").strip() or "pasted.txt"
@@ -399,7 +425,7 @@ def decode_payload(
             data = base64.b64decode(raw, validate=False)
         except (ValueError, TypeError) as exc:
             raise FileError(f"{name}: the payload is not valid base64.") from exc
-    return extract(name, data, max_chars=max_chars, max_mb=max_mb)
+    return extract(name, data, max_chars=max_chars, max_mb=max_mb, pdf_reader=pdf_reader)
 
 
 # ------------------------------------------------------------------- store

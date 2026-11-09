@@ -44,11 +44,16 @@ class OrchestratorService:
         models: Any = None,
         search: Any = None,
         agent_loop: Any = None,
+        knowledge: Any = None,
+        data_backend: Any = None,
         log_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         self.settings = settings if settings is not None else host.default_settings()
         self.models = models
         self.search = search
+        # optional ports (contracts.KnowledgeStore / contracts.DataBackend)
+        self.knowledge = knowledge
+        self.data_backend = data_backend
         # factory for the single-agent tool loop used by the `search` agent
         self.agent_loop = agent_loop or host.agent_loop()
         # where run records go; None = the host's log directory
@@ -70,6 +75,8 @@ class OrchestratorService:
             "all_agents": catalogue(),
             "model_ready": bool(self.models),
             "search_ready": bool(self.search),
+            "knowledge_ready": bool(self.knowledge),
+            "data_backend_ready": bool(self.data_backend),
         }
 
     def boundary(self) -> dict[str, Any]:
@@ -79,6 +86,8 @@ class OrchestratorService:
             "models": type(self.models).__name__ if self.models is not None else "",
             "search": type(self.search).__name__ if self.search is not None else "",
             "agent_loop": getattr(self.agent_loop, "__name__", type(self.agent_loop).__name__),
+            "knowledge": type(self.knowledge).__name__ if self.knowledge is not None else "",
+            "data_backend": type(self.data_backend).__name__ if self.data_backend is not None else "",
             "log_dir": str(self.log_dir) if self.log_dir is not None else str(host.log_dir()),
         }
 
@@ -90,6 +99,8 @@ class OrchestratorService:
             model_chain=self.models,
             search_chain=self.search,
             agent_loop=self.agent_loop,
+            knowledge=self.knowledge,
+            data_backend=self.data_backend,
             log_dir=self.log_dir,
         )
 

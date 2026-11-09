@@ -80,7 +80,10 @@ class EnvExampleTests(unittest.TestCase):
             0.35,
             "comments should stay minimal: one short line per section/provider",
         )
-        self.assertLess(len(lines), 130, "the template must stay readable")
+        # 150 since v0.17.0: the ARAS section added one line per service
+        # (seven tokens + identity + RAG/data knobs). The ratio above is the
+        # real leanness guard; this cap only tracks deliberate growth.
+        self.assertLess(len(lines), 150, "the template must stay readable")
 
     def test_no_secret_is_committed(self):
         pattern = re.compile(

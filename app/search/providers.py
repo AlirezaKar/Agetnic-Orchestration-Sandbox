@@ -521,7 +521,48 @@ class SearXNGSearch(BaseSearchProvider):
         raise last_error or SearchError(self.name, "search failed")
 
 
+class ArasWebSearch(BaseSearchProvider):
+    """The ARAS web service (:8108) — SearXNG + Crawl4AI behind one token.
+
+    The JSON shapes live in ``app/aras.py``; this class only adapts them to
+    the chain's ``SearchResult``. 502/503 mean the engines behind the service
+    timed out — the chain's next backend takes over.
+    """
+
+    name = "aras"
+    label = "ARAS web service"
+
+    async def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+        from app.aras import ArasError, ArasWebClient  # noqa: PLC0415 — optional wiring
+
+        client = ArasWebClient(self.settings, transport=self._transport)
+        if not client.configured:
+            raise SearchError(
+                self.name,
+                "ARAS web service not configured",
+                hint="set ARAS_BASE_URL (or ARAS_WEB_URL) and ARAS_WEB_TOKEN "
+                "(or the shared ARAS_TOKEN) in .env",
+            )
+        try:
+            hits = await client.search(query, max_results=max_results)
+        except ArasError as exc:
+            raise SearchError(
+                self.name, str(exc), status=exc.status, hint=exc.hint
+            ) from exc
+        return [
+            SearchResult(
+                title=hit["title"],
+                url=hit["url"],
+                snippet=hit["snippet"],
+                source=f"aras:{hit['engine']}" if hit.get("engine") else "aras",
+            )
+            for hit in hits
+            if hit.get("url")
+        ]
+
+
 PROVIDER_CLASSES = {
+    "aras": ArasWebSearch,
     "ddg": DuckDuckGoSearch,
     "wikipedia": WikipediaSearch,
     "tavily": TavilySearch,

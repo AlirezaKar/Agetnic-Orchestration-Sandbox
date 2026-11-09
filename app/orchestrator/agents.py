@@ -107,6 +107,11 @@ class AgentContext:
     upstream: dict[str, "AgentOutcome"] = field(default_factory=dict)
     # injected by the service/manager: the single-agent tool loop for `search`
     agent_loop: AgentLoopFactory | None = None
+    # optional ports (contracts.KnowledgeStore / contracts.DataBackend) —
+    # None keeps the old behaviour: document skips without attachments,
+    # data computes locally or reports it had nothing to compute
+    knowledge: Any = None
+    data_backend: Any = None
 
     @property
     def has_model(self) -> bool:
@@ -440,12 +445,14 @@ DOCUMENT_PROMPT = (
 async def run_document(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
     started = time.perf_counter()
     if not ctx.attachments:
+        if ctx.knowledge is not None:
+            return await _document_from_knowledge(step, ctx, started)
         return AgentOutcome(
             agent="document",
             status="skipped",
             task=step.task,
             reason=step.reason,
-            detail="no attachments in this request",
+            detail="no attachments in this request (and no knowledge store is wired in)",
             depends_on=list(step.depends_on),
         )
     budget = max(int(ctx.settings.files_context_chars), 1500)
@@ -536,6 +543,138 @@ async def run_document(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         model=response.model,
         detail=f"{len(ctx.attachments)} file(s), {len(scored)} excerpt(s)",
         data={"files": [item.summary() for item in ctx.attachments]},
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        model_calls=1,
+        depends_on=list(step.depends_on),
+    )
+
+
+async def _document_from_knowledge(
+    step: PlanStep, ctx: AgentContext, started: float
+) -> AgentOutcome:
+    """No attachment, but the host wired a knowledge store: retrieve, then answer.
+
+    Hits come back shaped ``{"text", "source", "document_id", "score"}`` (see
+    ``contracts.KnowledgeStore``). The answer cites the source filenames —
+    the same grounding rule the attachment path follows.
+    """
+    query = f"{ctx.message} {step.task}".strip()[:500]
+    store = getattr(ctx.knowledge, "describe", lambda: {})()
+    ctx.emit(
+        "agent",
+        "document",
+        "Task received (no attachment — searching the knowledge store)",
+        task=step.task,
+        reason=step.reason,
+        store=store,
+        query=query[:300],
+    )
+    try:
+        hits = await ctx.knowledge.retrieve(query, limit=6)
+    except Exception as exc:  # the port is remote; a down service is an outcome, not a crash
+        ctx.emit("agent", "document", "Knowledge store failed", error=f"{type(exc).__name__}: {exc}")
+        return AgentOutcome(
+            agent="document",
+            status="failed",
+            task=step.task,
+            reason=step.reason,
+            error=f"knowledge store: {exc}",
+            hint="is the retrieval service up (and the tunnel open)?",
+            detail="knowledge store unreachable",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            depends_on=list(step.depends_on),
+        )
+    hits = [hit for hit in hits if str(hit.get("text") or "").strip()]
+    ctx.emit(
+        "agent",
+        "document",
+        "Retrieved from the knowledge store",
+        hits=[
+            {
+                "source": hit.get("source") or hit.get("document_id") or "?",
+                "score": hit.get("score"),
+                "chars": len(str(hit.get("text") or "")),
+                "preview": re.sub(r"\s+", " ", str(hit.get("text") or "").strip())[:240],
+            }
+            for hit in hits
+        ],
+    )
+    if not hits:
+        return AgentOutcome(
+            agent="document",
+            status="skipped",
+            task=step.task,
+            reason=step.reason,
+            detail="the knowledge store returned nothing for this request",
+            data={"knowledge": store},
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            depends_on=list(step.depends_on),
+        )
+
+    budget = max(int(ctx.settings.files_context_chars), 1500)
+    sources = list(dict.fromkeys(
+        str(hit.get("source") or hit.get("document_id") or "") for hit in hits
+    ))
+    context = "\n\n".join(
+        f"### {hit.get('source') or hit.get('document_id') or 'document'}\n"
+        + str(hit.get("text") or "").strip()
+        for hit in hits
+    )[:budget]
+    upstream_text, _used = ctx.upstream_block(step)
+
+    if not ctx.has_model:
+        return AgentOutcome(
+            agent="document",
+            status="ok",
+            answer=(
+                "Retrieved from the knowledge store (no model configured, so this is "
+                "a raw extract rather than a written answer):\n\n" + context
+            ),
+            task=step.task,
+            reason=step.reason,
+            detail=f"knowledge store, {len(hits)} hit(s), extractive (no model)",
+            data={"knowledge": store, "hits": len(hits)},
+            sources=sources,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            depends_on=list(step.depends_on),
+        )
+
+    messages = [
+        {"role": "system", "content": DOCUMENT_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Request: {ctx.message}\n\nYour task: {step.task}\n\n"
+                f"There is no attached file. The excerpts below were retrieved from "
+                f"the indexed knowledge base; answer from them only and name the "
+                f"source document for every claim.\n\nExcerpts:\n\n{context}"
+            )
+            + upstream_text,
+        },
+    ]
+    ctx.emit_prompt(
+        "agent", "document", "Prompt sent to the model", messages,
+        kind="document-knowledge", hits=len(hits), context_chars=len(context),
+    )
+    try:
+        response = await ctx.model_chain.complete(
+            messages, None, temperature=0.1, max_tokens=ctx.settings.llm_max_tokens
+        )
+    except Exception as exc:
+        ctx.emit("agent", "document", "Model call failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+    ctx.emit_response("agent", "document", "Model reply", response)
+    return AgentOutcome(
+        agent="document",
+        status="ok" if response.content else "failed",
+        answer=response.content,
+        task=step.task,
+        reason=step.reason,
+        provider=response.provider,
+        model=response.model,
+        detail=f"knowledge store, {len(hits)} hit(s)",
+        data={"knowledge": store, "hits": len(hits)},
+        sources=sources,
         latency_ms=int((time.perf_counter() - started) * 1000),
         model_calls=1,
         depends_on=list(step.depends_on),
@@ -688,6 +827,11 @@ async def run_data(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         except ValueError:
             continue
     computed = _data_answer(profiles, expression, numbers_f)
+    # Nothing attached and nothing to evaluate in the message itself: if the
+    # host wired a data backend (registered analytics sources on the other
+    # side of the port), the question belongs there.
+    if ctx.data_backend is not None and not profiles and not expression and not numbers_f:
+        return await _data_from_backend(step, ctx, started)
     data = {
         "tables": profiles,
         "expression": {"text": expression[0], "value": expression[1]} if expression else None,
@@ -760,6 +904,85 @@ async def run_data(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
         data=data,
         latency_ms=int((time.perf_counter() - started) * 1000),
         model_calls=1,
+        depends_on=list(step.depends_on),
+    )
+
+
+async def _data_from_backend(step: PlanStep, ctx: AgentContext, started: float) -> AgentOutcome:
+    """The request brought no table and no expression — ask the data backend.
+
+    The backend (``contracts.DataBackend``) answers a natural-language question
+    from sources registered on its side; the reply carries the answer plus the
+    columns/rows it computed from, which land in ``data`` for the trace and UI.
+    """
+    backend = getattr(ctx.data_backend, "describe", lambda: {})()
+    question = (step.task or ctx.message).strip()[:1000]
+    ctx.emit(
+        "agent",
+        "data",
+        "Nothing local to compute — asking the data backend",
+        task=step.task,
+        reason=step.reason,
+        backend=backend,
+        question=question[:300],
+    )
+    try:
+        result = await ctx.data_backend.query(question)
+    except Exception as exc:  # remote port: a down service is an outcome, not a crash
+        ctx.emit("agent", "data", "Data backend failed", error=f"{type(exc).__name__}: {exc}")
+        return AgentOutcome(
+            agent="data",
+            status="failed",
+            task=step.task,
+            reason=step.reason,
+            error=f"data backend: {exc}",
+            hint="is the data service up, and does the tenant have this source?",
+            detail="data backend unreachable",
+            data={"backend": backend},
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            depends_on=list(step.depends_on),
+        )
+    answer = str(result.get("answer") or "").strip()
+    rows = result.get("rows") or []
+    columns = result.get("columns") or []
+    ctx.emit(
+        "agent",
+        "data",
+        "Data backend answered",
+        answer_chars=len(answer),
+        columns=columns,
+        rows=min(len(rows), 50),
+        queries=result.get("queries") or [],
+    )
+    if not answer and not rows:
+        return AgentOutcome(
+            agent="data",
+            status="skipped",
+            task=step.task,
+            reason=step.reason,
+            detail="the data backend had no answer for this question",
+            data={"backend": backend},
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            depends_on=list(step.depends_on),
+        )
+    if not answer:
+        preview = ", ".join(map(str, columns)) or "rows"
+        answer = f"The data source returned {len(rows)} row(s) of {preview}."
+    return AgentOutcome(
+        agent="data",
+        status="ok",
+        answer=answer,
+        task=step.task,
+        reason=step.reason,
+        detail="answered by the data backend",
+        data={
+            "backend": backend,
+            "columns": columns,
+            "rows": rows[:50],
+            "queries": result.get("queries") or [],
+            "chart_spec": result.get("chart_spec"),
+        },
+        latency_ms=int((time.perf_counter() - started) * 1000),
         depends_on=list(step.depends_on),
     )
 

@@ -41,6 +41,9 @@ class LLMPreset:
     auth_scheme: str = "bearer"
     auth_header: str = "Authorization"
     extra_headers: dict[str, str] = field(default_factory=dict)
+    # Django-style endpoints 301-redirect POSTs without a trailing slash (and
+    # the body is lost on the redirect), so these presets call .../chat/completions/
+    trailing_slash: bool = False
     notes: str = ""
 
     @property
@@ -49,6 +52,23 @@ class LLMPreset:
 
 
 PRESETS: dict[str, LLMPreset] = {
+    "aras": LLMPreset(
+        name="aras",
+        label="ARAS router (the other app's model gateway)",
+        base_url="{aras_router_url}",
+        key_field="aras_router_token",
+        model_field="aras_model",
+        example_model="sharif-rayen-gemma4-31b",
+        key_url="(issued with the ARAS access package — ARAS_ROUTER_TOKEN in .env)",
+        models_url="GET /api/v1/models/ on the router (port 8101)",
+        free_tier="Private service; the router token is limited to Rayen models.",
+        docs_url="",
+        needs_local_server=True,
+        trailing_slash=True,
+        notes="OpenAI-compatible. Reach it through the SSH tunnel "
+        "(ssh -L 8101:127.0.0.1:8101 ...). Model ids with the sharif- prefix are "
+        "routed to Rayen; gapgpt-/openrouter-/deepseek- prefixes are rejected.",
+    ),
     "groq": LLMPreset(
         name="groq",
         label="Groq Cloud",

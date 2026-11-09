@@ -23,6 +23,11 @@ A small backend skeleton where **the model is pluggable** (free providers only) 
   verdict behind it. The answer still arrives once, in its own bubble.
 - Built-in way to **verify** all of it: `python -m scripts.doctor`, `GET /diagnose`,
   `GET /search/diagnose`, plus an offline test suite.
+- **It can run on the ARAS microservices it is being built for**: fill the
+  `ARAS_*` block in `.env` and the router becomes the model, the web service
+  becomes the search backend, OCR reads the PDFs, retrieval gives the document
+  agent a knowledge base (RAG), and the data service answers the data agent's
+  questions — with the public providers staying as fallbacks (§6 ARAS).
 - **You can evaluate the orchestration itself**: the **Evaluate** button (or
   `POST /audit/run`) runs eighteen checks over the real pipeline — selection,
   briefs, waves, isolation, timeouts, the evaluator gate, the review loop, the
@@ -73,7 +78,7 @@ python3 run.py --reload                                       # server only
 
 `run.py` is the supported entry point: it starts **one** process that serves both the page
 and the API, prints the URLs/routes, warns about a missing `.env` or missing assets, and
-starts the logs described in §9 (`logs/agetnic.log`, `error.log`, `requests.log`,
+starts the logs described in §10 (`logs/agetnic.log`, `error.log`, `requests.log`,
 `terminal.log`, `process.log`). Plain `uvicorn app.main:app --port 8000` works too — it
 configures the same files on startup.
 
@@ -117,7 +122,7 @@ GROQ_API_KEY=gsk_…
 GROQ_MODEL=openai/gpt-oss-120b
 ```
 
-Auto order: `groq → gemini → openrouter → mistral → cerebras → nvidia → cloudflare →
+Auto order: `aras → groq → gemini → openrouter → mistral → cerebras → nvidia → cloudflare →
 huggingface → ollama → lmstudio → custom`. A key without a model does not win; the next
 provider in the order is tried. `LLM_FALLBACKS=gemini,openrouter` puts those first instead.
 
@@ -358,7 +363,7 @@ which is the intended, non-silent behaviour.
 
 ## 5. Manager orchestration (Auto mode)
 
-The single-agent loop in §6 is one model with two tools. Auto mode adds a lead:
+The single-agent loop in §3–4 is one model with two tools. Auto mode adds a lead:
 
 ```
 1. classify      rules read the prompt, the files and the roster
@@ -794,7 +799,66 @@ in-process memory and reports `writable: false` in `/health`.
 
 ---
 
-## 6. HTTP API
+## 6. ARAS microservices (wiring this orchestrator into the other app)
+
+This orchestrator is being developed for an app whose capabilities already run
+as microservices (the "ARAS AI" services). Once the `ARAS_*` block in `.env`
+is filled, every part of the pipeline that used a public provider talks to
+those services instead — the old architecture is unchanged, only the ports are
+rewired, and every public provider stays available as a fallback.
+
+| Service | Port | What it becomes here |
+|---|---|---|
+| router (`aras`) | 8101 | the model: an OpenAI-compatible provider that **leads the auto chain** when configured (`POST /api/v1/chat/completions/` — the trailing slash matters and is handled) |
+| web (`aras`) | 8108 | the search backend that **leads the search chain** when configured (`POST /v1/search/`; 502/503 falls through to ddg/wikipedia) |
+| ocr | 8102 | the PDF reader: uploads go through `POST /api/v1/ocr/`, with the local `pypdf` parse as fallback |
+| retrieval | 8105 | the document agent's **knowledge store** (RAG): no attachment → `POST /v1/search/` over `ARAS_COLLECTION`, grounded answer with source filenames |
+| ingestion | 8104 | `ARAS_AUTO_INGEST=true` indexes every accepted upload into the collection (`POST /v1/ingest/`) |
+| data | 8107 | the data agent's **analytics backend**: nothing local to compute → `POST /v1/query/` against `ARAS_DATA_SOURCE_ID` (needs `ARAS_TENANT` + `ARAS_OWNER` headers) |
+| vector store | 8103 | health/diagnostics only — ingestion and retrieval are the right doors for orchestrator work |
+
+Setup, from the machine that runs this sandbox:
+
+```bash
+# 1. open the tunnel to the ARAS server (keep 127.0.0.1 addressing)
+ssh -L 8101:127.0.0.1:8101 -L 8102:127.0.0.1:8102 -L 8103:127.0.0.1:8103 \
+    -L 8104:127.0.0.1:8104 -L 8105:127.0.0.1:8105 -L 8107:127.0.0.1:8107 \
+    -L 8108:127.0.0.1:8108 <user>@<aras-server>
+
+# 2. .env — one host root + the tokens from the access package
+ARAS_BASE_URL=http://127.0.0.1
+ARAS_ROUTER_TOKEN=...        # or one shared ARAS_TOKEN for everything
+ARAS_MODEL=sharif-rayen-gemma4-31b
+ARAS_TENANT=... ARAS_OWNER=...      # the data service's identity headers
+ARAS_COLLECTION=alireza_notes       # the RAG collection
+
+# 3. verify — one call checks every configured service's /health
+curl -s localhost:8000/aras | python3 -m json.tool
+```
+
+The rules, so behaviour stays predictable:
+
+- **Nothing changes until a URL + token pair exists.** With an empty `ARAS_*`
+  block the model chain, search chain, agents and uploads behave exactly as
+  before — all tests run keyless and offline.
+- **Tokens are per service** (`ARAS_ROUTER_TOKEN`, `ARAS_WEB_TOKEN`, ...);
+  any left empty falls back to the shared `ARAS_TOKEN`. Each service URL can
+  be overridden (`ARAS_ROUTER_URL`, ...) when it is not `base_url:port`.
+- **Local work stays first.** The data agent still computes attached tables
+  and plain arithmetic deterministically; the backend is only asked when the
+  request brings nothing to compute. The document agent still prefers the
+  attached file; the knowledge store is its source only when there is none.
+- **A down service is an outcome, not a crash**: the agent reports `failed`
+  with the reason (and the run continues), the search chain falls through to
+  the public backends, a failed OCR falls back to `pypdf`, and `GET /aras` +
+  Run diagnostics show which service stopped answering.
+- The orchestrator package keeps its boundary: the new `KnowledgeStore` and
+  `DataBackend` ports live in `app/orchestrator/contracts.py`; the ARAS
+  clients live host-side in `app/aras.py`, wired in `app/main.py` only.
+
+---
+
+## 7. HTTP API
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -824,7 +888,8 @@ in-process memory and reports `writable: false` in `/health`.
 | `GET` | `/sessions/{id}` | every turn of a conversation, with the payload to replay it |
 | `PATCH` | `/sessions/{id}` | rename a conversation |
 | `DELETE` | `/sessions/{id}` | forget a conversation |
-| `GET` | `/diagnose` | model ping + search pings + hints |
+| `GET` | `/diagnose` | model ping + search pings + ARAS health (when configured) + hints |
+| `GET` | `/aras` | the ARAS microservices this host is wired to: endpoints, per-service health, RAG/data readiness (§6) |
 | `GET` | `/version` | app version (also in `/health` and in the page `<meta>`) |
 
 **Every route above is also served under `/api`** (`/api/chat`, `/api/health`, …), and
@@ -845,7 +910,7 @@ unreadable or oversized attachment (with a `hint`), `503` when the orchestrator 
 
 ---
 
-## 7. Layout
+## 8. Layout
 
 ```
 app/
@@ -876,6 +941,7 @@ app/
     trace.py           every step of a run (prompts, tools, replies), clipping
     runlog.py          logs/orchestrator/ records: save, list, read
     files.py           upload decoding, extraction (txt/csv/json/docx/xlsx/pdf), store
+  aras.py              clients for the ARAS microservices + the two port adapters (§6)
   main.py              FastAPI routes (served at / and /api)
   logs.py              LOGGING: rotating files, redaction, request lines, crash capture
   static/index.html    the studio page: top bar, sidebar, chat, inspector, modals
@@ -896,7 +962,7 @@ tests/                 offline tests (MockTransport, no keys)
 docs/redesign/         the design reference the UI was built on (preview.png + prototype)
 ```
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -922,7 +988,7 @@ docs/redesign/         the design reference the UI was built on (preview.png + p
 | "Permission needed" card in the composer | `FILES_PERMISSION_PROMPT=true`: allow or refuse each attached file. Set it back to `false` to allow every file at once |
 | Anything else | `python -m scripts.logs errors` (tracebacks), `... requests --status 5xx`, `... tail -f` |
 
-## 9. Logs
+## 10. Logs
 
 Everything goes to `logs/` (override with `LOG_DIR`). Files are created on start, rotate at
 5 MB × 5, and are git-ignored — only `logs/README.md` and `logs/changelog/` are committed.
@@ -977,7 +1043,7 @@ skips the model ping the same way.
 `logs/changelog/` holds release notes, one markdown file per version, indexed in
 [`logs/changelog/README.md`](logs/changelog/README.md) — those are notes, not logs.
 
-## 10. Design notes
+## 11. Design notes
 
 - **One dialect, many vendors.** OpenAI-compatible chat completions is the narrow waist;
   presets only carry endpoint/auth/model/link differences. Adding a provider is a dict
