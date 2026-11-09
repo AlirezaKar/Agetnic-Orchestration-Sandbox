@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from app.config import trust_env_for
 from app.llm.base import ModelResponse, ProviderError, ToolCall
 from app.llm.model_picker import (
     DEFAULT_ATTEMPTS,
@@ -101,10 +102,13 @@ class OpenAICompatProvider:
         return headers
 
     def _client(self) -> httpx.AsyncClient:
+        # Loopback endpoints (ARAS tunnel, Ollama, LM Studio) bypass any
+        # HTTP(S)_PROXY from the environment; public hosts keep honouring it.
         return httpx.AsyncClient(
             timeout=self.timeout,
             transport=self._transport,
             follow_redirects=True,
+            trust_env=trust_env_for(self.base_url),
         )
 
     @staticmethod

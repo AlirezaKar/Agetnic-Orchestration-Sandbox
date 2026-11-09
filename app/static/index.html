@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#090d14" />
-  <meta name="agetnic-version" content="0.17.0" />
+  <meta name="agetnic-version" content="0.18.0" />
   <meta name="description" content="Agentic Orchestration Studio — a controlled workspace for testing agent workflows, search providers and execution traces." />
   <title>Agetnic Orchestration Sandbox — Agentic Orchestration Studio</title>
   <script>
@@ -22,10 +22,10 @@
        stale caches after an upgrade. -->
   <!-- A data: icon keeps the browser from asking /favicon.ico at all. -->
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.17.0" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.17.0" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.18.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.18.0" />
   <!-- light palette: maps every colour of the dark design; loads last so it can win -->
-  <link rel="stylesheet" href="assets/css/theme.css?v=0.17.0" />
+  <link rel="stylesheet" href="assets/css/theme.css?v=0.18.0" />
 </head>
 <body>
   <!-- Connection / asset diagnostics: shown by app.js, never by the server -->
@@ -53,24 +53,54 @@
         </div>
       </div>
       <div class="topbar-right">
-        <div class="status-pill" id="pill-llm"><span class="dot"></span><code id="badge-llm">LLM&nbsp; checking…</code></div>
-        <div class="status-pill search-pill" id="pill-search"><span class="dot"></span><code id="badge-search">SEARCH&nbsp; checking…</code></div>
-        <div class="status-pill" id="pill-diag"><span class="dot"></span><code id="badge-diag">Diag: not run</code></div>
-        <div class="status-pill" id="pill-audit"><span class="dot"></span><code id="badge-audit">Audit: not run</code></div>
         <button class="btn icon-only theme-toggle" id="btn-theme" aria-pressed="false"
                 title="Switch to light mode" aria-label="Switch to light mode">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><path d="M12 2.6v2.2M12 19.2v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.4 19.6 6 18M18 6l1.6-1.6"/></svg>
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5Z"/></svg>
         </button>
-        <button class="btn" id="btn-providers">Providers</button>
-        <button class="btn" id="btn-audit-top" title="Check the orchestration itself: 18 checks, offline in about a second">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 4h6a1 1 0 0 1 1 1v1H8V5a1 1 0 0 1 1-1Z"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="m8.5 13.5 2.2 2.2 4.3-4.6"/></svg>
-          Evaluate
-        </button>
-        <button class="btn" id="btn-diag-top">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13a8 8 0 1 0 2.4-5.7L4 9"/><path d="M4 4v5h5M12 8v4l3 2"/></svg>
-          Run diagnostics
-        </button>
+
+        <!-- Status ▾ — the four live pills, now rows inside one dropdown -->
+        <div class="nav-menu" id="menu-status">
+          <button class="btn nav-menu-btn" id="btn-menu-status" aria-haspopup="true" aria-expanded="false">
+            <span class="dot" id="menu-status-dot"></span>
+            Status
+            <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="nav-menu-panel" role="menu" aria-label="Live status">
+            <div class="status-pill menu-row" id="pill-llm" role="menuitem"><span class="dot"></span><code id="badge-llm">LLM&nbsp; checking…</code></div>
+            <div class="status-pill search-pill menu-row" id="pill-search" role="menuitem"><span class="dot"></span><code id="badge-search">SEARCH&nbsp; checking…</code></div>
+            <div class="status-pill menu-row" id="pill-aras" role="menuitem"><span class="dot"></span><code id="badge-aras">ARAS&nbsp; not checked</code></div>
+            <div class="status-pill menu-row" id="pill-diag" role="menuitem"><span class="dot"></span><code id="badge-diag">Diag: not run</code></div>
+            <div class="status-pill menu-row" id="pill-audit" role="menuitem"><span class="dot"></span><code id="badge-audit">Audit: not run</code></div>
+          </div>
+        </div>
+
+        <!-- Tools ▾ — every console action in one dropdown -->
+        <div class="nav-menu" id="menu-tools">
+          <button class="btn nav-menu-btn" id="btn-menu-tools" aria-haspopup="true" aria-expanded="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14.5 6.5a4 4 0 0 1-5.6 5.1L5 15.5a1.8 1.8 0 1 0 3.5 3.5l3.9-3.9a4 4 0 0 1 5.1-5.6l-2.6 2.6-1.5-1.5 2.6-2.6Z" transform="rotate(90 12 12)"/></svg>
+            Tools
+            <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="nav-menu-panel" role="menu" aria-label="Console tools">
+            <button class="menu-item" id="btn-providers" role="menuitem" title="Every free model/search option with key links">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M7.5 7.5h.01M7.5 16.5h.01"/></svg>
+              Providers
+            </button>
+            <button class="menu-item" id="btn-aras-top" role="menuitem" title="Is the ARAS wiring actually used? Health + a proof run">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5.5" cy="12" r="2.2"/><circle cx="18.5" cy="5.5" r="2.2"/><circle cx="18.5" cy="18.5" r="2.2"/><path d="M7.6 10.9 16.4 6.6M7.6 13.1l8.8 4.3"/></svg>
+              ARAS wiring
+            </button>
+            <button class="menu-item" id="btn-diag-top" role="menuitem" title="Live pings: model, search backends and ARAS services">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13a8 8 0 1 0 2.4-5.7L4 9"/><path d="M4 4v5h5M12 8v4l3 2"/></svg>
+              Run diagnostics
+            </button>
+            <button class="menu-item" id="btn-audit-top" role="menuitem" title="Check the orchestration itself: 18 checks, offline in about a second">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 4h6a1 1 0 0 1 1 1v1H8V5a1 1 0 0 1 1-1Z"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="m8.5 13.5 2.2 2.2 4.3-4.6"/></svg>
+              Evaluate
+            </button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -425,6 +455,45 @@
     </section>
   </div>
 
+  <!-- ARAS wiring modal: is the microservice stack configured, up and USED? -->
+  <div class="modal-backdrop panel-hidden" id="aras-modal" role="presentation">
+    <section class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="aras-title">
+      <div class="modal-head">
+        <div class="audit-head">
+          <strong id="aras-title">ARAS wiring — is it actually used?</strong>
+          <span class="audit-sub" id="aras-sub">GET /aras pings every configured service; the proof run shows which provider answered a real request.</span>
+        </div>
+        <button class="btn icon-only ghost" id="btn-close-aras" aria-label="Close ARAS wiring">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+
+      <div class="audit-toolbar">
+        <button class="btn primary" id="btn-aras-check">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 13a8 8 0 1 0 2.4-5.7L4 9"/><path d="M4 4v5h5"/></svg>
+          Check wiring
+        </button>
+        <button class="btn" id="btn-aras-proof" title="One tiny real run through POST /orchestrate — the run record names the provider and model that answered">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 5.5v13l11-6.5-11-6.5Z"/></svg>
+          Proof run
+        </button>
+        <span class="audit-count" id="aras-state">idle</span>
+        <button class="btn ghost" id="btn-aras-copy" title="Copy the latest wiring report (and proof run) as JSON" style="margin-left:auto">Copy JSON</button>
+      </div>
+
+      <div class="modal-body" id="aras-body"><span class="muted">Press “Check wiring” to call GET /aras.</span></div>
+
+      <div class="modal-foot">
+        <p class="modal-note" id="aras-note">
+          Level 1 is config: does the router lead the model chain? Level 2 is health: does each
+          service answer its /health route? The proof run is level 3: a real request whose run
+          record names <code>provider</code> and <code>model</code> — if it says <code>aras</code>, the stack answered.
+        </p>
+        <button class="btn" id="btn-aras-close">Close</button>
+      </div>
+    </section>
+  </div>
+
   <!-- Providers modal: every free option with key/model links -->
   <div class="modal-backdrop panel-hidden" id="providers-modal" role="presentation">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="providers-title">
@@ -440,11 +509,12 @@
           Set <code>LLM_PROVIDER</code> (or <code>auto</code>) + its key and model in <code>.env</code>.
           The model you write is the model that is called.
         </p>
+        <button class="btn ghost" id="btn-providers-copy" title="Copy the latest GET /providers report as JSON">Copy JSON</button>
         <button class="btn" id="btn-providers-close">Close</button>
       </div>
     </section>
   </div>
 
-  <script src="assets/js/app.js?v=0.17.0" defer></script>
+  <script src="assets/js/app.js?v=0.18.0" defer></script>
 </body>
 </html>

@@ -253,6 +253,106 @@ class ArasClientTests(unittest.TestCase):
         self.assertIsNone(aras.pdf_reader(Settings(_env_file=None)))
         self.assertIsNotNone(aras.pdf_reader(aras_settings()))
 
+    def test_status_skipped_names_every_service_including_the_router(self) -> None:
+        """An unconfigured stack lists router too — it used to be omitted."""
+        report = run(aras.status(Settings(_env_file=None)))
+        self.assertIn("router", report["skipped"])
+        for name in aras.CLIENTS:
+            self.assertIn(name, report["skipped"])
+        # and a fully configured stack skips nothing
+        full = run(aras.status(
+            aras_settings(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"status": "ok"})
+            ),
+        ))
+        self.assertEqual(full["skipped"], [])
+
+    def test_health_error_carries_a_body_snippet(self) -> None:
+        """HTTP 503 from *something* — the body names who actually answered.
+
+        A VPN/system proxy answering for 127.0.0.1 returns its own error page;
+        without the snippet the report is indistinguishable from a broken
+        service. (This is exactly the all-seven-services-503 failure.)
+        """
+        client = aras.ArasRetrievalClient(
+            aras_settings(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    503, text="<html>Access denied by security policy</html>"
+                )
+            ),
+        )
+        report = run(client.health())
+        self.assertFalse(report["ok"])
+        self.assertIn("HTTP 503", report["error"])
+        self.assertIn("Access denied by security policy", report["error"])
+
+
+# ---------------------------------------------------------- proxy bypass
+class ProxyBypassTests(unittest.TestCase):
+    """Loopback traffic must never be routed through HTTP(S)_PROXY.
+
+    The field failure: a VPN/system proxy intercepted the SSH tunnel's
+    127.0.0.1 ports and answered HTTP 503 for all seven services at once,
+    because httpx defaults to ``trust_env=True``.
+    """
+
+    def test_trust_env_is_off_for_loopback_and_on_for_public_hosts(self) -> None:
+        from app.config import trust_env_for
+
+        for url in ("http://127.0.0.1:8101", "http://localhost:11434",
+                    "https://[::1]:8000", "http://0.0.0.0:9000"):
+            self.assertFalse(trust_env_for(url), url)
+        for url in ("https://api.groq.com/openai/v1", "https://openrouter.ai/api/v1"):
+            self.assertTrue(trust_env_for(url), url)
+
+    def test_aras_clients_bypass_the_proxy_env(self) -> None:
+        client = aras.ArasRetrievalClient(aras_settings(aras_base_url="http://127.0.0.1"))
+        http = client._client()
+        try:
+            self.assertFalse(http.trust_env)
+        finally:
+            run(http.aclose())
+
+    def test_openai_compat_bypasses_the_proxy_env_only_on_loopback(self) -> None:
+        from app.llm.openai_compat import OpenAICompatProvider
+
+        local = OpenAICompatProvider(
+            name="ollama", label="Ollama", base_url="http://127.0.0.1:11434/v1",
+            api_key="x", model="m", auth_scheme="none",
+        )
+        public = OpenAICompatProvider(
+            name="groq", label="Groq", base_url="https://api.groq.com/openai/v1",
+            api_key="x", model="m",
+        )
+        local_http, public_http = local._client(), public._client()
+        try:
+            self.assertFalse(local_http.trust_env)
+            self.assertTrue(public_http.trust_env)
+        finally:
+            run(local_http.aclose())
+            run(public_http.aclose())
+
+    def test_hints_name_the_proxy_when_every_service_answers_an_http_error(self) -> None:
+        from app.main import _hints
+
+        settings = Settings(_env_file=None)
+        base = {"configured": ["router"], "rag_ready": True, "data_ready": True}
+        proxied = dict(base, checked=[
+            {"service": "router", "ok": False, "error": "HTTP 503 — Access denied"},
+            {"service": "web", "ok": False, "error": "HTTP 503 — Access denied"},
+        ])
+        hints = _hints(settings, {"ok": True}, [{"provider": "ddg", "ok": True}], proxied)
+        self.assertTrue(any("proxy" in hint for hint in hints), hints)
+        self.assertTrue(any("NO_PROXY" in hint for hint in hints), hints)
+        # a closed tunnel (connection errors) keeps the tunnel hint instead
+        closed = dict(base, checked=[
+            {"service": "router", "ok": False, "error": "ConnectError: refused"},
+        ])
+        hints = _hints(settings, {"ok": True}, [{"provider": "ddg", "ok": True}], closed)
+        self.assertTrue(any("SSH tunnel" in hint for hint in hints), hints)
+
 
 # ------------------------------------------------------------------ ports
 class StubKnowledge:

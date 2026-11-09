@@ -1397,12 +1397,28 @@ def _hints(
 ) -> list[str]:
     hints: list[str] = []
     if aras_report:
-        down = [c["service"] for c in aras_report.get("checked", []) if not c.get("ok")]
+        checked = aras_report.get("checked", [])
+        down = [c for c in checked if not c.get("ok")]
         if down:
-            hints.append(
-                f"ARAS service(s) not answering: {', '.join(down)}. Is the SSH tunnel "
-                "open? (ssh -L <port>:127.0.0.1:<port> ... — see GET /aras for detail)"
-            )
+            names = ", ".join(c["service"] for c in down)
+            answered = [c for c in down if str(c.get("error", "")).startswith("HTTP")]
+            if answered and len(answered) == len(down):
+                # every failure is an HTTP *response* — something replied, so
+                # the tunnel is not simply closed: usually a VPN/system proxy
+                # intercepting loopback (fixed in-app via trust_env=False, but
+                # a TUN-level VPN can still capture 127.0.0.1)
+                hints.append(
+                    f"ARAS service(s) answered with HTTP errors: {names}. Something is "
+                    "replying, so the tunnel is not closed — a VPN or system proxy may be "
+                    "intercepting 127.0.0.1. Unset HTTP_PROXY/HTTPS_PROXY (or add "
+                    "127.0.0.1 to NO_PROXY), then compare with a plain terminal: "
+                    "curl http://127.0.0.1:8101/api/v1/health/"
+                )
+            else:
+                hints.append(
+                    f"ARAS service(s) not answering: {names}. Is the SSH tunnel "
+                    "open? (ssh -L <port>:127.0.0.1:<port> ... — see GET /aras for detail)"
+                )
         if not aras_report.get("rag_ready") and "retrieval" in aras_report.get("configured", []):
             hints.append(
                 "ARAS retrieval is configured but ARAS_COLLECTION is empty, so the "

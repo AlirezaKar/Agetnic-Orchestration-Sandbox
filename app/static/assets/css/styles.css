@@ -329,8 +329,6 @@ kbd { font: 8px ui-monospace, monospace; border: 1px solid rgba(151,174,210,.2);
 @media (max-width: 1220px) {
   :root { --sidebar-width: 250px; --inspector-width: 320px; }
   .topbar { padding: 0 16px; }
-  .status-pill { padding: 0 8px; }
-  .status-pill.search-pill { display: none; }
 }
 @media (max-width: 980px) {
   :root { --inspector-width: 300px; }
@@ -348,9 +346,8 @@ kbd { font: 8px ui-monospace, monospace; border: 1px solid rgba(151,174,210,.2);
   .brand-mark { width: 34px; height: 34px; border-radius: 10px; }
   .brand-title { font-size: 12px; }
   .brand-subtitle { font-size: 9px; }
-  .topbar-right .status-pill { display: none; }
   .topbar-right .btn { height: 30px; padding: 0 8px; font-size: 9px; }
-  .topbar-right #diagnosticsButton { display: none; }
+  .nav-menu-btn .caret { display: none; }
   .workspace { display: block; position: relative; }
   .sidebar { position: fixed; z-index: 15; top: var(--header-height); bottom: 0; left: 0; width: min(292px, 88vw); box-shadow: 20px 0 60px rgba(0,0,0,.4); transform: translateX(-105%); transition: transform .22s ease; }
   .sidebar.open { transform: translateX(0); }
@@ -382,7 +379,6 @@ kbd { font: 8px ui-monospace, monospace; border: 1px solid rgba(151,174,210,.2);
   .message-body { max-width: 88%; }
 }
 @media (max-width: 390px) {
-  .topbar-right #providersButton { display: none; }
   .architecture { grid-template-columns: 1fr; }
   .architecture-step { min-height: auto; }
   .step-copy { margin-top: 5px; }

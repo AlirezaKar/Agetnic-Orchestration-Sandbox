@@ -88,7 +88,7 @@ the screen:
 
 | Column | What is in it |
 |---|---|
-| top bar | brand, `LLM` / `SEARCH` / `Diag` status pills, **Providers**, **Run diagnostics** |
+| top bar | brand + two dropdowns — **Status ▾** (the `LLM` / `SEARCH` / `ARAS` / `Diag` / `Audit` pills as rows, with one aggregate dot on the button) and **Tools ▾** (**Providers**, **ARAS wiring**, **Run diagnostics**, **Evaluate**) |
 | sidebar | workspace switcher · nav (Overview · Run history · Memory · Provider settings) · current session + the conversations in `memory/` (click to reopen) · **Runs** (`Saved` = `logs/orchestrator/`, `This tab` = your own runs) · **Agents** (live roster) · **Search backends** (click to pin) · health card (model + search latency) |
 | chat | the conversation as a reading surface — Markdown answers (tables, code, callouts), source chips, and the run panel with one chip per agent and every step of the run underneath |
 | inspector | three tabs — **Trace** (run summary, numbered timeline with durations, tool activity, readable diagnostics), **Context**, **JSON** |
@@ -308,11 +308,15 @@ Open <http://localhost:8000>:
 2. **Agent** mode → press Send. The answer carries a clickable timeline: model step → tool
    step (arguments, latency, ok/failed) → final answer, plus the `sources` list. That is the
    search call happening, not prose you have to trust.
-3. **Run diagnostics** (top bar) → the model ping and every configured backend appear with
+3. **Tools ▾ → Run diagnostics** → the model ping and every configured backend appear with
    pass/fail + latency, the badge turns green, and the rows plus the raw report open in the
-   inspector (the sidebar keeps no diagnostics panel of its own).
-4. **Providers** (top bar) → every free provider with its *Get API key* and *See models*
+   inspector (the sidebar keeps no diagnostics panel of its own); a **Copy report JSON**
+   button sits above the rows.
+4. **Tools ▾ → Providers** → every free provider with its *Get API key* and *See models*
    links, plus whether it is configured and whether a search backend needs a server.
+5. **Tools ▾ → ARAS wiring** → the "is it actually used?" panel: chain wiring from
+   `GET /aras`, one health row per service, and a **Proof run** button that fires one minimal
+   `POST /orchestrate` and shows which `provider · model` answered each agent.
 
 Depending on the mode, `/chat` returns `search_provider`, `sources` and the full `trace`, so
 the UI never has to imply that a search happened — it shows it.
@@ -643,7 +647,7 @@ pipeline through its four ports with scripted models, search and agent loops,
 so it needs **no key and no network**, finishes in about a third of a second,
 and never writes a run record or touches the conversation memory.
 
-Press **Evaluate** in the top bar (or `POST /audit/run`). The panel lists all
+Press **Tools ▾ → Evaluate** (or `POST /audit/run`). The panel lists all
 eighteen checks *before* anything runs, then fills them in one at a time as the
 verdicts land — a check per part of the machine, not one global score:
 
