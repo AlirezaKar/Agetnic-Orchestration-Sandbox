@@ -2326,6 +2326,17 @@
       summary.appendChild(diagRow(false, "search · " + skip.provider, "skipped", "skip"));
       summary.appendChild(el("div", "pdesc", skip.reason));
     });
+    if (data.aras) {
+      (data.aras.checked || []).forEach((report) => {
+        summary.appendChild(
+          diagRow(!!report.ok, "aras · " + report.service, report.ok ? report.latency_ms + " ms" : "")
+        );
+        if (!report.ok && report.error) summary.appendChild(el("div", "pdesc", report.error));
+      });
+      const ragReady = data.aras.rag_ready ? "rag ready" : "rag off";
+      const dataReady = data.aras.data_ready ? "data ready" : "data off";
+      summary.appendChild(el("div", "pdesc", "aras wiring · " + ragReady + " · " + dataReady));
+    }
     (data.hints || []).forEach((hint) => summary.appendChild(el("div", "pdesc", "→ " + hint)));
 
     const modelOk = !!model.ok;

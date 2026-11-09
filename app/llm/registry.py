@@ -80,6 +80,7 @@ def resolve_provider(name: str, settings: Settings, *, primary: bool = False) ->
             lmstudio_base_url=(settings.lmstudio_base_url or "").rstrip("/"),
             custom_base_url=(settings.custom_base_url or "").rstrip("/"),
             account_id=(settings.cloudflare_account_id or "").strip(),
+            aras_router_url=settings.aras_endpoint("router"),
         )
 
     # The model is always the one written in <PROVIDER>_MODEL (or LLM_MODEL).
@@ -98,6 +99,8 @@ def resolve_provider(name: str, settings: Settings, *, primary: bool = False) ->
             missing.append(required.upper())
     if preset.name == "custom" and not base_url:
         missing.append("CUSTOM_BASE_URL")
+    if preset.name == "aras" and not base_url:
+        missing.append("ARAS_BASE_URL")
     if preset.key_field and preset.name != "custom" and not api_key:
         # A custom gateway may be keyless; every hosted provider needs a key.
         missing.append(preset.key_field.upper())
@@ -162,6 +165,7 @@ def build_provider(resolved: ResolvedProvider, settings: Settings) -> OpenAIComp
         models_url=resolved.preset.models_url,
         auto_substitute=settings.llm_auto_substitute,
         max_model_attempts=settings.llm_model_attempts,
+        trailing_slash=resolved.preset.trailing_slash,
     )
 
 

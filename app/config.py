@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from typing import Any
+from typing import Any, ClassVar
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # When LLM_PROVIDER=auto, the first provider in this order that has both a key
-# and an explicitly configured model is used.
+# and an explicitly configured model is used. ``aras`` is first on purpose:
+# when the ARAS router is configured it IS the model, and the public providers
+# below become fallbacks.
 AUTO_PROVIDER_ORDER: tuple[str, ...] = (
+    "aras",
     "groq",
     "gemini",
     "openrouter",
@@ -157,6 +160,45 @@ class Settings(BaseSettings):
     searxng_api_key: str | None = None
     jina_api_key: str | None = None
 
+    # ------------------------------------------------- ARAS microservices
+    # The other app's services (see README §"ARAS microservices"). One host
+    # root — service ports are appended — or a full per-service URL override.
+    # Tokens are per service; ARAS_TOKEN is the shared fallback for any that
+    # are not set. Everything stays off until a URL + token pair exists.
+    aras_base_url: str = ""  # e.g. http://127.0.0.1 (through the SSH tunnel)
+    aras_token: str | None = None  # fallback for every ARAS_*_TOKEN below
+    aras_tenant: str | None = None  # X-Tenant for the data service
+    aras_owner: str | None = None  # X-Owner-External-Id for the data service
+    aras_timeout: float = 60.0
+    # RAG: the collection the document agent retrieves from (and ingestion
+    # writes to), e.g. alireza_notes. Empty = retrieval is not offered.
+    aras_collection: str = ""
+    aras_retrieval_mode: str = "hybrid"  # semantic | keyword | hybrid
+    # Also index every accepted upload into ARAS_COLLECTION (off by default).
+    aras_auto_ingest: bool = False
+    # The analytics source `POST /v1/query/` should answer from (optional —
+    # the data agent only uses the service when this is set).
+    aras_data_source_id: str | None = None
+    # Router model id, e.g. sharif-rayen-gemma4-31b (the router strips the
+    # sharif- prefix and sends the request to Rayen).
+    aras_model: str | None = None
+    # Per-service URL overrides (default: ARAS_BASE_URL + the known port)
+    aras_router_url: str | None = None  # :8101 (OpenAI-compatible, /api/v1)
+    aras_ocr_url: str | None = None  # :8102
+    aras_vector_url: str | None = None  # :8103
+    aras_ingestion_url: str | None = None  # :8104
+    aras_retrieval_url: str | None = None  # :8105
+    aras_data_url: str | None = None  # :8107
+    aras_web_url: str | None = None  # :8108
+    # Per-service tokens (each falls back to ARAS_TOKEN)
+    aras_router_token: str | None = None
+    aras_ocr_token: str | None = None
+    aras_vector_token: str | None = None
+    aras_ingestion_token: str | None = None
+    aras_retrieval_token: str | None = None
+    aras_data_token: str | None = None
+    aras_web_token: str | None = None
+
     # ----------------------------------------------------------- agent
     agent_max_steps: int = 4
     agent_max_search_results: int = 5
@@ -234,6 +276,61 @@ class Settings(BaseSettings):
             return parsed
         return value
 
+    @model_validator(mode="after")
+    def _aras_token_fallback(self) -> "Settings":
+        """Every ARAS service token falls back to the shared ARAS_TOKEN."""
+        for name in ("router", "ocr", "vector", "ingestion", "retrieval", "data", "web"):
+            field = f"aras_{name}_token"
+            if not getattr(self, field):
+                setattr(self, field, self.aras_token)
+        return self
+
+    # ------------------------------------------------------- ARAS helpers
+    #: service → (default port, path prefix the client expects)
+    ARAS_PORTS: ClassVar[dict[str, tuple[int, str]]] = {
+        "router": (8101, "/api/v1"),
+        "ocr": (8102, ""),
+        "vector": (8103, ""),
+        "ingestion": (8104, ""),
+        "retrieval": (8105, ""),
+        "data": (8107, ""),
+        "web": (8108, ""),
+    }
+
+    def aras_endpoint(self, service: str) -> str:
+        """The base URL for one ARAS service ('' when nothing is configured)."""
+        override = getattr(self, f"aras_{service}_url", None)
+        if override:
+            return str(override).rstrip("/")
+        root = (self.aras_base_url or "").rstrip("/")
+        if not root:
+            return ""
+        port, prefix = self.ARAS_PORTS[service]
+        return f"{root}:{port}{prefix}"
+
+    def aras_configured(self, service: str) -> bool:
+        """A service is usable when it has both an endpoint and a token."""
+        return bool(self.aras_endpoint(service) and getattr(self, f"aras_{service}_token", None))
+
+    @property
+    def aras_services_configured(self) -> list[str]:
+        return [name for name in self.ARAS_PORTS if self.aras_configured(name)]
+
+    @property
+    def aras_rag_ready(self) -> bool:
+        """The document agent may retrieve: retrieval service + a collection."""
+        return bool(self.aras_configured("retrieval") and self.aras_collection.strip())
+
+    @property
+    def aras_data_ready(self) -> bool:
+        """The data agent may query: data service + tenant/owner + a source id."""
+        return bool(
+            self.aras_configured("data")
+            and self.aras_tenant
+            and self.aras_owner
+            and self.aras_data_source_id
+        )
+
     # ----------------------------------------------------------- helpers
     @property
     def orchestrator_roster(self) -> list[str]:
@@ -272,7 +369,12 @@ class Settings(BaseSettings):
     def search_chain(self) -> list[str]:
         if self.search_providers.strip():
             return split_csv(self.search_providers)
-        return split_csv(",".join([self.search_provider, self.search_fallbacks]))
+        chain = split_csv(",".join([self.search_provider, self.search_fallbacks]))
+        # The ARAS web service, when configured, leads the chain: the point of
+        # wiring it is that it is used, with the public backends as fallbacks.
+        if self.aras_configured("web") and "aras" not in [c.lower() for c in chain]:
+            chain = ["aras", *chain]
+        return chain
 
     def public_summary(self) -> dict[str, Any]:
         """Config summary safe to expose over HTTP (no secrets)."""
@@ -296,6 +398,9 @@ class Settings(BaseSettings):
             "memory_history_turns": self.memory_history_turns,
             "files_permission_prompt": self.files_permission_prompt,
             "files_max_mb": self.files_max_mb,
+            "aras_services": self.aras_services_configured,
+            "aras_rag_ready": self.aras_rag_ready,
+            "aras_data_ready": self.aras_data_ready,
         }
 
 

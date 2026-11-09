@@ -53,6 +53,7 @@ class OpenAICompatProvider:
         auto_substitute: bool = True,
         max_model_attempts: int = DEFAULT_ATTEMPTS,
         transport: httpx.AsyncBaseTransport | None = None,
+        trailing_slash: bool = False,
     ) -> None:
         self.name = name
         self.label = label
@@ -69,6 +70,7 @@ class OpenAICompatProvider:
         self.auto_substitute = auto_substitute
         self.max_model_attempts = max(1, int(max_model_attempts))
         self._transport = transport
+        self.trailing_slash = bool(trailing_slash)
         self._entries: list[dict[str, Any]] | None = None
         self.active_model: str | None = None if self.is_auto else self.model
 
@@ -79,6 +81,11 @@ class OpenAICompatProvider:
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<{type(self).__name__} {self.name} model={self.model}>"
+
+    def _url(self, path: str) -> str:
+        """Endpoint URL, with the trailing slash Django-style services demand."""
+        url = f"{self.base_url}/{path.strip('/')}"
+        return f"{url}/" if self.trailing_slash else url
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -169,7 +176,7 @@ class OpenAICompatProvider:
             return self._entries
         try:
             async with self._client() as client:
-                response = await client.get(f"{self.base_url}/models", headers=self._headers())
+                response = await client.get(self._url("models"), headers=self._headers())
         except httpx.HTTPError as exc:
             raise ProviderError(
                 self.name, f"network error listing models: {type(exc).__name__}: {exc}"
@@ -305,7 +312,7 @@ class OpenAICompatProvider:
         try:
             async with self._client() as client:
                 response = await client.post(
-                    f"{self.base_url}/chat/completions",
+                    self._url("chat/completions"),
                     headers=self._headers(),
                     json=payload,
                 )
