@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#090d14" />
-  <meta name="agetnic-version" content="0.18.1" />
-  <meta name="description" content="Agentic Orchestration Studio — a controlled workspace for testing agent workflows, search providers and execution traces." />
+  <meta name="agetnic-version" content="0.19.0" />
+  <meta name="description" content="Agentic Orchestration Studio — a controlled workspace for testing agent workflows and execution traces on the ARAS microservices." />
   <title>Agetnic Orchestration Sandbox — Agentic Orchestration Studio</title>
   <script>
     /* Apply the saved theme before the first paint: without this, a light-mode
@@ -22,10 +22,10 @@
        stale caches after an upgrade. -->
   <!-- A data: icon keeps the browser from asking /favicon.ico at all. -->
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="assets/css/styles.css?v=0.18.1" />
-  <link rel="stylesheet" href="assets/css/extra.css?v=0.18.1" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=0.19.0" />
+  <link rel="stylesheet" href="assets/css/extra.css?v=0.19.0" />
   <!-- light palette: maps every colour of the dark design; loads last so it can win -->
-  <link rel="stylesheet" href="assets/css/theme.css?v=0.18.1" />
+  <link rel="stylesheet" href="assets/css/theme.css?v=0.19.0" />
 </head>
 <body>
   <!-- Connection / asset diagnostics: shown by app.js, never by the server -->
@@ -37,7 +37,7 @@
 
   <div class="app-shell">
     <!-- ═══════════════════════════════════════════════════════════
-         Top bar: brand · provider health · providers · diagnostics
+         Top bar: brand · live status · ARAS services · diagnostics
          ═══════════════════════════════════════════════════════════ -->
     <header class="topbar">
       <div class="brand">
@@ -59,7 +59,7 @@
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5Z"/></svg>
         </button>
 
-        <!-- Status ▾ — the four live pills, now rows inside one dropdown -->
+        <!-- Status ▾ — the live pills (model = ARAS router, search = ARAS web), rows inside one dropdown -->
         <div class="nav-menu" id="menu-status">
           <button class="btn nav-menu-btn" id="btn-menu-status" aria-haspopup="true" aria-expanded="false">
             <span class="dot" id="menu-status-dot"></span>
@@ -67,7 +67,7 @@
             <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
           </button>
           <div class="nav-menu-panel" role="menu" aria-label="Live status">
-            <div class="status-pill menu-row" id="pill-llm" role="menuitem"><span class="dot"></span><code id="badge-llm">LLM&nbsp; checking…</code></div>
+            <div class="status-pill menu-row" id="pill-llm" role="menuitem"><span class="dot"></span><code id="badge-llm">MODEL&nbsp; checking…</code></div>
             <div class="status-pill search-pill menu-row" id="pill-search" role="menuitem"><span class="dot"></span><code id="badge-search">SEARCH&nbsp; checking…</code></div>
             <div class="status-pill menu-row" id="pill-aras" role="menuitem"><span class="dot"></span><code id="badge-aras">ARAS&nbsp; not checked</code></div>
             <div class="status-pill menu-row" id="pill-diag" role="menuitem"><span class="dot"></span><code id="badge-diag">Diag: not run</code></div>
@@ -83,15 +83,15 @@
             <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
           </button>
           <div class="nav-menu-panel" role="menu" aria-label="Console tools">
-            <button class="menu-item" id="btn-providers" role="menuitem" title="Every free model/search option with key links">
+            <button class="menu-item" id="btn-providers" role="menuitem" title="Every ARAS service: what it does here, where it lives, what it still needs">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M7.5 7.5h.01M7.5 16.5h.01"/></svg>
-              Providers
+              ARAS services
             </button>
-            <button class="menu-item" id="btn-aras-top" role="menuitem" title="Is the ARAS wiring actually used? Health + a proof run">
+            <button class="menu-item" id="btn-aras-top" role="menuitem" title="Is every ARAS service up and answering? Health + a proof run">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5.5" cy="12" r="2.2"/><circle cx="18.5" cy="5.5" r="2.2"/><circle cx="18.5" cy="18.5" r="2.2"/><path d="M7.6 10.9 16.4 6.6M7.6 13.1l8.8 4.3"/></svg>
               ARAS wiring
             </button>
-            <button class="menu-item" id="btn-diag-top" role="menuitem" title="Live pings: model, search backends and ARAS services">
+            <button class="menu-item" id="btn-diag-top" role="menuitem" title="Live checks: a model call, a web search and every ARAS health route">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13a8 8 0 1 0 2.4-5.7L4 9"/><path d="M4 4v5h5M12 8v4l3 2"/></svg>
               Run diagnostics
             </button>
@@ -135,7 +135,7 @@
             </button>
             <button class="nav-item" type="button" data-view="providers">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg>
-              Provider settings
+              ARAS services
             </button>
           </nav>
         </section>
@@ -201,8 +201,8 @@
 
         <section id="section-search">
           <div class="section-heading">
-            <div class="section-label">Search backends</div>
-            <button class="mini-action" id="btn-refresh-search" title="Refresh providers">
+            <div class="section-label">ARAS services</div>
+            <button class="mini-action" id="btn-refresh-search" title="Reload the ARAS services">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg>
             </button>
           </div>
@@ -291,14 +291,14 @@
                 <span class="suggestion-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3.5h8l4 4V20H6z"/><path d="M14 3.5V8h4M9 12h6M9 15.5h6"/></svg></span>
                 <span><strong>Analyze a document</strong><small>Attach a CSV, DOCX or PDF and inspect the findings.</small></span>
               </button>
-              <button class="suggestion" data-prompt="Search for the newest free LLM APIs and compare their rate limits.">
+              <button class="suggestion" data-prompt="What is the average of 12, 30 and 58, and what changed in the latest Python release? Cite your sources.">
                 <span class="suggestion-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 19V5M4 19h16"/><path d="M8 16v-5M13 16V7M18 16v-8"/></svg></span>
-                <span><strong>Compare providers</strong><small>Evaluate free tiers, rate limits and capabilities.</small></span>
+                <span><strong>Combine agents</strong><small>One request, several specialists working in parallel.</small></span>
               </button>
             </div>
             <p class="demo-disclaimer">
               Every run is written to <code>logs/orchestrator/</code> and every conversation to
-              <code>memory/</code>. Switch the brain with <code>LLM_PROVIDER</code> in <code>.env</code>.
+              <code>memory/</code>. The model is the ARAS router: set <code>ARAS_MODEL</code> in <code>.env</code>.
             </p>
           </div>
           <div class="messages" id="messages" aria-live="polite"></div>
@@ -410,7 +410,7 @@
       <div class="modal-head">
         <div class="audit-head">
           <strong id="audit-title">Self-audit — the orchestration, part by part</strong>
-          <span class="audit-sub" id="audit-sub">Checks run offline against scripted ports: no key, no network, under a second.</span>
+          <span class="audit-sub" id="audit-sub">Checks run offline against scripted ports: no ARAS service, no network, under a second.</span>
         </div>
         <button class="btn icon-only ghost" id="btn-close-audit" aria-label="Close self-audit">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m6 6 12 12M18 6 6 18"/></svg>
@@ -448,7 +448,7 @@
       <div class="modal-foot">
         <p class="modal-note" id="audit-note">
           Offline checks drive the real pipeline through its four ports with scripted models,
-          so a red line means the code changed — never that a provider had a bad minute.
+          so a red line means the code changed — never that a service had a bad minute.
         </p>
         <button class="btn" id="btn-audit-close">Close</button>
       </div>
@@ -461,7 +461,7 @@
       <div class="modal-head">
         <div class="audit-head">
           <strong id="aras-title">ARAS wiring — is it actually used?</strong>
-          <span class="audit-sub" id="aras-sub">GET /aras pings every configured service; the proof run shows which provider answered a real request.</span>
+          <span class="audit-sub" id="aras-sub">GET /aras pings every configured service; the proof run sends one real request through the router.</span>
         </div>
         <button class="btn icon-only ghost" id="btn-close-aras" aria-label="Close ARAS wiring">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m6 6 12 12M18 6 6 18"/></svg>
@@ -473,7 +473,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 13a8 8 0 1 0 2.4-5.7L4 9"/><path d="M4 4v5h5"/></svg>
           Check wiring
         </button>
-        <button class="btn" id="btn-aras-proof" title="One tiny real run through POST /orchestrate — the run record names the provider and model that answered">
+        <button class="btn" id="btn-aras-proof" title="One tiny real run through POST /orchestrate — the run record names the model that answered">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 5.5v13l11-6.5-11-6.5Z"/></svg>
           Proof run
         </button>
@@ -485,20 +485,20 @@
 
       <div class="modal-foot">
         <p class="modal-note" id="aras-note">
-          Level 1 is config: does the router lead the model chain? Level 2 is health: does each
-          service answer its /health route? The proof run is level 3: a real request whose run
-          record names <code>provider</code> and <code>model</code> — if it says <code>aras</code>, the stack answered.
+          Level 1 is config: do the router and the web service have a URL, a token and a model id?
+          Level 2 is health: does each service answer its /health route? The proof run is level 3:
+          a real request whose run record names the <code>model</code> the router answered with.
         </p>
         <button class="btn" id="btn-aras-close">Close</button>
       </div>
     </section>
   </div>
 
-  <!-- Providers modal: every free option with key/model links -->
+  <!-- ARAS services modal: every service, its role here and what it still needs -->
   <div class="modal-backdrop panel-hidden" id="providers-modal" role="presentation">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="providers-title">
       <div class="modal-head">
-        <strong id="providers-title">Providers — free options with links</strong>
+        <strong id="providers-title">ARAS services — what runs this app</strong>
         <button class="btn icon-only ghost" id="btn-close-providers" aria-label="Close dialog">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m6 6 12 12M18 6 6 18"/></svg>
         </button>
@@ -506,8 +506,8 @@
       <div class="modal-body" id="providers-body"><span class="muted">loading…</span></div>
       <div class="modal-foot">
         <p class="modal-note" style="margin-right:auto">
-          Set <code>LLM_PROVIDER</code> (or <code>auto</code>) + its key and model in <code>.env</code>.
-          The model you write is the model that is called.
+          Set <code>ARAS_BASE_URL</code>, the tokens and <code>ARAS_MODEL</code> in <code>.env</code>, then restart.
+          The model you write is the model that is called — there is no fallback.
         </p>
         <button class="btn ghost" id="btn-providers-copy" title="Copy the latest GET /providers report as JSON">Copy JSON</button>
         <button class="btn" id="btn-providers-close">Close</button>
@@ -515,6 +515,6 @@
     </section>
   </div>
 
-  <script src="assets/js/app.js?v=0.18.1" defer></script>
+  <script src="assets/js/app.js?v=0.19.0" defer></script>
 </body>
 </html>

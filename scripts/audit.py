@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """The self-audit, from the command line — the same checks the Evaluate button runs.
 
-No key, no network, no patience needed: every offline check drives the real
-pipeline through its four ports with scripted models, search and agent loops, so
-a red line always means the code changed.
+No ARAS service, no network, no patience needed: every offline check drives the
+real pipeline through its four ports with scripted models, search and agent
+loops, so a red line always means the code changed.
 
     python -m scripts.audit                 # offline, prints a table, exits 1 on a failure
     python -m scripts.audit --json          # the scorecard on stdout
-    python -m scripts.audit --live          # also the two checks that call a model
+    python -m scripts.audit --live          # also the two checks that call the ARAS router
     python -m scripts.audit --only gate.rules,plan.waves
     python -m scripts.audit --no-save       # do not write logs/audit/
 
@@ -21,7 +21,7 @@ import asyncio
 import json
 import sys
 
-from app import logs
+from app import aras, logs
 from app.config import get_settings
 from app.orchestrator import audit_catalogue, run_audit, write_audit
 from app.version import VERSION
@@ -30,21 +30,12 @@ ICON = {"pass": "ok  ", "warn": "warn", "fail": "FAIL", "skip": "skip"}
 
 
 def _live_ports(settings):
-    """The host's real ports, only when a model is actually configured."""
-    try:
-        from app.llm.registry import build_chain
-        from app.search.registry import build_search_chain
-    except Exception:  # pragma: no cover - a stripped checkout
+    """The host's real ports (ARAS router + web), only when the router is configured."""
+    models = aras.build_model(settings)
+    if not models:  # an unfilled ARAS block is a normal answer here: the checks skip
         return None, None
-    try:
-        models = build_chain(settings)
-    except Exception:  # noqa: BLE001 - "no key" is a normal answer here
-        return None, None
-    try:
-        search = build_search_chain(settings)
-    except Exception:  # noqa: BLE001 - live search checks then degrade
-        search = None
-    return models, search
+    search = aras.build_search(settings)
+    return models, (search if search else None)
 
 
 def _print_table(scorecard: dict) -> None:

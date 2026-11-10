@@ -8,8 +8,16 @@ the port check against a real local socket.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import socket
+import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
 
 from scripts import aras_smoke
 
@@ -109,6 +117,161 @@ class DiagnosisTests(unittest.TestCase):
     def test_a_clean_bill_says_so(self) -> None:
         lines = aras_smoke.diagnose([self.result()])
         self.assertEqual(lines, ["All good: tunnel up, services healthy, tokens accepted."])
+
+
+class SkipTests(unittest.TestCase):
+    """A service with no token is skipped: it is shown, and it decides nothing."""
+
+    @staticmethod
+    def result(**overrides):
+        base = {"service": "router", "port": 8101, "configured": True, "port_open": True,
+                "health": 200, "auth": 200, "auth_ok": True, "notes": []}
+        base.update(overrides)
+        return base
+
+    def skipped(self, **overrides):
+        base = self.result(service="ocr", port=8102, configured=False, auth=None)
+        del base["auth_ok"]  # the authenticated probe never ran
+        base.update(overrides)
+        return base
+
+    def test_a_service_without_a_token_is_skipped_not_failed(self) -> None:
+        results = [self.result(), self.skipped()]
+        self.assertEqual([aras_smoke.verdict(r) for r in results], ["OK", "SKIP"])
+        self.assertTrue(aras_smoke.all_good(results))
+        lines = aras_smoke.diagnose(results)
+        self.assertEqual(lines[0], "All good: tunnel up, services healthy, tokens accepted.")
+        self.assertTrue(any("Skipped, no token in .env: ocr" in line for line in lines), lines)
+
+    def test_a_closed_port_of_a_skipped_service_is_not_a_failure(self) -> None:
+        results = [self.result(), self.skipped(port_open=False, health=None)]
+        self.assertTrue(aras_smoke.all_good(results))
+        lines = aras_smoke.diagnose(results)
+        self.assertFalse(any("Closed ports" in line for line in lines), lines)
+
+    def test_a_closed_port_of_a_configured_service_is_a_failure(self) -> None:
+        results = [self.result(), self.result(service="web", port=8108, port_open=False,
+                                              health=None, auth=None, auth_ok=False)]
+        self.assertEqual(aras_smoke.verdict(results[1]), "FAIL")
+        self.assertFalse(aras_smoke.all_good(results))
+        lines = aras_smoke.diagnose(results)
+        self.assertTrue(any("Closed ports: web:8108" in line for line in lines), lines)
+
+    def test_nothing_configured_is_not_a_pass(self) -> None:
+        results = [self.skipped(), self.skipped(service="web", port=8108)]
+        self.assertFalse(aras_smoke.all_good(results))
+        lines = aras_smoke.diagnose(results)
+        self.assertTrue(any("No ARAS token in .env" in line for line in lines), lines)
+        self.assertFalse(any(line.startswith("All good") for line in lines), lines)
+
+    def test_a_failure_is_never_summarised_as_all_good(self) -> None:
+        # neither a closed port nor a rejected token: the summary must still name them
+        results = [
+            self.result(),
+            self.result(service="web", port=8108, health=503, auth_ok=False),
+            self.result(service="data", port=8107, auth=500, auth_ok=False),
+        ]
+        self.assertFalse(aras_smoke.all_good(results))
+        lines = aras_smoke.diagnose(results)
+        self.assertFalse(any(line.startswith("All good") for line in lines), lines)
+        self.assertTrue(
+            any("Failing: web (health 503), data (authenticated call HTTP 500)" in line
+                for line in lines),
+            lines,
+        )
+
+
+class _OneService(BaseHTTPRequestHandler):
+    """Health without auth, one route that wants ``Bearer good-token``."""
+
+    def log_message(self, *args) -> None:
+        return
+
+    def do_GET(self) -> None:
+        if self.path == "/health/":
+            status = 200
+        elif self.headers.get("Authorization") == "Bearer good-token":
+            status = 200
+        else:
+            status = 401
+        body = b"{}"
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class RunTests(unittest.TestCase):
+    """main() end to end against a real loopback listener: rows, summary, exit code."""
+
+    def setUp(self) -> None:
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OneService)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.port = self.server.server_address[1]
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        self.closed_port = closed.getsockname()[1]
+        closed.close()
+        self.tmp = tempfile.TemporaryDirectory()
+        services = [
+            {"name": "router", "port": self.port, "health": "/health/",
+             "method": "GET", "path": "/v1/things/", "body": None},
+            {"name": "web", "port": self.closed_port, "health": "/health/",
+             "method": "GET", "path": "/v1/things/", "body": None},
+        ]
+        patcher = mock.patch.object(aras_smoke, "SERVICES", services)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def run_with(self, env_text: str, *flags: str) -> tuple[int, str]:
+        env = Path(self.tmp.name) / ".env"
+        env.write_text(env_text, encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = aras_smoke.main(["--env", str(env), *flags])
+        return code, out.getvalue()
+
+    def test_the_configured_service_passes_and_the_tokenless_one_is_skipped(self) -> None:
+        code, text = self.run_with("ARAS_ROUTER_TOKEN=good-token\n")
+        self.assertEqual(code, 0, text)
+        self.assertRegex(text, r"(?m)^OK +router ")
+        self.assertRegex(text, r"(?m)^SKIP +web ")
+        self.assertIn("All good", text)
+        self.assertNotIn("FAIL", text)
+
+    def test_a_rejected_token_fails_the_run(self) -> None:
+        code, text = self.run_with("ARAS_ROUTER_TOKEN=wrong-token\n")
+        self.assertEqual(code, 1, text)
+        self.assertRegex(text, r"(?m)^FAIL +router .*auth=401")
+        self.assertIn("Rejected tokens: router", text)
+        self.assertNotIn("All good", text)
+
+    def test_a_configured_service_behind_a_closed_port_fails_the_run(self) -> None:
+        code, text = self.run_with("ARAS_TOKEN=good-token\n")  # the shared token configures both
+        self.assertEqual(code, 1, text)
+        self.assertRegex(text, r"(?m)^OK +router ")
+        self.assertRegex(text, r"(?m)^FAIL +web .*port=CLOSED")
+        self.assertNotIn("All good", text)
+
+    def test_no_token_at_all_is_exit_one_with_the_reason(self) -> None:
+        code, text = self.run_with("ARAS_BASE_URL=http://127.0.0.1\n")
+        self.assertEqual(code, 1, text)
+        self.assertIn("No ARAS token in .env", text)
+
+    def test_json_output_is_one_document_and_never_holds_the_token(self) -> None:
+        code, text = self.run_with("ARAS_ROUTER_TOKEN=good-token\n", "--json")
+        report = json.loads(text)
+        self.assertEqual(code, 0)
+        self.assertIs(report["ok"], True)
+        self.assertEqual([r["verdict"] for r in report["results"]], ["OK", "SKIP"])
+        self.assertNotIn("good-token", text)
 
 
 class PortCheckTests(unittest.TestCase):

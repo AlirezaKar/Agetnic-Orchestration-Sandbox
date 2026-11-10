@@ -126,13 +126,13 @@ class AppLogContentTests(LogTestCase):
 
 class RedactionTests(LogTestCase):
     def test_secrets_never_reach_the_file(self):
-        os.environ["GROQ_API_KEY"] = "gsk_thisIsARealLookingKey1234567890"
+        os.environ["ARAS_ROUTER_TOKEN"] = "aras_thisIsARealLookingKey1234567890"
         try:
             logs.get_logger("api").info(
-                "calling provider with %s", os.environ["GROQ_API_KEY"]
+                "calling the router with %s", os.environ["ARAS_ROUTER_TOKEN"]
             )
         finally:
-            os.environ.pop("GROQ_API_KEY", None)
+            os.environ.pop("ARAS_ROUTER_TOKEN", None)
 
         body = self.read("agetnic.log")
         self.assertNotIn("thisIsARealLookingKey", body)

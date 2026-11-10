@@ -72,7 +72,7 @@ LEVELS: tuple[tuple[str, str], ...] = (
     ("record", "Trace, run record and live stream"),
     ("outcome", "Outcome proxies — grounded, stable answers"),
     ("robust", "Robustness — odd input, injected text"),
-    ("live", "Live model checks (opt-in, needs a key)"),
+    ("live", "Live model checks (opt-in, needs a configured model)"),
 )
 
 #: The model the audit pretends to be — it never leaves this process.
@@ -1108,7 +1108,7 @@ async def robust_injection(ctx: AuditContext) -> Result:
     "live",
     "LLM planner vs the golden set",
     "the model planner covers the agents a request cannot be answered without",
-    needs="a model provider (key + model in .env)",
+    needs="a configured model (the ARAS router block in .env)",
     live=True,
 )
 async def live_planner(ctx: AuditContext) -> Result:
@@ -1121,7 +1121,7 @@ async def live_planner(ctx: AuditContext) -> Result:
     the model, and five fallbacks mean the model planner never planned at all.
     """
     if ctx.live_models is None:
-        return skipped("no model provider — set a key in .env to run this check")
+        return skipped("no model configured — fill the ARAS router block in .env to run this check")
     started = time.perf_counter()
     sample = GOLDEN_PLAN[:5]
     required = covered = contradictions = fallbacks = 0
@@ -1179,12 +1179,12 @@ async def live_planner(ctx: AuditContext) -> Result:
     "live",
     "Stage latency",
     "a real run gives the per-stage cost this version actually pays",
-    needs="a model provider (key + model in .env)",
+    needs="a configured model (the ARAS router block in .env)",
     live=True,
 )
 async def live_latency(ctx: AuditContext) -> Result:
     if ctx.live_models is None:
-        return skipped("no model provider — set a key in .env to run this check")
+        return skipped("no model configured — fill the ARAS router block in .env to run this check")
     payload, _ = await ctx.run(
         "What changed in the latest Python release? Cite your sources.",
         models=ctx.live_models,
@@ -1261,8 +1261,8 @@ async def run_audit(
                                        "title": spec.title})
             if spec.live and (not live or models is None):
                 result = skipped(
-                    "live check — enable live model checks (needs a provider key)" if not live
-                    else "no model provider — set a key in .env to run this check"
+                    "live check — enable live model checks (needs a configured model)" if not live
+                    else "no model configured — fill the ARAS router block in .env to run this check"
                 )
                 elapsed = 0
             else:

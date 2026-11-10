@@ -5,8 +5,8 @@ A host application (this one, or another with a similar architecture) does:
 ```python
 service = OrchestratorService(
     settings,                       # any object shaped like contracts.OrchestratorSettings
-    models=build_chain(settings),   # contracts.ModelChain
-    search=build_search_chain(settings),   # contracts.SearchChain
+    models=aras.build_model(settings),    # contracts.ModelChain  (here: the ARAS router)
+    search=aras.build_search(settings),   # contracts.SearchChain (here: the ARAS web service)
     agent_loop=WebSearchAgent,      # contracts.AgentLoopFactory (optional: defaults to host)
 )
 result = await service.run(OrchestrationRequest(message="…", attachments=[…]))

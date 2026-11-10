@@ -61,13 +61,16 @@ function mount(permissionPrompt) {
     if (route === 'health') {
       return json({
         status: 'ok',
-        version: '0.11.0',
-        model_chain: ['custom'],
+        version: '0.19.0',
+        // the ARAS router is the model; web search is not configured here
+        model_provider_ready: true,
+        model_chain: ['aras'],
         search_chain: [],
+        model: { provider: 'aras', service: 'router', model: 'sharif-rayen-gemma4-31b', ready: true, missing: [] },
+        search: { provider: 'aras', service: 'web', ready: false, missing: ['ARAS_BASE_URL', 'ARAS_WEB_TOKEN'] },
         files: { count: 0, pending: 0, permission_prompt: permissionPrompt, writable: true },
         memory: { sessions: 0, turns: 0 },
         ui: {},
-        skipped: { models: [], search: [] },
       });
     }
     if (route === 'files') {

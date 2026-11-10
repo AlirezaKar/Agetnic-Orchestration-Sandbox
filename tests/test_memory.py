@@ -138,7 +138,7 @@ class AppendTests(MemoryTestCase):
 
     def test_search_turn_gets_the_text_the_page_shows(self):
         payload = {
-            "provider": "ddg",
+            "provider": "aras",
             "count": 1,
             "latency_ms": 12,
             "results": [{"title": "T", "url": "https://example.org", "snippet": "s"}],
@@ -146,7 +146,7 @@ class AppendTests(MemoryTestCase):
         info = self.memory.append(None, mode="search", user_text="python", response=payload)
         turn = self.memory.get(info["session_id"])["turns"][0]
         self.assertEqual(turn["assistant"]["text"], format_search_answer(payload))
-        self.assertIn("Search backend: ddg", turn["assistant"]["text"])
+        self.assertIn("Search backend: aras", turn["assistant"]["text"])
         self.assertIn("1. T", turn["assistant"]["text"])
 
     def test_oldest_turns_are_dropped_past_the_cap(self):
@@ -199,7 +199,7 @@ class ReadTests(MemoryTestCase):
             response=a_response("Rayleigh scattering."),
         )
         self.other = self.memory.append(
-            None, mode="search", user_text="python asyncio", response={"provider": "ddg", "count": 0, "results": []}
+            None, mode="search", user_text="python asyncio", response={"provider": "aras", "count": 0, "results": []}
         )
 
     def test_list_is_newest_first_with_summaries(self):

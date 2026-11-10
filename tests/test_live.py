@@ -280,9 +280,9 @@ class ThoughtTests(unittest.TestCase):
 
     def test_tool_calls_as_a_list_still_becomes_the_tools_chip(self):
         out = thought(
-            event("agent", "search", "finished", tool_calls=[{"name": "web_search"}, {"name": "fetch_url"}])
+            event("agent", "search", "finished", tool_calls=[{"name": "web_search"}, {"name": "lookup"}])
         )
-        self.assertEqual(out["detail"]["tools"], ["web_search", "fetch_url"])
+        self.assertEqual(out["detail"]["tools"], ["web_search", "lookup"])
 
     def test_odd_shapes_in_the_detail_are_survived(self):
         """Fields that are sometimes rows are sometimes not: never a crash."""

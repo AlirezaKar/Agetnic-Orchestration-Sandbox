@@ -23,7 +23,16 @@ loopback traffic through a VPN proxy is precisely the failure this script
 exists to expose. Tokens are read from .env and never printed. Port 8106 (the
 remote orchestrator) is never called, as the access rules require.
 
-Exit code 0 only when every configured service passes all three layers.
+A service is *configured* when .env holds a token for it (its own
+ARAS_<SERVICE>_TOKEN or the shared ARAS_TOKEN). One without a token is listed
+as SKIP -- its port and health are still shown -- and does not decide the
+result, so leaving an optional service out is not a failure.
+
+Exit code 0 only when at least one service is configured and every configured
+service passes all three layers.
+
+The probe goes to the standard port of each service on the host of
+ARAS_BASE_URL. A per-service ARAS_<SERVICE>_URL override is not followed.
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import socket
+import sys
 from pathlib import Path
 from urllib import error, request
 
@@ -144,12 +154,17 @@ def port_open(host: str, port: int) -> bool:
 def probe(service: dict, host: str, env: dict[str, str]) -> dict:
     """All three layers for one service; never prints, just reports."""
     name, port = service["name"], service["port"]
-    out = {"service": name, "port": port, "port_open": False,
+    token = token_for(env, name)
+    out = {"service": name, "port": port, "configured": bool(token), "port_open": False,
            "health": None, "auth": None, "notes": []}
+    not_configured = (f"not configured: no token in .env (ARAS_{name.upper()}_TOKEN or "
+                      "ARAS_TOKEN) - skipped")
 
     if not port_open(host, port):
         out["notes"].append("PORT CLOSED - nothing is listening; the SSH tunnel "
                             "is not forwarding this port")
+        if not token:
+            out["notes"].append(not_configured)
         return out
     out["port_open"] = True
 
@@ -161,10 +176,8 @@ def probe(service: dict, host: str, env: dict[str, str]) -> dict:
         out["notes"].append(f"health answered HTTP {status or 'nothing'} - "
                             f"something replied that is not a healthy service.{who}")
 
-    token = token_for(env, name)
     if not token:
-        out["notes"].append(f"no token in .env (ARAS_{name.upper()}_TOKEN or ARAS_TOKEN) "
-                            "- authenticated probe skipped")
+        out["notes"].append(not_configured)
         return out
     headers_note = ""
     req_url = base + service["path"]
@@ -203,27 +216,75 @@ def authenticated_call(service: dict, url: str, token: str,
         return 0, str(getattr(exc, "reason", exc))
 
 
+def is_configured(result: dict) -> bool:
+    """Does .env hold a token for this service? (Results without the key count as yes.)"""
+    return bool(result.get("configured", True))
+
+
+def passed(result: dict) -> bool:
+    """All three layers: port open, health 200, token accepted."""
+    return bool(result["port_open"] and result["health"] == 200 and result.get("auth_ok", False))
+
+
+def verdict(result: dict) -> str:
+    """``OK``, ``FAIL`` or ``SKIP`` (no token, so the service does not decide the result)."""
+    if not is_configured(result):
+        return "SKIP"
+    return "OK" if passed(result) else "FAIL"
+
+
+def all_good(results: list[dict]) -> bool:
+    """The exit-code rule: something is configured, and all of it passes."""
+    configured = [r for r in results if is_configured(r)]
+    return bool(configured) and all(passed(r) for r in configured)
+
+
 def diagnose(results: list[dict]) -> list[str]:
     """The aggregate story: one sentence that names the single likely cause."""
     lines: list[str] = []
-    closed = [r for r in results if not r["port_open"]]
+    configured = [r for r in results if is_configured(r)]
+    skipped = [r for r in results if not is_configured(r)]
+    every_closed = bool(results) and all(not r["port_open"] for r in results)
+    closed = [r for r in configured if not r["port_open"]]
     sick_health = [r for r in results if r["port_open"] and r["health"] != 200]
-    rejected = [r for r in results if r.get("auth") in (401, 403)]
-    if len(closed) == len(results):
+    rejected = [r for r in configured if r.get("auth") in (401, 403)]
+    if every_closed:
         lines.append("EVERY port is closed: the SSH tunnel is not open. Start it, "
                      "then re-run this script before touching anything else.")
     elif closed:
         lines.append("Closed ports: " + ", ".join(f"{r['service']}:{r['port']}" for r in closed)
                      + " - add the missing -L forwards to the tunnel.")
-    if len(sick_health) == len(results) and results and not closed:
+    if len(sick_health) == len(results) and results:
         lines.append("Every service answers but none is healthy: if the bodies look like "
                      "one error page, a proxy/VPN is intercepting loopback traffic.")
     if rejected:
         lines.append("Rejected tokens: " + ", ".join(r["service"] for r in rejected)
                      + " - compare .env with the samples; a key may be set inactive.")
-    if not lines:
+    # whatever failed without one of the causes above still has to be named:
+    # a line that says "all good" above a FAIL row helps nobody
+    named = {id(r) for r in closed} | {id(r) for r in rejected}
+    other = [r for r in configured if not passed(r) and id(r) not in named]
+    if other and not every_closed:
+        lines.append("Failing: " + ", ".join(f"{r['service']} ({_why(r)})" for r in other)
+                     + " - see the note under each service.")
+    if not configured:
+        lines.append("No ARAS token in .env: nothing could be verified beyond ports and "
+                     "health. Set ARAS_TOKEN or the ARAS_<SERVICE>_TOKEN lines.")
+    elif not lines:
         lines.append("All good: tunnel up, services healthy, tokens accepted.")
+    if skipped and configured:
+        lines.append("Skipped, no token in .env: " + ", ".join(r["service"] for r in skipped)
+                     + " - fine when the app does not use them.")
     return lines
+
+
+def _why(result: dict) -> str:
+    """Three words for a failure that is neither a closed port nor a rejected token."""
+    if result["health"] != 200:
+        return f"health {result['health'] or 'no answer'}"
+    if result.get("auth"):
+        return f"authenticated call HTTP {result['auth']}"
+    return "no answer to the authenticated call"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -235,21 +296,25 @@ def main(argv: list[str] | None = None) -> int:
     env_path = Path(args.env)
     env = parse_env(env_path.read_text(encoding="utf-8")) if env_path.is_file() else {}
     if not env_path.is_file():
-        print(f"note: {env_path} not found - probing without tokens (layers 1+2 only)")
+        # stderr, so --json keeps stdout as one JSON document
+        print(f"note: {env_path} not found - probing without tokens (layers 1+2 only)",
+              file=sys.stderr)
 
     host = base_host(env)
     results = [probe(service, host, env) for service in SERVICES]
 
+    for result in results:
+        result["verdict"] = verdict(result)
+    good = all_good(results)
+
     if args.json:
-        print(json.dumps({"host": host, "results": results,
+        print(json.dumps({"host": host, "ok": good, "results": results,
                           "diagnosis": diagnose(results)}, indent=2))
     else:
         print(f"ARAS access probe - host {host} (proxy env ignored on purpose)")
         print()
         for r in results:
-            flag = "OK  " if (r["port_open"] and r["health"] == 200
-                              and r.get("auth_ok", False)) else "FAIL"
-            print(f"{flag} {r['service']:<10} :{r['port']}  "
+            print(f"{r['verdict']:<4} {r['service']:<10} :{r['port']}  "
                   f"port={'open' if r['port_open'] else 'CLOSED'}  "
                   f"health={r['health'] if r['health'] is not None else '-'}  "
                   f"auth={r['auth'] if r['auth'] is not None else '-'}")
@@ -259,8 +324,6 @@ def main(argv: list[str] | None = None) -> int:
         for line in diagnose(results):
             print("DIAGNOSIS:", line)
 
-    good = all(r["port_open"] and r["health"] == 200 and r.get("auth_ok", False)
-               for r in results)
     return 0 if good else 1
 
 

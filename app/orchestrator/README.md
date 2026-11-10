@@ -2,8 +2,8 @@
 
 Everything in this folder is **one service**: a manager, a planner, an executor,
 four specialist agents, a run trace, a run log and the attachment handling the
-document agent needs. It sits beside the other services of the app (`app/llm`,
-`app/search`, `app/agent.py`, `app/memory.py`) and knows nothing about them —
+document agent needs. It sits beside the other services of the app
+(`app/aras.py`, `app/agent.py`, `app/memory.py`) and knows nothing about them —
 only about the ports it is handed.
 
 The point of the shape: **copy this folder into another project with a similar
@@ -28,13 +28,30 @@ app/orchestrator/
 
 | Port | Signature it must satisfy | This project's implementation |
 |---|---|---|
-| `ModelChain` | `await complete(messages, tools=None, temperature=…, max_tokens=…)` | `app.llm.registry.build_chain(settings)` |
-| `SearchChain` | `await search(query, limit)` | `app.search.registry.build_search_chain(settings)` |
+| `ModelChain` | `await complete(messages, tools=None, temperature=…, max_tokens=…)` | `app.aras.build_model(settings)` — the ARAS router |
+| `SearchChain` | `await search(query, limit)` | `app.aras.build_search(settings)` — the ARAS web service |
 | `AgentLoopFactory` | `factory(model_chain, search_chain, settings, observer=hook)` → object with `await run(message, history=…, allow_search=…, max_steps=…)` | `app.agent.WebSearchAgent` |
 | `OrchestratorSettings` | attributes listed in `contracts.py` (15 plain values) | `app.config.Settings` |
 
 The `observer` hook is how the single-agent loop reports its prompts, model
 replies and tool calls into the run trace — the same contract the web UI shows.
+
+Two optional ports, `None` until a host wires them: `KnowledgeStore`
+(`await retrieve(query, limit)`, here `app.aras.build_knowledge(settings)` — ARAS
+retrieval) and `DataBackend` (`await query(question)`, here
+`app.aras.build_data_backend(settings)` — the ARAS data service).
+
+A port that is not ready must be **falsy** (`bool(port) is False`): that is how
+the agents know to report "no model is configured" instead of calling it.
+
+A port that fails raises, and that never fails the request. Inside an agent it
+becomes the agent's `failed` outcome, with the exception's `hint` attribute (if
+it has one) as the outcome's hint; in the planner, the evaluator, the review or
+the synthesis the manager carries on with its rules. The loop reports tool
+failures instead of raising them: its result may carry `errors` (each a string
+or `{"message", "hint"}`, alone or under `{"tool", "error"}`), and a run that
+tried to search with no search succeeding is a failed search agent, whatever
+the model wrote afterwards.
 
 ## Wiring it (exactly what `app/main.py` does)
 
@@ -43,8 +60,8 @@ from app.orchestrator import OrchestrationRequest, OrchestratorService
 
 service = OrchestratorService(
     settings,                                  # any object shaped like OrchestratorSettings
-    models=build_chain(settings),
-    search=build_search_chain(settings),
+    models=aras.build_model(settings),         # the ARAS router
+    search=aras.build_search(settings),        # the ARAS web service
     agent_loop=WebSearchAgent,                 # optional — defaults to host.agent_loop()
     log_dir=None,                              # optional — defaults to the host's log dir
 )
@@ -79,7 +96,7 @@ service.describe()                             # GET /agents payload
 `tests/test_orchestrator_service.py` asserts, by parsing the source of every file
 in this folder, that:
 
-- nothing imports `app.llm`, `app.search`, `app.agent`, `app.memory`, `app.main`
+- nothing imports `app.aras`, `app.agent`, `app.memory`, `app.main`
   or `app.config` — those are sibling services reached through ports;
 - only `host.py` imports anything from the host at all;
 - `contracts.py` imports nothing but the standard library;

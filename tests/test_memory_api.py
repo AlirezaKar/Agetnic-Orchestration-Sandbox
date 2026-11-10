@@ -16,17 +16,13 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.aras import ArasError, ModelResponse, SearchResponse, SearchResult
 from app.config import Settings, get_settings
-from app.llm.base import ModelResponse, ProviderError
 from app.memory import SessionMemory
-from app.search.base import SearchResponse, SearchResult
 
 
 class RecordingModel:
     """Answers, and remembers every prompt it was given."""
-
-    providers: list = []
-    skipped: dict = {}
 
     def __init__(self) -> None:
         self.calls: list[list[dict]] = []
@@ -49,17 +45,11 @@ class RecordingModel:
 
 
 class FailingModel:
-    providers: list = []
-    skipped: dict = {}
-
     async def complete(self, messages, tools=None, **kwargs):
-        raise ProviderError("fake", "upstream refused", status=500, hint="try later")
+        raise ArasError("router", "upstream refused", status=500, hint="try later")
 
 
 class FakeSearchChain:
-    providers: list = []
-    skipped: dict = {}
-
     async def search(self, query, limit=5):
         return SearchResponse(
             query=query,
@@ -88,9 +78,9 @@ class MemoryApiTests(unittest.TestCase):
         main_module.reset_memory()
         self.patches = [
             mock.patch.object(main_module, "get_settings", lambda: self.settings),
-            mock.patch.object(main_module, "build_chain", lambda settings=None: self.model),
+            mock.patch.object(main_module, "build_model", lambda settings=None: self.model),
             mock.patch.object(
-                main_module, "build_search_chain", lambda settings=None: FakeSearchChain()
+                main_module, "build_search", lambda settings=None: FakeSearchChain()
             ),
         ]
         for patch in self.patches:
@@ -190,7 +180,7 @@ class MemoryApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/sessions").json()["count"], 0)
 
     def test_a_failed_turn_is_remembered(self):
-        with mock.patch.object(main_module, "build_chain", lambda settings=None: FailingModel()):
+        with mock.patch.object(main_module, "build_model", lambda settings=None: FailingModel()):
             response = self.client.post("/chat", json={"message": "will fail", "allow_search": False})
         self.assertEqual(response.status_code, 502, response.text)
         body = response.json()
@@ -205,7 +195,7 @@ class MemoryApiTests(unittest.TestCase):
         self.assertEqual(len(memory.history(record["session_id"])), 1)
 
     def test_an_orchestrated_agent_failure_still_answers_and_is_stored(self):
-        with mock.patch.object(main_module, "build_chain", lambda settings=None: FailingModel()):
+        with mock.patch.object(main_module, "build_model", lambda settings=None: FailingModel()):
             response = self.client.post("/orchestrate", json={"message": "agents will fail"})
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()

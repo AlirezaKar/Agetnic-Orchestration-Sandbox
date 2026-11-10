@@ -1,4 +1,9 @@
-"""HTTP surface: test-harness UI, diagnostics, direct search, and the agent loop.
+"""HTTP surface: the studio UI, the orchestrator, and the ARAS diagnostics.
+
+This module is the host: it serves the page, wires the orchestrator's ports to
+the ARAS microservices (``app/aras.py`` — router = the model, web = the search,
+retrieval/data/OCR for the agents) and exposes the routes the page calls.
+There is no other model and no other search backend to fall back to.
 
 Every API route is served **twice** — with and without the ``/api`` prefix —
 so a reverse proxy, a rewrite rule or a frontend that assumes ``/api/chat``
@@ -25,21 +30,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import logs
+from app import aras, logs
 from app.agent import WebSearchAgent
+from app.aras import ArasError, ArasNotConfigured, build_model, build_search
 from app.config import get_settings
-from app.llm.base import ProviderError
-from app.llm.registry import (
-    ConfigurationError,
-    build_chain,
-    build_provider,
-    describe_providers,
-    resolve_named,
-)
 from app.memory import SessionMemory, session_view
-from app.search.base import SearchError
-from app.search.presets import SEARCH_PRESETS
-from app.search.providers import PROVIDER_CLASSES
 from app.orchestrator import (
     AUDIT_LEVELS,
     BUS,
@@ -57,8 +52,6 @@ from app.orchestrator import (
     plain_thought,
     thought as live_thought,
 )
-from app.search.registry import build_search_chain, describe_search_providers
-from app import aras
 from app.version import VERSION
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -69,17 +62,20 @@ API_ROUTES = [
     "GET  /version",
     "GET  /health",
     "GET  /config",
-    "GET  /providers",
-    "GET  /providers/{name}/models",
-    "POST /search",
-    "GET  /search/diagnose",
-    "POST /chat",
+    "GET  /providers                  (the ARAS services: role, endpoint, what is missing)",
+    "POST /search                     (ARAS web search, no model)",
+    "POST /chat                       (one model + the web_search tool)",
     "POST /orchestrate                (manager + parallel agents)",
     "POST /orchestrate/stream         (the same turn, streamed over SSE)",
     "POST /files                      (attachment upload)",
     "GET  /files                      (attachments in the store)",
     "POST /files/{id}/consent         (allow / refuse an attachment)",
+    "DELETE /files/{id}               (remove an attachment)",
     "GET  /agents                     (agent catalogue + planner mode)",
+    "GET  /audit                      (self-audit: the checks + the last scorecard)",
+    "POST /audit/run                  (run the self-audit, offline by default)",
+    "GET  /audit/stream               (the same audit, streamed over SSE)",
+    "GET  /audit/last                 (the newest scorecard on disk)",
     "GET  /runs                       (orchestration log: recent runs)",
     "GET  /runs/{run_id}              (full trace of one run)",
     "GET  /sessions                   (harness memory: past conversations)",
@@ -87,8 +83,9 @@ API_ROUTES = [
     "GET  /sessions/{id}              (one conversation, replayable turn by turn)",
     "PATCH /sessions/{id}             (rename a conversation)",
     "DELETE /sessions/{id}            (forget a conversation)",
-    "GET  /diagnose",
-    "GET  /aras",
+    "GET  /diagnose                   (model ping + search ping + ARAS health)",
+    "GET  /aras                       (health of every configured ARAS service)",
+    "GET  /aras/models                (model ids the router lists)",
     "GET  /                           (test harness UI)",
     "GET  /assets/…                   (css + js)",
 ]
@@ -115,7 +112,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="Agetnic Orchestration Sandbox",
     version=VERSION,
-    description="Pluggable free model providers + web search, no mock model.",
+    description="A manager-led agent orchestrator running on the ARAS microservices.",
     lifespan=lifespan,
 )
 
@@ -178,7 +175,6 @@ class AuditRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     max_results: int = Field(default=5, ge=1, le=10)
-    provider: str | None = None
     session_id: str | None = None
     remember: bool = True
 
@@ -297,13 +293,25 @@ def _file_error(exc: FileError) -> JSONResponse:
 
 def _error_body(kind: str, exc: Exception) -> dict[str, Any]:
     body: dict[str, Any] = {"error": kind, "message": str(exc)}
-    if isinstance(exc, ProviderError):
-        body["detail"] = exc.to_dict()
-    elif isinstance(exc, ConfigurationError):
-        body["detail"] = {"missing": exc.missing}
-    elif isinstance(exc, SearchError):
+    if isinstance(exc, ArasError):
+        # service, HTTP status, hint — and the missing env vars when that is why
         body["detail"] = exc.to_dict()
     return body
+
+
+def _aras_failure(exc: ArasError) -> tuple[int, str]:
+    """``(status, kind)`` for an ARAS failure: ours to fix (400) or theirs (502)."""
+    if isinstance(exc, ArasNotConfigured):
+        return 400, "configuration"
+    return 502, "aras"
+
+
+def _describe_port(port: Any) -> dict[str, Any]:
+    """What is wired on a port, for /health: the ARAS adapters describe themselves."""
+    describe = getattr(port, "describe", None)
+    if callable(describe):
+        return dict(describe())
+    return {"provider": type(port).__name__, "ready": bool(port), "missing": []}
 
 
 def _error(status: int, kind: str, exc: Exception, **extra: Any) -> JSONResponse:
@@ -413,17 +421,26 @@ async def version(request: Request) -> dict[str, Any]:
 @router.get("/health")
 async def health(request: Request) -> dict[str, Any]:
     settings = get_settings()
-    chain = build_chain(settings)
-    search = build_search_chain(settings)
+    model = _describe_port(build_model(settings))
+    search = _describe_port(build_search(settings))
     store_files = get_store().list()
     return {
         "status": "ok",
         "version": VERSION,
         "api_prefixes": ["", "/api"],
-        "model_provider_ready": bool(chain),
-        "model_chain": [p.name for p in chain.providers],
-        "search_chain": [p.name for p in search.providers],
-        "skipped": {"models": chain.skipped, "search": search.skipped},
+        # One model (the ARAS router) and one search (ARAS web): each list is
+        # ["aras"] when that service is ready and [] when it is not — `model`
+        # and `search` below say what is missing.
+        "model_provider_ready": bool(model.get("ready")),
+        "model_chain": [model["provider"]] if model.get("ready") else [],
+        "search_chain": [search["provider"]] if search.get("ready") else [],
+        "model": model,
+        "search": search,
+        "aras": {
+            "configured": settings.aras_services_configured,
+            "rag_ready": settings.aras_rag_ready,
+            "data_ready": settings.aras_data_ready,
+        },
         "env_file": Path(".env").exists(),
         "orchestrator": {
             "enabled": settings.orchestrator_enabled,
@@ -458,137 +475,50 @@ async def config() -> dict[str, Any]:
 
 @router.get("/providers")
 async def providers() -> dict[str, Any]:
-    settings = get_settings()
-    chain = build_chain(settings)
-    search = build_search_chain(settings)
-    return {
-        "core": {
-            "provider_env": "LLM_PROVIDER",
-            "value": settings.llm_provider,
-            "provider_mode": "auto" if settings.is_auto_provider else "manual",
-            "model_override_env": "LLM_MODEL",  # manual mode only
-            "model_override": settings.llm_model,
-            "chain": settings.llm_chain,
-            "ready": [p.name for p in chain.providers],
-            "skipped": chain.skipped,
-        },
-        "providers": describe_providers(settings),
-        "search": {
-            "chain": settings.search_chain,
-            "ready": [p.name for p in search.providers],
-            "skipped": search.skipped,
-            "providers": describe_search_providers(settings),
-        },
-    }
+    """The ARAS services behind every port: role, endpoint, state, what is missing.
 
-
-@router.get("/providers/{name}/models")
-async def provider_models(name: str) -> Any:
+    Static and free (no network call): ``GET /aras`` is the live health of the
+    same list, ``GET /diagnose`` adds a real model call and a real search.
+    """
     settings = get_settings()
-    try:
-        resolved = resolve_named(name.lower(), settings)
-        provider = build_provider(resolved, settings)
-        models = await provider.list_models()
-        try:
-            recommended = (await provider.ranked_models())[:10]
-        except ProviderError:  # pragma: no cover - listing already succeeded
-            recommended = []
-    except ConfigurationError as exc:
-        logs.get_logger("api").warning("provider %s not configured: %s", name, exc)
-        return _error(400, "configuration", exc)
-    except ProviderError as exc:
-        logs.get_logger("api").warning("provider %s failed: %s", name, exc)
-        return _error(502, "provider", exc)
     return {
-        "provider": name.lower(),
-        "endpoint": provider.base_url,
-        "count": len(models),
-        "recommended": recommended,
-        "configured_model": provider.model,
-        "models": models,
-        "models_url": resolved.preset.models_url,
+        "version": VERSION,
+        "model": _describe_port(build_model(settings)),
+        "search": _describe_port(build_search(settings)),
+        "services": aras.catalogue(settings),
+        "env_file": Path(".env").exists(),
     }
 
 
 @router.post("/search")
 async def search(request: SearchRequest) -> Any:
+    """One ARAS web search, no model: the quickest test of the web service alone."""
     settings = get_settings()
     sessions = get_memory()
     try:
-        if request.provider:
-            key = request.provider.lower()
-            if key not in PROVIDER_CLASSES:
-                raise SearchError(key, f"unknown provider (known: {', '.join(PROVIDER_CLASSES)})")
-            provider = PROVIDER_CLASSES[key](settings)
-            results = await provider.search(request.query, request.max_results)
-            payload = {
-                "query": request.query,
-                "provider": key,
-                "count": len(results),
-                "results": [r.to_dict() for r in results],
-            }
-        else:
-            chain = build_search_chain(settings)
-            response = await chain.search(request.query, request.max_results)
-            payload = response.to_dict()
-    except SearchError as exc:
-        logs.get_logger("search").warning("search failed [%s]: %s", exc.provider, exc)
-        return _remembered_error(sessions, request, mode="search", status=502, kind="search", exc=exc)
+        response = await build_search(settings).search(request.query, request.max_results)
+    except ArasError as exc:
+        status, kind = _aras_failure(exc)
+        logs.get_logger("search").warning("search failed: %s", exc)
+        return _remembered_error(sessions, request, mode="search", status=status, kind=kind, exc=exc)
+    payload = response.to_dict()
     payload["session"] = _remember(
         sessions, request, mode="search", user_text=request.query, files=[], response=payload
     )
     return payload
 
 
-@router.get("/search/diagnose")
-async def search_diagnose(
-    q: str = Query(default="python asyncio tutorial"),
-    all_providers: bool = Query(default=False, alias="all"),
-) -> dict[str, Any]:
-    """Run every usable search backend once and report pass/fail + latency."""
-    settings = get_settings()
-    targets: list[str] = []
-    skipped: list[dict[str, str]] = []
-    for name in PROVIDER_CLASSES if all_providers else settings.search_chain:
-        if name not in PROVIDER_CLASSES:
-            skipped.append({"provider": name, "reason": "unknown provider"})
-            continue
-        preset = SEARCH_PRESETS[name]
-        missing = [env for env in preset.key_env if not getattr(settings, env.lower(), None)]
-        if missing:
-            skipped.append({"provider": name, "reason": f"missing {', '.join(missing)}"})
-            continue
-        targets.append(name)
-
-    reports = await asyncio.gather(
-        *(PROVIDER_CLASSES[name](settings).ping(q) for name in targets),
-        return_exceptions=True,
-    )
-    out = []
-    for name, report in zip(targets, reports):
-        if isinstance(report, BaseException):
-            out.append({"provider": name, "ok": False, "error": {"message": str(report)}})
-        else:
-            out.append(report)
-    return {
-        "query": q,
-        "checked": out,
-        "skipped": skipped,
-        "summary": {
-            "ok": [r["provider"] for r in out if r.get("ok")],
-            "failed": [r["provider"] for r in out if not r.get("ok")],
-        },
-    }
-
-
 @router.post("/chat")
 async def chat(request: ChatRequest) -> Any:
+    """One model and one tool (``web_search``), no orchestration.
+
+    ``allow_search=false`` is the plainest possible call: a single completion
+    from the ARAS router — the quickest test of the router alone.
+    """
     settings = get_settings()
-    chain = build_chain(settings)
-    search_chain = build_search_chain(settings)
     sessions = get_memory()
     mode = "agent" if request.allow_search else "answer"
-    agent = WebSearchAgent(chain, search_chain, settings)
+    agent = WebSearchAgent(build_model(settings), build_search(settings), settings)
     try:
         result = await agent.run(
             request.message,
@@ -596,12 +526,10 @@ async def chat(request: ChatRequest) -> Any:
             max_steps=request.max_steps,
             allow_search=request.allow_search,
         )
-    except ConfigurationError as exc:
-        logs.get_logger("chat").warning("chat rejected, no provider: %s", exc)
-        return _remembered_error(sessions, request, mode=mode, status=400, kind="configuration", exc=exc)
-    except ProviderError as exc:
-        logs.get_logger("chat").warning("chat failed [%s]: %s", exc.provider, exc)
-        return _remembered_error(sessions, request, mode=mode, status=502, kind="provider", exc=exc)
+    except ArasError as exc:
+        status, kind = _aras_failure(exc)
+        logs.get_logger("chat").warning("chat failed: %s", exc)
+        return _remembered_error(sessions, request, mode=mode, status=status, kind=kind, exc=exc)
     payload = result.to_dict()
     payload["session"] = _remember(
         sessions, request, mode=mode, user_text=request.message, files=[], response=payload
@@ -735,8 +663,8 @@ def _orchestrator(settings) -> OrchestratorService:
     """Wire the orchestrator service with this host's ports (the only place that does)."""
     return OrchestratorService(
         settings,
-        models=build_chain(settings),
-        search=build_search_chain(settings),
+        models=build_model(settings),  # ARAS router :8101
+        search=build_search(settings),  # ARAS web :8108
         agent_loop=WebSearchAgent,
         knowledge=aras.build_knowledge(settings),
         data_backend=aras.build_data_backend(settings),
@@ -820,15 +748,13 @@ async def _orchestrate_turn(
     )
     try:
         result = await service.run(request, run_id=run_id, sink=sink)
-    except ConfigurationError as exc:
-        logs.get_logger("orchestrator").warning("configuration error: %s", exc)
+    except ArasError as exc:
+        # rare: agents turn a failed call into a `failed` outcome and the run
+        # goes on — this is a failure outside any agent
+        status, kind = _aras_failure(exc)
+        logs.get_logger("orchestrator").warning("aras error: %s", exc)
         return _remembered_error_body(
-            sessions, payload, mode="auto", status=400, kind="configuration", exc=exc, files=files
-        )
-    except ProviderError as exc:
-        logs.get_logger("orchestrator").warning("provider error [%s]: %s", exc.provider, exc)
-        return _remembered_error_body(
-            sessions, payload, mode="auto", status=502, kind="provider", exc=exc, files=files
+            sessions, payload, mode="auto", status=status, kind=kind, exc=exc, files=files
         )
 
     logs.get_logger("orchestrator").info(
@@ -1025,8 +951,8 @@ def _audit_dir() -> Path:
 def _describe(settings: Any) -> dict[str, Any]:
     """What this host is wired to, never raising.
 
-    Offline checks need no port at all, and a host whose provider is
-    misconfigured must still be able to audit itself — so a failure to build the
+    Offline checks need no port at all, and a host whose ARAS block is
+    incomplete must still be able to audit itself — so a failure to build the
     ports is reported as "not ready", not as an error that hides the audit.
     """
     try:
@@ -1041,13 +967,13 @@ def _audit_ports(settings: Any) -> tuple[Any, Any]:
     if not describe.get("model_ready"):
         return None, None
     try:
-        models = build_chain(settings)
-    except Exception:  # noqa: BLE001 - a broken provider is exactly what the audit reports
+        models = build_model(settings)
+    except Exception:  # noqa: BLE001 - a broken model port is exactly what the audit reports
         return None, None
     search = None
     if describe.get("search_ready"):
         try:
-            search = build_search_chain(settings)
+            search = build_search(settings)
         except Exception:  # noqa: BLE001 - live search checks degrade to "no search"
             search = None
     return models, search
@@ -1316,11 +1242,13 @@ async def sessions_delete(session_id: str) -> Any:
 
 @router.get("/aras")
 async def aras_status() -> dict[str, Any]:
-    """The ARAS microservices this host is wired to: config + live health.
+    """The ARAS microservices this host runs on: config + live health.
 
     No secrets: endpoints and readiness only. ``checked`` carries one health
     probe per configured service (the unauthenticated /health route each
     service exposes), so this answers "is the tunnel up" in one call.
+    ``model_ready`` / ``search_ready`` say whether the router and the web
+    service have everything they need, and ``missing`` names what does not.
     """
     settings = get_settings()
     report = await aras.status(settings)
@@ -1328,64 +1256,78 @@ async def aras_status() -> dict[str, Any]:
     report["endpoints"] = {
         name: settings.aras_endpoint(name) for name in settings.aras_services_configured
     }
-    report["router_in_model_chain"] = "aras" in [
-        p.name for p in build_chain(settings).providers
-    ]
-    report["web_in_search_chain"] = "aras" in settings.search_chain
     return report
+
+
+@router.get("/aras/models")
+async def aras_models() -> Any:
+    """The model ids the router lists — where a value for ``ARAS_MODEL`` comes from.
+
+    Needs the router URL + token only, so it works before a model is chosen.
+    """
+    settings = get_settings()
+    try:
+        models = await aras.ArasRouterClient(settings).models()
+    except ArasError as exc:
+        status, kind = _aras_failure(exc)
+        logs.get_logger("api").warning("router model list failed: %s", exc)
+        return _error(status, kind, exc)
+    return {
+        "provider": aras.PROVIDER,
+        "endpoint": settings.aras_endpoint("router"),
+        "configured_model": settings.aras_model_id,
+        "count": len(models),
+        "models": models,
+    }
+
+
+async def _nothing() -> None:
+    return None
 
 
 @router.get("/diagnose")
 async def diagnose(
-    provider: str | None = None,
     q: str = Query(default="python asyncio tutorial"),
 ) -> dict[str, Any]:
-    """One-stop verification: model ping + search pings + config notes."""
+    """One-stop verification: a real model call, a real search, every /health.
+
+    Three layers, run together: the router answers a completion (URL + token +
+    ``ARAS_MODEL``), the web service answers a query, and every configured
+    service answers its health route. ``hints`` turns the result into the next
+    thing to do.
+    """
     settings = get_settings()
-    chain = build_chain(settings)
+    model = build_model(settings)
+    search = build_search(settings)
 
-    model_report: dict[str, Any] = {"ok": False, "error": {"message": "no provider configured"}}
-    try:
-        if provider:
-            resolved = resolve_named(provider.lower(), settings)
-            ping_target = build_provider(resolved, settings)
-        elif chain:
-            ping_target = chain.providers[0]
-        else:
-            ping_target = None
-        if ping_target is not None:
-            model_report = await ping_target.ping()
-    except (ConfigurationError, ProviderError) as exc:
-        as_dict = getattr(exc, "to_dict", None)
-        model_report = {
-            "ok": False,
-            "error": as_dict() if callable(as_dict) else {"message": str(exc)},
-        }
-
-    search_chain = build_search_chain(settings)
-    search_reports = await asyncio.gather(
-        *(p.ping(q) for p in search_chain.providers), return_exceptions=True
+    model_report, search_report, aras_report = await asyncio.gather(
+        model.ping(),
+        search.ping(q) if search else _nothing(),
+        aras.status(settings) if settings.aras_services_configured else _nothing(),
     )
-    search_out = []
-    for p, report in zip(search_chain.providers, search_reports):
-        if isinstance(report, BaseException):
-            search_out.append({"provider": p.name, "ok": False, "error": {"message": str(report)}})
-        else:
-            search_out.append(report)
-
-    aras_report = await aras.status(settings) if settings.aras_services_configured else None
+    checked = [search_report] if search_report is not None else []
+    skipped = (
+        []
+        if search
+        else [
+            {
+                "provider": aras.PROVIDER,
+                "reason": "not configured — missing " + ", ".join(search.missing),
+            }
+        ]
+    )
 
     return {
         "version": VERSION,
         "model": model_report,
         "search": {
-            "checked": search_out,
-            "skipped": search_chain.skipped,
-            "ok": [r["provider"] for r in search_out if r.get("ok")],
-            "failed": [r["provider"] for r in search_out if not r.get("ok")],
+            "checked": checked,
+            "skipped": skipped,
+            "ok": [r["provider"] for r in checked if r.get("ok")],
+            "failed": [r["provider"] for r in checked if not r.get("ok")],
         },
         "aras": aras_report,
-        "hints": _hints(settings, model_report, search_out, aras_report),
+        "hints": _hints(settings, model_report, checked, aras_report),
     }
 
 
@@ -1395,10 +1337,29 @@ def _hints(
     search: list[dict[str, Any]],
     aras_report: dict[str, Any] | None = None,
 ) -> list[str]:
+    """The next thing to do, most fundamental first: file, config, tunnel, calls."""
     hints: list[str] = []
+    if not Path(".env").exists():
+        hints.append("No .env file found; copy .env.example to .env and fill the ARAS block.")
+
+    model_missing = settings.aras_missing("router")
+    if model_missing:
+        hints.append(
+            "The model is not configured: set " + ", ".join(model_missing) + " in .env. "
+            "The ARAS router is the only model this app has, so no agent can write an answer until then."
+        )
+    search_missing = settings.aras_missing("web")
+    if search_missing:
+        hints.append(
+            "Web search is not configured: set " + ", ".join(search_missing) + " in .env. "
+            "The ARAS web service is the only search backend, so the search agent cannot search."
+        )
+
+    down_names: set[str] = set()
     if aras_report:
         checked = aras_report.get("checked", [])
         down = [c for c in checked if not c.get("ok")]
+        down_names = {str(c.get("service")) for c in down}
         if down:
             names = ", ".join(c["service"] for c in down)
             answered = [c for c in down if str(c.get("error", "")).startswith("HTTP")]
@@ -1417,7 +1378,8 @@ def _hints(
             else:
                 hints.append(
                     f"ARAS service(s) not answering: {names}. Is the SSH tunnel "
-                    "open? (ssh -L <port>:127.0.0.1:<port> ... — see GET /aras for detail)"
+                    "open? (ssh -L <port>:127.0.0.1:<port> ... — see GET /aras for detail, "
+                    "or run python scripts/aras_smoke.py)"
                 )
         if not aras_report.get("rag_ready") and "retrieval" in aras_report.get("configured", []):
             hints.append(
@@ -1429,20 +1391,21 @@ def _hints(
                 "ARAS data is configured but needs ARAS_TENANT + ARAS_OWNER + "
                 "ARAS_DATA_SOURCE_ID before the data agent can query it."
             )
-    if not model.get("ok"):
+
+    # A call that failed although its service is configured and answers /health:
+    # the fix is in the request (model id, token scope), not in the tunnel.
+    if not model_missing and not model.get("ok") and "router" not in down_names:
+        error = model.get("error") or {}
+        why = str(error.get("hint") or error.get("message") or "").strip()
         hints.append(
-            "Model not answering: set LLM_PROVIDER and the matching key in .env "
-            "(GET /providers lists every free option with links), then retry."
+            "The router did not answer the test completion"
+            + (f": {why}" if why else "")
+            + ". GET /aras/models lists the model ids it serves."
         )
-    if not search:
-        hints.append("No search backend configured: SEARCH_PROVIDER=ddg needs no key at all.")
-    if search and all(not r.get("ok") for r in search):
-        hints.append(
-            "Every search backend failed. On a VPS DuckDuckGo often bot-challenges; "
-            "try SEARCH_PROVIDERS=tavily,ddg or SEARCH_PROVIDER=wikipedia."
-        )
-    if not Path(".env").exists():
-        hints.append("No .env file found; copy .env.example to .env first.")
+    if search and all(not r.get("ok") for r in search) and "web" not in down_names:
+        error = search[0].get("error") or {}
+        why = str(error.get("hint") or error.get("message") or "").strip()
+        hints.append("The web service did not answer the test search" + (f": {why}" if why else "") + ".")
     return hints
 
 

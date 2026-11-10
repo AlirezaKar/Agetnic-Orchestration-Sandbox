@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from app.aras import ModelResponse, SearchResponse, SearchResult
 from app.orchestrator import (
     AGENTS,
     AgentContext,
@@ -32,8 +33,6 @@ from app.orchestrator import (
 from app.orchestrator import host
 from app.orchestrator.agents import run_search
 from app.orchestrator.manager import Manager
-from app.llm.base import ModelResponse
-from app.search.base import SearchResponse, SearchResult
 
 PACKAGE = Path(__file__).resolve().parents[1] / "app" / "orchestrator"
 
@@ -184,8 +183,29 @@ class BoundaryTests(unittest.TestCase):
     def test_the_package_is_listed_as_a_service(self):
         # the sibling services stay where they are; the orchestrator sits beside them
         root = PACKAGE.parent
-        for sibling in ("llm", "search", "memory.py", "agent.py", "main.py"):
+        for sibling in ("aras.py", "memory.py", "agent.py", "main.py"):
             self.assertTrue((root / sibling).exists(), sibling)
+
+    def test_nothing_but_the_three_parts_and_their_plumbing_is_left(self):
+        """The app is the orchestrator, the UI and ARAS — plus what they import."""
+        root = PACKAGE.parent
+        present = {
+            path.name for path in root.iterdir() if not path.name.startswith(("__", "."))
+        }
+        self.assertEqual(
+            present,
+            {
+                "orchestrator",  # 1. the orchestrator
+                "static",  # 2. the UI
+                "aras.py",  # 3. the ARAS microservices
+                "agent.py",  # the tool loop the search agent delegates to
+                "main.py",  # the HTTP adapter
+                "config.py",
+                "logs.py",
+                "memory.py",
+                "version.py",
+            },
+        )
 
 
 # ──────────────────────────────────────────────────────── 2. the service run

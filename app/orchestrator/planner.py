@@ -37,7 +37,7 @@ AGENTS: dict[str, dict[str, str]] = {
     },
     "search": {
         "label": "Web researcher",
-        "description": "Searches the web, reads pages and returns answers with sources.",
+        "description": "Searches the web and returns answers with sources.",
     },
     "data": {
         "label": "Data analyst",

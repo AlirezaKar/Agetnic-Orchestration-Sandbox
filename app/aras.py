@@ -1,37 +1,50 @@
-"""Clients for the ARAS microservices this orchestrator is being built for.
+"""The ARAS microservices — the only backends this app talks to.
 
-The other app runs one service per capability (see README §"ARAS
-microservices"); this module is the only place that knows their URLs, auth and
-JSON shapes. Everything else sees them through the existing seams:
+One service per capability (see README §"ARAS microservices"); this module is
+the only place that knows their URLs, auth and JSON shapes. Each one fills a
+port of the orchestrator, and nothing else is wired in beside them:
 
-* router :8101  — an OpenAI-compatible LLM provider (``app/llm/presets.py``,
-  preset ``aras``) — not in this module at all
-* web    :8108  — a search backend (``app/search/providers.py`` imports
-  :class:`ArasWebClient` here)
-* ocr    :8102  — a PDF reader injected into ``files.extract``
+* router :8101  — the model. :class:`ArasModel` is the orchestrator's
+  ``ModelChain`` port: every planner / agent / evaluator / manager call is one
+  ``POST /api/v1/chat/completions/`` (OpenAI dialect, trailing slash included)
+* web    :8108  — web search. :class:`ArasSearch` is the orchestrator's
+  ``SearchChain`` port: the ``web_search`` tool of the search agent
+* ocr    :8102  — the PDF reader injected into ``files.extract``
 * retrieval :8105 + ingestion :8104 — :class:`ArasKnowledge`, the orchestrator's
   ``KnowledgeStore`` port (RAG for the document agent)
 * data   :8107  — :class:`ArasDataBackend`, the orchestrator's ``DataBackend``
   port (natural-language analytics for the data agent)
-* vector :8103  — health/diagnostics only; the README says ingestion and
-  retrieval are the right doors for normal orchestrator work
+* vector :8103  — health/diagnostics only; ingestion and retrieval are the
+  right doors for normal orchestrator work
+
+Port 8106 (the remote orchestrator) is never called: this app *is* the
+orchestrator.
 
 Auth is ``Authorization: Bearer <token>`` per service, each token falling back
 to the shared ``ARAS_TOKEN`` (``app/config.py``). The data service additionally
 wants ``X-Tenant`` and ``X-Owner-External-Id`` on every call.
 
-No secret ever leaves this process: errors carry status + the service's
-``error``/``detail`` text, never the token.
+Every failure is one exception type, :class:`ArasError`, which names the
+service, the HTTP status and a hint about what to fix — so a broken run always
+says *which* microservice broke. No secret ever leaves this process: errors
+carry status + the service's ``error``/``detail`` text, never the token.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
+import uuid
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import httpx
 
 from app.config import Settings, trust_env_for
+
+#: The name every reply and every error carries in its ``provider`` field.
+PROVIDER = "aras"
 
 #: service → the unauthenticated health path (they differ per service)
 HEALTH_PATHS: dict[str, str] = {
@@ -45,8 +58,28 @@ HEALTH_PATHS: dict[str, str] = {
 }
 
 
+def config_hint(service: str, missing: list[str]) -> str:
+    """Where to write each missing value — one sentence, no guessing."""
+    notes: list[str] = []
+    for env in missing:
+        if env == "ARAS_BASE_URL":
+            notes.append(f"ARAS_BASE_URL (or ARAS_{service.upper()}_URL)")
+        elif env.endswith("_TOKEN"):
+            notes.append(f"{env} (or the shared ARAS_TOKEN)")
+        elif env == "ARAS_MODEL":
+            notes.append("ARAS_MODEL (a router model id — GET /aras/models lists them)")
+        else:
+            notes.append(env)
+    return "set " + ", ".join(notes) + " in .env, then restart" if notes else ""
+
+
 class ArasError(RuntimeError):
-    """One ARAS call failed (network, auth, 4xx/5xx, bad JSON)."""
+    """One ARAS call failed (network, auth, 4xx/5xx, bad JSON).
+
+    The single failure type of this app's backends: whichever port raised it
+    (model, search, knowledge, data, OCR), the message names the service and
+    ``hint`` says what to check first.
+    """
 
     def __init__(self, service: str, message: str, *, status: int | None = None, hint: str = ""):
         self.service = service
@@ -56,6 +89,7 @@ class ArasError(RuntimeError):
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "provider": PROVIDER,
             "service": self.service,
             "status": self.status,
             "message": str(self),
@@ -63,6 +97,135 @@ class ArasError(RuntimeError):
         }
 
 
+class ArasNotConfigured(ArasError):
+    """A service cannot be called yet: ``missing`` lists the env vars to fill."""
+
+    def __init__(self, service: str, missing: list[str]):
+        self.missing = list(missing)
+        detail = "not configured"
+        if self.missing:
+            detail += " — missing " + ", ".join(self.missing)
+        super().__init__(service, detail, hint=config_hint(service, self.missing))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**super().to_dict(), "missing": self.missing}
+
+
+# -------------------------------------------------------------- reply types
+# What the ports hand back. The orchestrator never imports these: it reads the
+# attributes (``content``, ``tool_calls``, ``results``, ...), which is why any
+# object with the same shape — a test fake, another host's client — fits.
+@dataclass
+class ToolCall:
+    """One function call the model asked for (OpenAI ``tool_calls`` entry)."""
+
+    name: str
+    arguments: dict[str, Any]
+    id: str = field(default_factory=lambda: f"call_{uuid.uuid4().hex[:12]}")
+
+    @classmethod
+    def from_openai(cls, raw: dict[str, Any]) -> "ToolCall":
+        fn = raw.get("function") or {}
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                parsed = json.loads(args or "{}")
+            except json.JSONDecodeError:
+                parsed = {"_raw": args}
+        elif isinstance(args, dict):
+            parsed = args
+        else:
+            parsed = {}
+        return cls(
+            name=fn.get("name") or raw.get("name") or "unknown",
+            arguments=parsed if isinstance(parsed, dict) else {"value": parsed},
+            id=raw.get("id") or f"call_{uuid.uuid4().hex[:12]}",
+        )
+
+    def to_openai(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": json.dumps(self.arguments, ensure_ascii=False),
+            },
+        }
+
+
+@dataclass
+class ModelResponse:
+    """One reply from the router: text and/or tool calls, plus who answered."""
+
+    content: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    model: str = ""
+    provider: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+    latency_ms: int = 0
+    finish_reason: str | None = None
+
+    def to_assistant_message(self) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant", "content": self.content or ""}
+        if self.tool_calls:
+            message["tool_calls"] = [tc.to_openai() for tc in self.tool_calls]
+        return message
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "content": self.content,
+            "tool_calls": [
+                {"name": tc.name, "arguments": tc.arguments, "id": tc.id}
+                for tc in self.tool_calls
+            ],
+            "model": self.model,
+            "provider": self.provider,
+            "usage": self.usage,
+            "latency_ms": self.latency_ms,
+            "finish_reason": self.finish_reason,
+        }
+
+
+@dataclass
+class SearchResult:
+    """One web hit: where it is, what it says, which engine found it."""
+
+    title: str
+    url: str
+    snippet: str = ""
+    source: str = ""  # "aras:<engine>" — the engine behind the web service
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def as_tool_output(self, max_chars: int = 600) -> dict[str, Any]:
+        """Compact shape handed to the model."""
+        snippet = (self.snippet or "").strip()
+        if len(snippet) > max_chars:
+            snippet = snippet[:max_chars] + "…"
+        return {"title": self.title, "url": self.url, "snippet": snippet}
+
+
+@dataclass
+class SearchResponse:
+    """One web search: the query, its hits, who answered and how long it took."""
+
+    query: str
+    results: list[SearchResult] = field(default_factory=list)
+    provider: str = ""
+    latency_ms: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "provider": self.provider,
+            "results": [r.to_dict() for r in self.results],
+            "count": len(self.results),
+            "latency_ms": self.latency_ms,
+        }
+
+
+# ------------------------------------------------------------------- client
 class ArasClient:
     """Base: one service, one base URL, one bearer token."""
 
@@ -96,13 +259,45 @@ class ArasClient:
         )
 
     def _require(self) -> None:
-        if not self.configured:
-            raise ArasError(
-                self.service,
-                "not configured",
-                hint=f"set ARAS_BASE_URL (or ARAS_{self.service.upper()}_URL) and "
-                f"ARAS_{self.service.upper()}_TOKEN (or the shared ARAS_TOKEN) in .env",
+        if self.configured:
+            return
+        missing: list[str] = []
+        if not self.base_url:
+            missing.append("ARAS_BASE_URL")
+        if not self.token:
+            missing.append(f"ARAS_{self.service.upper()}_TOKEN")
+        raise ArasNotConfigured(self.service, missing)
+
+    @staticmethod
+    def _error_detail(response: httpx.Response) -> str:
+        """The service's own words for a failure (far more useful than a status)."""
+        try:
+            body = response.json()
+        except ValueError:
+            return " ".join((response.text or "").split())[:300]
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):  # OpenAI style: {"error": {"message": ...}}
+                return str(error.get("message") or error.get("detail") or error)[:300]
+            for key in ("error", "detail", "message"):
+                if body.get(key):
+                    return str(body[key])[:300]
+            return ""
+        return str(body)[:300]
+
+    def _hint_for(self, status: int, detail: str) -> str:
+        """What to check first for an HTTP failure; services add their own."""
+        if status == 403:
+            return (
+                f"the token was read but is not allowed to do this — check that "
+                f"ARAS_{self.service.upper()}_TOKEN is this service's token and still active"
             )
+        if status >= 500:
+            return (
+                "the service answered with a server error — GET /aras (or "
+                "python scripts/aras_smoke.py) shows whether it is this service or the tunnel"
+            )
+        return ""
 
     async def _request(
         self,
@@ -128,6 +323,15 @@ class ArasClient:
                     params=params,
                     headers=self._headers(**(headers or {})),
                 )
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
+            # connected, then silence: the service is there but slow — a
+            # different fix from a closed tunnel, so it gets its own words
+            raise ArasError(
+                self.service,
+                f"no answer from {url} within {self.timeout:g}s ({type(exc).__name__})",
+                hint="the connection opened, so the tunnel is up — the service is slow or "
+                "stuck. Raise ARAS_TIMEOUT (model calls can take a while), then retry",
+            ) from exc
         except httpx.HTTPError as exc:
             raise ArasError(
                 self.service,
@@ -143,17 +347,24 @@ class ArasClient:
                 hint=f"check ARAS_{self.service.upper()}_TOKEN (or ARAS_TOKEN); the key "
                 "may have been set inactive on the service's /admin/",
             )
+        if 300 <= response.status_code < 400:
+            # never followed: a redirected POST loses its body, so the service
+            # would answer something that looks like success and is not
+            raise ArasError(
+                self.service,
+                f"HTTP {response.status_code}: redirected to "
+                f"{response.headers.get('location') or '(no location)'}",
+                status=response.status_code,
+                hint=f"the URL {url} is not the route itself — ARAS routes end with a "
+                f"slash; check ARAS_BASE_URL / ARAS_{self.service.upper()}_URL",
+            )
         if response.status_code >= 400:
-            detail = ""
-            try:
-                body = response.json()
-                detail = str(body.get("error") or body.get("detail") or "")[:300]
-            except ValueError:
-                detail = response.text[:300]
+            detail = self._error_detail(response)
             raise ArasError(
                 self.service,
                 f"HTTP {response.status_code}: {detail or 'request failed'}",
                 status=response.status_code,
+                hint=self._hint_for(response.status_code, detail),
             )
         try:
             return response.json()
@@ -190,6 +401,67 @@ class ArasClient:
 
 
 # ------------------------------------------------------------------ services
+class ArasRouterClient(ArasClient):
+    """Router :8101 — the model gateway, speaking the OpenAI chat dialect.
+
+    The endpoint already ends in ``/api/v1``. Routes carry a trailing slash:
+    the service is a Django app, and a POST without it is redirected and loses
+    its body.
+    """
+
+    service = "router"
+
+    def _hint_for(self, status: int, detail: str) -> str:
+        lowered = detail.lower()
+        model = self.settings.aras_model_id or "(not set)"
+        if status in (400, 404, 422) and "tool" in lowered:
+            return (
+                "the router refused the tool-calling request — the search agent needs a "
+                "model that supports function calling; try another ARAS_MODEL "
+                "(GET /aras/models lists the ids)"
+            )
+        if status in (400, 403, 404, 422) and "model" in lowered:
+            return (
+                f"the router refused ARAS_MODEL={model} — copy an id from GET /aras/models. "
+                "Ids with the sharif- prefix are routed to Rayen; gapgpt-/openrouter-/"
+                "deepseek- prefixes are rejected for this token"
+            )
+        if status == 404:
+            return (
+                "nothing answers at this route — ARAS_ROUTER_URL (when set) must end "
+                f"with /api/v1, and ARAS_MODEL={model} must be an id from GET /aras/models"
+            )
+        if status == 429:
+            return "the router is rate limiting this token — wait, then retry"
+        return super()._hint_for(status, detail)
+
+    async def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """``POST /chat/completions/`` — returns the router's JSON untouched."""
+        data = await self._request("POST", "/chat/completions/", json=payload)
+        if not isinstance(data, dict):
+            raise ArasError(
+                self.service,
+                "the router's reply is not a JSON object: " + str(data)[:200],
+            )
+        return data
+
+    async def models(self) -> list[str]:
+        """``GET /models/`` — the model ids the router lists, sorted."""
+        payload = await self._request("GET", "/models/")
+        entries: Any = payload
+        if isinstance(payload, dict):
+            entries = payload.get("data") or payload.get("models") or payload.get("results") or []
+        ids: set[str] = set()
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, str) and entry:
+                ids.add(entry)
+            elif isinstance(entry, dict):
+                value = entry.get("id") or entry.get("name") or entry.get("model")
+                if isinstance(value, str) and value:
+                    ids.add(value)
+        return sorted(ids)
+
+
 class ArasOcrClient(ArasClient):
     """OCR :8102 — ``POST /api/v1/ocr/`` reads a PDF into text."""
 
@@ -285,9 +557,17 @@ class ArasVectorClient(ArasClient):
 
 
 class ArasWebClient(ArasClient):
-    """Web :8108 — public web search + fetch, used by the search chain."""
+    """Web :8108 — public web search: the search agent's one tool."""
 
     service = "web"
+
+    def _hint_for(self, status: int, detail: str) -> str:
+        if status in (502, 503, 504):
+            return (
+                "the web service answered, but the search engines behind it timed out "
+                "or are down — retry in a moment"
+            )
+        return super()._hint_for(status, detail)
 
     async def search(self, query: str, *, max_results: int = 5) -> list[dict[str, Any]]:
         payload = await self._request(
@@ -343,17 +623,237 @@ class ArasDataClient(ArasClient):
         }
 
 
+#: Every service this app may call, in port order (8101 … 8108, never 8106).
 CLIENTS: dict[str, type[ArasClient]] = {
+    "router": ArasRouterClient,
     "ocr": ArasOcrClient,
+    "vector": ArasVectorClient,
     "ingestion": ArasIngestionClient,
     "retrieval": ArasRetrievalClient,
-    "vector": ArasVectorClient,
-    "web": ArasWebClient,
     "data": ArasDataClient,
+    "web": ArasWebClient,
 }
 
 
 # ------------------------------------------------------------- port adapters
+class ArasModel:
+    """The orchestrator's ``ModelChain`` port: the ARAS router, and only it.
+
+    No failover and no model guessing: ``ARAS_MODEL`` is the id that is sent,
+    and when the router refuses it the error says so and the call stops. The
+    object is falsy until the router is configured, which is how the
+    orchestrator knows whether it has a model at all.
+    """
+
+    name = PROVIDER
+    service = "router"
+
+    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
+        self.settings = settings
+        self.client = ArasRouterClient(settings, transport=transport)
+        self.model = settings.aras_model_id
+
+    @property
+    def missing(self) -> list[str]:
+        """Env vars still needed before a call can be made ([] = ready)."""
+        return self.settings.aras_missing(self.service)
+
+    def __bool__(self) -> bool:
+        return not self.missing
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "provider": PROVIDER,
+            "service": self.service,
+            "endpoint": self.client.base_url,
+            "model": self.model,
+            "ready": bool(self),
+            "missing": self.missing,
+        }
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        tool_choice: str | None = "auto",
+    ) -> ModelResponse:
+        """One chat completion. Raises :class:`ArasError`, never returns a guess."""
+        missing = self.missing
+        if missing:
+            raise ArasNotConfigured(self.service, missing)
+
+        payload: dict[str, Any] = {"model": self.model, "messages": messages, "stream": False}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if tools:
+            payload["tools"] = tools
+            if tool_choice:
+                payload["tool_choice"] = tool_choice
+
+        started = time.perf_counter()
+        data = await self.client.chat(payload)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise ArasError(
+                self.service,
+                "the router answered without a completion: "
+                + json.dumps(data, ensure_ascii=False, default=str)[:300],
+                hint="the request reached the router, but its reply has no `choices` — "
+                "the body quoted above is everything it said",
+            )
+        choice = choices[0]
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            message = {}
+
+        content = message.get("content")
+        if isinstance(content, list):  # some gateways return content parts
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+            )
+        raw_calls = message.get("tool_calls")
+        usage = data.get("usage")
+        return ModelResponse(
+            content=str(content or "").strip(),
+            tool_calls=[
+                ToolCall.from_openai(call)
+                for call in (raw_calls if isinstance(raw_calls, list) else [])
+                if isinstance(call, dict)
+            ],
+            model=str(data.get("model") or self.model),
+            provider=PROVIDER,
+            usage=usage if isinstance(usage, dict) else {},
+            latency_ms=latency_ms,
+            finish_reason=choice.get("finish_reason"),
+        )
+
+    async def list_models(self) -> list[str]:
+        """The ids the router lists (needs URL + token, not ``ARAS_MODEL``)."""
+        return await self.client.models()
+
+    async def ping(self) -> dict[str, Any]:
+        """Cheap end-to-end check: do URL + token + model actually answer? Never raises."""
+        started = time.perf_counter()
+        try:
+            response = await self.complete(
+                [{"role": "user", "content": "Reply with exactly: pong"}],
+                temperature=0,
+                max_tokens=16,
+            )
+        except ArasError as exc:
+            return {
+                "ok": False,
+                "provider": PROVIDER,
+                "model": self.model,
+                "error": exc.to_dict(),
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            }
+        return {
+            "ok": True,
+            "provider": PROVIDER,
+            "model": response.model,
+            "reply": response.content[:200],
+            "latency_ms": response.latency_ms,
+        }
+
+
+class ArasSearch:
+    """The orchestrator's ``SearchChain`` port: the ARAS web service, and only it.
+
+    One backend, so there is nothing to fall through to: a failed search is an
+    :class:`ArasError` the caller sees, not a silent switch to something else.
+    """
+
+    name = PROVIDER
+    service = "web"
+
+    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
+        self.settings = settings
+        self.client = ArasWebClient(settings, transport=transport)
+
+    @property
+    def missing(self) -> list[str]:
+        """Env vars still needed before a search can be made ([] = ready)."""
+        return self.settings.aras_missing(self.service)
+
+    def __bool__(self) -> bool:
+        return not self.missing
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "provider": PROVIDER,
+            "service": self.service,
+            "endpoint": self.client.base_url,
+            "ready": bool(self),
+            "missing": self.missing,
+        }
+
+    async def search(self, query: str, limit: int | None = None) -> SearchResponse:
+        """Run one query. ``limit`` is clamped to 1–10 results."""
+        missing = self.missing
+        if missing:
+            raise ArasNotConfigured(self.service, missing)
+        try:
+            wanted = int(limit or self.settings.agent_max_search_results)
+        except (TypeError, ValueError):
+            wanted = self.settings.agent_max_search_results
+        wanted = max(1, min(wanted, 10))
+
+        started = time.perf_counter()
+        hits = await self.client.search(query, max_results=wanted)
+        results = [
+            SearchResult(
+                title=hit["title"],
+                url=hit["url"],
+                snippet=hit["snippet"],
+                source=f"{PROVIDER}:{hit['engine']}" if hit.get("engine") else PROVIDER,
+            )
+            for hit in hits
+            if hit.get("url")
+        ]
+        return SearchResponse(
+            query=query,
+            results=results[:wanted],
+            provider=PROVIDER,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    async def ping(self, query: str = "python asyncio tutorial") -> dict[str, Any]:
+        """One real query, timed — the /diagnose row. Never raises."""
+        started = time.perf_counter()
+        try:
+            response = await self.search(query, 3)
+        except ArasError as exc:
+            return {
+                "provider": PROVIDER,
+                "ok": False,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "error": exc.to_dict(),
+            }
+        report: dict[str, Any] = {
+            "provider": PROVIDER,
+            "ok": bool(response.results),
+            "count": len(response.results),
+            "latency_ms": response.latency_ms,
+            "sample": [result.to_dict() for result in response.results[:2]],
+            "empty": not response.results,
+        }
+        if not response.results:
+            report["error"] = ArasError(
+                self.service,
+                f"the web service answered, but with no results for '{query}'",
+                hint="the service is reachable; the engines behind it returned nothing",
+            ).to_dict()
+        return report
+
+
 class ArasKnowledge:
     """The orchestrator's ``KnowledgeStore`` port, backed by retrieval :8105.
 
@@ -399,6 +899,20 @@ class ArasDataBackend:
 
 
 # ------------------------------------------------------------------ factory
+def build_model(
+    settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+) -> ArasModel:
+    """The ModelChain port. Always an object — falsy until the router is configured."""
+    return ArasModel(settings, transport=transport)
+
+
+def build_search(
+    settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+) -> ArasSearch:
+    """The SearchChain port. Always an object — falsy until the web service is configured."""
+    return ArasSearch(settings, transport=transport)
+
+
 def build_knowledge(settings: Settings) -> ArasKnowledge | None:
     """The KnowledgeStore port, or None when RAG is not wired up."""
     knowledge = ArasKnowledge(settings)
@@ -440,28 +954,107 @@ def pdf_reader(settings: Settings):
     return read
 
 
-async def status(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> dict[str, Any]:
-    """Health of every configured ARAS service — the /diagnose block."""
-    import asyncio
+# ---------------------------------------------------------------- catalogue
+#: What each service is *for* in this app — the text behind GET /providers.
+SERVICES: dict[str, dict[str, Any]] = {
+    "router": {
+        "label": "Router",
+        "role": "The model: every planner, agent, evaluator and manager call.",
+        "route": "POST /api/v1/chat/completions/",
+        "env": ["ARAS_ROUTER_TOKEN", "ARAS_MODEL"],
+        "required": True,
+    },
+    "web": {
+        "label": "Web",
+        "role": "Web search: the web_search tool of the search agent.",
+        "route": "POST /v1/search/",
+        "env": ["ARAS_WEB_TOKEN"],
+    },
+    "ocr": {
+        "label": "OCR",
+        "role": "Reads uploaded PDFs into text for the document agent.",
+        "route": "POST /api/v1/ocr/",
+        "env": ["ARAS_OCR_TOKEN"],
+    },
+    "retrieval": {
+        "label": "Retrieval",
+        "role": "The document agent's knowledge store (RAG) when no file is attached.",
+        "route": "POST /v1/search/",
+        "env": ["ARAS_RETRIEVAL_TOKEN", "ARAS_COLLECTION", "ARAS_RETRIEVAL_MODE"],
+    },
+    "ingestion": {
+        "label": "Ingestion",
+        "role": "Indexes accepted uploads into the collection when ARAS_AUTO_INGEST=true.",
+        "route": "POST /v1/ingest/",
+        "env": ["ARAS_INGESTION_TOKEN", "ARAS_COLLECTION", "ARAS_AUTO_INGEST"],
+    },
+    "data": {
+        "label": "Data",
+        "role": "The data agent's analytics backend when there is nothing local to compute.",
+        "route": "POST /v1/query/",
+        "env": ["ARAS_DATA_TOKEN", "ARAS_TENANT", "ARAS_OWNER", "ARAS_DATA_SOURCE_ID"],
+    },
+    "vector": {
+        "label": "Vector store",
+        "role": "Health and diagnostics only — ingestion and retrieval are the working doors.",
+        "route": "GET /v1/collections/",
+        "env": ["ARAS_VECTOR_TOKEN"],
+    },
+}
 
+
+def catalogue(settings: Settings) -> list[dict[str, Any]]:
+    """Every service: its role here, where it lives and what it still needs.
+
+    ``state`` is the one word a person needs: ``ready``, ``off`` (configured
+    but switched off by choice), ``incomplete`` (URL + token are there, another
+    value is not) or ``not configured`` (no URL or no token). No secrets.
+    """
+    out: list[dict[str, Any]] = []
+    for name, info in SERVICES.items():
+        missing = settings.aras_missing(name)
+        if not settings.aras_configured(name):
+            state = "not configured"
+        elif missing:
+            state = "incomplete"
+        elif name == "ingestion" and not settings.aras_auto_ingest:
+            state = "off"
+        else:
+            state = "ready"
+        out.append(
+            {
+                "service": name,
+                "label": info["label"],
+                "port": settings.ARAS_PORTS[name][0],
+                "role": info["role"],
+                "route": info["route"],
+                "endpoint": settings.aras_endpoint(name),
+                "state": state,
+                "ready": state == "ready",
+                "configured": settings.aras_configured(name),
+                "required": bool(info.get("required")),
+                "env": list(info["env"]),
+                "missing_env": missing,
+            }
+        )
+    return out
+
+
+async def status(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> dict[str, Any]:
+    """Health of every configured ARAS service — the /aras and /diagnose block."""
     configured = settings.aras_services_configured
-    checked: list[dict[str, Any]] = []
-    if "router" in configured:
-        # the router is pinged through the model chain, but its health URL is
-        # still the cheapest "is the tunnel up" probe there is
-        client = ArasClient(settings, transport=transport)
-        client.service = "router"
-        client.base_url = settings.aras_endpoint("router")
-        client.token = settings.aras_router_token
-        checked.append(await client.health())
-    others = [CLIENTS[name](settings, transport=transport)
-              for name in configured if name != "router"]
-    checked.extend(await asyncio.gather(*(client.health() for client in others)))
+    clients = [CLIENTS[name](settings, transport=transport) for name in configured]
+    checked = list(await asyncio.gather(*(client.health() for client in clients)))
+    missing = {name: settings.aras_missing(name) for name in CLIENTS}
     return {
         "configured": configured,
-        "skipped": [name for name in ("router", *CLIENTS) if name not in configured],
+        "skipped": [name for name in CLIENTS if name not in configured],
         "checked": checked,
+        "model": settings.aras_model_id,
+        "model_ready": settings.aras_model_ready,
+        "search_ready": settings.aras_search_ready,
         "rag_ready": settings.aras_rag_ready,
         "data_ready": settings.aras_data_ready,
         "tenant_set": bool(settings.aras_tenant and settings.aras_owner),
+        "missing": {name: envs for name, envs in missing.items() if envs},
     }

@@ -12,15 +12,11 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.aras import ModelResponse, SearchResponse, SearchResult, ToolCall
 from app.config import Settings, get_settings
-from app.llm.base import ModelResponse, ToolCall
-from app.search.base import SearchResponse, SearchResult
 
 
 class FakeModel:
-    providers: list = []  # /health introspects the chain
-    skipped: dict = {}
-
     async def complete(self, messages, tools=None, **kwargs):
         system = messages[0]["content"]
         if "You are the evaluator" in system:
@@ -45,9 +41,6 @@ class FakeModel:
 
 
 class FakeSearchChain:
-    providers: list = []
-    skipped: dict = {}
-
     async def search(self, query, limit=5):
         return SearchResponse(
             query=query,
@@ -76,9 +69,9 @@ class _ApiCase(unittest.TestCase):
         main_module.reset_memory()
         self.patches = [
             mock.patch.object(main_module, "get_settings", lambda: self.settings),
-            mock.patch.object(main_module, "build_chain", lambda settings=None: FakeModel()),
+            mock.patch.object(main_module, "build_model", lambda settings=None: FakeModel()),
             mock.patch.object(
-                main_module, "build_search_chain", lambda settings=None: FakeSearchChain()
+                main_module, "build_search", lambda settings=None: FakeSearchChain()
             ),
         ]
         for patch in self.patches:
@@ -263,7 +256,7 @@ class OrchestratorApiTests(_ApiCase):
             async def complete(self, *args, **kwargs):
                 raise RuntimeError("provider down")
 
-        with mock.patch.object(main_module, "build_chain", lambda settings=None: Broken()):
+        with mock.patch.object(main_module, "build_model", lambda settings=None: Broken()):
             response = self.client.post("/orchestrate", json={"message": "Explain closures."})
         self.assertEqual(response.status_code, 200)  # agents degrade, the run survives
         self.assertTrue(response.json()["orchestration"]["agents"])
@@ -470,7 +463,7 @@ class OrchestrateStreamTests(_ApiCase):
             async def complete(self, *args, **kwargs):
                 raise RuntimeError("provider down")
 
-        with mock.patch.object(main_module, "build_chain", lambda settings=None: Broken()):
+        with mock.patch.object(main_module, "build_model", lambda settings=None: Broken()):
             frames = self.frames({"message": "Explain closures."})
         # the agents degrade rather than fail the run, so this is still a result
         self.assertEqual(frames[-1][0], "result")
@@ -510,9 +503,6 @@ class OrchestrateStreamTests(_ApiCase):
     # v0.15.0 answered that with a 500 in the middle of the run.
     def test_a_run_that_really_uses_a_tool_streams_to_the_answer(self):
         class ToolModel:
-            providers: list = []
-            skipped: dict = {}
-
             async def complete(self, messages, tools=None, **kwargs):
                 used = any(message.get("role") == "tool" for message in messages)
                 if tools and not used:
@@ -530,7 +520,7 @@ class OrchestrateStreamTests(_ApiCase):
                     usage={},
                 )
 
-        with mock.patch.object(main_module, "build_chain", lambda settings=None: ToolModel()):
+        with mock.patch.object(main_module, "build_model", lambda settings=None: ToolModel()):
             frames = self.frames({"message": "What is the latest Python release? Cite sources."})
 
         self.assertEqual(frames[-1][0], "result")

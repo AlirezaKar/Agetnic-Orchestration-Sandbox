@@ -1,39 +1,81 @@
-"""HTTP surface tests. No provider keys are set, so these also assert that the
-app fails loudly (instead of silently answering from a mock)."""
+"""HTTP surface tests.
+
+Two halves of the same promise: with an empty ``ARAS_*`` block the app fails
+loudly and says which variables to set (never a canned answer, never another
+provider); with a configured block every route goes to the ARAS services and
+nowhere else.
+"""
 
 from __future__ import annotations
 
-import os
+import json
 import tempfile
 import unittest
+from pathlib import Path
+from typing import Any
+from unittest import mock
 
+import httpx
 from fastapi.testclient import TestClient
 
-from app.config import get_settings
-from app.main import VERSION, app
 import app.main as main_module
+from app import aras
+from app.config import Settings, get_settings
+from app.main import VERSION, app
+
+#: Every ARAS field pinned to "unset", so a developer's own .env or shell
+#: variables can never turn these into live calls.
+BLANK_ARAS: dict[str, Any] = {
+    "aras_base_url": "",
+    "aras_token": None,
+    "aras_model": None,
+    "aras_collection": "",
+    "aras_tenant": None,
+    "aras_owner": None,
+    "aras_data_source_id": None,
+    **{f"aras_{name}_url": None for name in Settings.ARAS_PORTS},
+    **{f"aras_{name}_token": None for name in Settings.ARAS_PORTS},
+}
 
 
-class ApiTests(unittest.TestCase):
+class _HttpCase(unittest.TestCase):
+    """A client on the real app, with its settings and stores in a temp folder."""
+
+    overrides: dict[str, Any] = {}
+
     @classmethod
     def setUpClass(cls):
-        # The harness memory is real in this app: keep it out of the repository.
-        cls._memory_tmp = tempfile.TemporaryDirectory()
-        cls._memory_env = os.environ.get("MEMORY_DIR")
-        os.environ["MEMORY_DIR"] = cls._memory_tmp.name
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        cls.settings = Settings(
+            _env_file=None,
+            **{
+                **BLANK_ARAS,
+                # the harness memory and the file store are real: keep them out of the repo
+                "memory_dir": str(root / "memory"),
+                "files_dir": str(root / "files"),
+                "orchestrator_log_runs": False,
+                **cls.overrides,
+            },
+        )
         get_settings.cache_clear()
+        main_module.reset_store()
         main_module.reset_memory()
+        cls._patch = mock.patch.object(main_module, "get_settings", lambda: cls.settings)
+        cls._patch.start()
         cls.client = TestClient(app)
 
     @classmethod
     def tearDownClass(cls):
-        if cls._memory_env is None:
-            os.environ.pop("MEMORY_DIR", None)
-        else:
-            os.environ["MEMORY_DIR"] = cls._memory_env
+        cls._patch.stop()
+        main_module.reset_store()
         main_module.reset_memory()
         get_settings.cache_clear()
-        cls._memory_tmp.cleanup()
+        cls._tmp.cleanup()
+
+
+class ApiTests(_HttpCase):
+    """Nothing configured: the page works, every model route says what is missing."""
 
     # ------------------------------------------------------------- basics
     def test_index_serves_test_harness(self):
@@ -58,8 +100,6 @@ class ApiTests(unittest.TestCase):
             self.assertIn(marker, response.text, path)
 
     def test_version_endpoint_matches_the_page(self):
-        from pathlib import Path
-
         for path in ("/version", "/api/version"):
             payload = self.client.get(path).json()
             self.assertEqual(payload["version"], VERSION, path)
@@ -92,12 +132,22 @@ class ApiTests(unittest.TestCase):
     def test_favicon_does_not_404(self):
         self.assertEqual(self.client.get("/favicon.ico").status_code, 204)
 
-    def test_health_reports_missing_model_and_usable_search(self):
+    # ------------------------------------------------------------- health
+    def test_health_names_what_the_model_and_the_search_are_missing(self):
         data = self.client.get("/health").json()
         self.assertEqual(data["status"], "ok")
         self.assertFalse(data["model_provider_ready"])
-        self.assertIn("ddg", data["search_chain"])
-        self.assertTrue(any("GROQ_API_KEY" in note for note in data["skipped"]["models"]))
+        self.assertEqual(data["model_chain"], [])
+        self.assertEqual(data["search_chain"], [])
+        self.assertEqual(data["model"]["provider"], "aras")
+        self.assertEqual(data["model"]["service"], "router")
+        self.assertFalse(data["model"]["ready"])
+        self.assertEqual(
+            data["model"]["missing"], ["ARAS_BASE_URL", "ARAS_ROUTER_TOKEN", "ARAS_MODEL"]
+        )
+        self.assertEqual(data["search"]["service"], "web")
+        self.assertEqual(data["search"]["missing"], ["ARAS_BASE_URL", "ARAS_WEB_TOKEN"])
+        self.assertEqual(data["aras"]["configured"], [])
 
     def test_health_describes_the_orchestration_pipeline(self):
         data = self.client.get("/health").json()
@@ -112,78 +162,132 @@ class ApiTests(unittest.TestCase):
         data = self.client.get("/config").json()
         flattened = str(data).lower()
         self.assertNotIn("api_key=", flattened)
-        self.assertIn("search_chain", data)
+        # no field that could hold a credential is part of the summary at all
+        self.assertEqual([key for key in data if key.endswith(("_token", "_key", "_secret"))], [])
+        self.assertEqual(data["model_provider"], "aras")
+        self.assertEqual(data["search_provider"], "aras")
+        self.assertFalse(data["model_ready"])
+        self.assertNotIn("search_chain", data)
+        self.assertNotIn("llm_chain", data)
 
-    # ---------------------------------------------------------- providers
-    def test_providers_lists_free_options_with_links(self):
+    # ----------------------------------------------------- ARAS services
+    def test_providers_lists_the_aras_services_and_nothing_else(self):
         data = self.client.get("/providers").json()
-        names = {p["name"] for p in data["providers"]}
-        self.assertIn("groq", names)
-        self.assertIn("gemini", names)
-        self.assertIn("custom", names)
-        self.assertNotIn("mock", names)
-        for entry in data["providers"]:
-            self.assertTrue(entry["free_tier"])
-            self.assertTrue(entry["key_url"])
-        search_names = {p["name"] for p in data["search"]["providers"]}
-        self.assertTrue({"ddg", "wikipedia", "tavily", "serper", "google_cse"} <= search_names)
+        self.assertEqual(set(data), {"version", "model", "search", "services", "env_file"})
+        names = [row["service"] for row in data["services"]]
+        self.assertEqual(names, ["router", "web", "ocr", "retrieval", "ingestion", "data", "vector"])
+        self.assertNotIn("providers", data)
+        self.assertNotIn("core", data)
+        text = json.dumps(data).lower()
+        for gone in ("groq", "gemini", "openrouter", "ollama", "duckduckgo", "tavily", "wikipedia", "mock"):
+            self.assertNotIn(gone, text, gone)
 
-    def test_search_providers_flag_which_need_a_server(self):
-        data = self.client.get("/providers").json()
-        by_name = {p["name"]: p for p in data["search"]["providers"]}
-        self.assertFalse(by_name["ddg"]["needs_server"])
-        self.assertFalse(by_name["tavily"]["needs_server"])
-        self.assertTrue(by_name["searxng"]["needs_server"])
+    def test_each_service_row_says_what_it_is_for_and_what_it_needs(self):
+        rows = {row["service"]: row for row in self.client.get("/providers").json()["services"]}
+        for row in rows.values():
+            for key in ("label", "port", "role", "route", "endpoint", "state", "ready",
+                        "configured", "required", "env", "missing_env"):
+                self.assertIn(key, row, (row["service"], key))
+            self.assertEqual(row["state"], "not configured")
+            self.assertTrue(row["role"])
+        self.assertEqual(rows["router"]["port"], 8101)
+        self.assertEqual(rows["web"]["port"], 8108)
+        self.assertTrue(rows["router"]["required"])
+        self.assertIn("ARAS_MODEL", rows["router"]["missing_env"])
+        self.assertNotIn(8106, [row["port"] for row in rows.values()])
 
-    def test_models_endpoint_returns_configuration_error_without_key(self):
-        response = self.client.get("/providers/gemini/models")
+    def test_the_old_provider_routes_are_gone(self):
+        self.assertEqual(self.client.get("/providers/groq/models").status_code, 404)
+        self.assertEqual(self.client.get("/search/diagnose").status_code, 404)
+        listed = " ".join(self.client.get("/api").json()["routes"])
+        self.assertNotIn("/providers/{name}/models", listed)
+        self.assertNotIn("/search/diagnose", listed)
+        self.assertIn("/aras/models", listed)
+
+    def test_the_model_list_needs_the_router_and_says_so(self):
+        response = self.client.get("/aras/models")
         self.assertEqual(response.status_code, 400)
         body = response.json()
         self.assertEqual(body["error"], "configuration")
-        self.assertIn("GEMINI_API_KEY", str(body))
+        # listing needs URL + token only — not a model id, that is what it is for
+        self.assertEqual(body["detail"]["missing"], ["ARAS_BASE_URL", "ARAS_ROUTER_TOKEN"])
+        self.assertEqual(body["detail"]["service"], "router")
 
-    def test_models_endpoint_rejects_unknown_provider(self):
-        response = self.client.get("/providers/nope/models")
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Unknown provider", response.json()["message"])
+    def test_aras_status_lists_every_service_as_skipped(self):
+        data = self.client.get("/aras").json()
+        self.assertEqual(data["configured"], [])
+        self.assertEqual(data["checked"], [])
+        self.assertEqual(sorted(data["skipped"]), sorted(aras.CLIENTS))
+        self.assertFalse(data["model_ready"])
+        self.assertFalse(data["search_ready"])
+        self.assertIn("ARAS_MODEL", data["missing"]["router"])
+        self.assertEqual(data["endpoints"], {})
+        self.assertEqual(data["version"], VERSION)
 
     # ------------------------------------------------------------- search
-    def test_search_rejects_unknown_provider(self):
-        response = self.client.post("/search", json={"query": "x", "provider": "nope"})
-        self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["error"], "search")
+    def test_search_without_the_web_service_returns_actionable_400(self):
+        response = self.client.post("/search", json={"query": "x"})
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"], "configuration")
+        self.assertIn("ARAS_WEB_TOKEN", body["message"])
+        self.assertEqual(body["detail"]["missing"], ["ARAS_BASE_URL", "ARAS_WEB_TOKEN"])
+        self.assertIn(".env", body["detail"]["hint"])
+
+    def test_search_ignores_a_provider_field_it_no_longer_has(self):
+        """There is one backend; an old client naming another gets the same answer."""
+        response = self.client.post("/search", json={"query": "x", "provider": "ddg"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"]["service"], "web")
 
     def test_search_requires_query(self):
         response = self.client.post("/search", json={"query": ""})
         self.assertEqual(response.status_code, 422)
 
-    def test_search_diagnose_skips_unkeyed_providers(self):
-        data = self.client.get("/search/diagnose", params={"q": "x"}).json()
-        skipped = {s["provider"]: s["reason"] for s in data["skipped"]}
-        self.assertIn("wikipedia", data["summary"]["ok"] + data["summary"]["failed"] + list(skipped))
-        self.assertNotIn("tavily", [c["provider"] for c in data["checked"]])
-
     # -------------------------------------------------------------- agent
-    def test_chat_without_provider_returns_actionable_400(self):
+    def test_chat_without_the_router_returns_actionable_400(self):
         response = self.client.post("/chat", json={"message": "hello"})
         self.assertEqual(response.status_code, 400)
         body = response.json()
         self.assertEqual(body["error"], "configuration")
-        self.assertIn("LLM_PROVIDER", body["message"])
+        for env in ("ARAS_BASE_URL", "ARAS_ROUTER_TOKEN", "ARAS_MODEL"):
+            self.assertIn(env, body["message"])
+        self.assertEqual(body["detail"]["provider"], "aras")
+        self.assertEqual(body["detail"]["service"], "router")
+        self.assertIn("/aras/models", body["detail"]["hint"])
+        self.assertNotIn("answer", body)
 
     def test_chat_validates_message(self):
         response = self.client.post("/chat", json={"message": ""})
         self.assertEqual(response.status_code, 422)
 
+    def test_orchestrate_without_the_router_still_explains_itself(self):
+        """Auto mode never 500s on an empty block: a run, a trace, a clear reason."""
+        response = self.client.post("/orchestrate", json={"message": "What is an agent?"})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["run_id"])
+        text = json.dumps(body)
+        self.assertIn("No model is configured", text)
+        self.assertIn("ARAS_ROUTER_TOKEN", text)
+        self.assertNotIn("LLM_PROVIDER", text)
+
+    def test_agents_route_reports_that_nothing_is_wired(self):
+        data = self.client.get("/agents").json()
+        self.assertFalse(data["model_ready"])
+        self.assertFalse(data["search_ready"])
+
+    # ------------------------------------------------------------ routing
     def test_api_prefix_mirrors_the_root_routes(self):
         root = self.client.get("/health").json()
         prefixed = self.client.get("/api/health").json()
         self.assertEqual(root["version"], prefixed["version"])
         self.assertEqual(root["search_chain"], prefixed["search_chain"])
+        self.assertEqual(root["model"], prefixed["model"])
 
     def test_api_prefix_chat_works_instead_of_404(self):
         response = self.client.post("/api/chat", json={"message": "hello"})
-        # no key configured -> the same actionable 400 as the unprefixed route
+        # nothing configured -> the same actionable 400 as the unprefixed route
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "configuration")
 
@@ -191,6 +295,28 @@ class ApiTests(unittest.TestCase):
         data = self.client.get("/api").json()
         self.assertIn("version", data)
         self.assertTrue(any("/chat" in route for route in data["routes"]))
+
+    def test_every_listed_route_exists(self):
+        """API_ROUTES is what the 404 page and run.py print: it must not drift."""
+        import re
+
+        def shape(path: str) -> str:  # /runs/{run_id} and /runs/{id} are the same route
+            return re.sub(r"\{[^}]*\}", "{}", path)
+
+        served = {
+            (method.upper(), shape(path))
+            for path, operations in self.client.get("/openapi.json").json()["paths"].items()
+            for method in operations
+        }
+        listed = set()
+        for line in main_module.API_ROUTES:
+            method, path = line.split()[:2]
+            if path == "/" or "…" in path:  # the page and the static mount: not API routes
+                continue
+            listed.add((method, shape(path)))
+            self.assertIn((method, shape(path)), served, line)
+        # ...and the other way round: a route that is served is on the list
+        self.assertEqual(sorted(served - listed), [])
 
     def test_unknown_route_returns_explanation(self):
         response = self.client.get("/definitely-not-a-route")
@@ -205,15 +331,222 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["error"], "not_found")
         self.assertIn("/api", body["hint"])
 
+    # ----------------------------------------------------------- diagnose
     def test_diagnose_returns_hints(self):
         data = self.client.get("/diagnose").json()
-        self.assertIn("hints", data)
         self.assertFalse(data["model"]["ok"])
-        self.assertTrue(any("LLM_PROVIDER" in hint for hint in data["hints"]))
+        self.assertEqual(data["model"]["provider"], "aras")
+        self.assertIn("ARAS_MODEL", data["model"]["error"]["missing"])
+        self.assertEqual(data["search"]["checked"], [])
+        self.assertEqual(data["search"]["skipped"][0]["provider"], "aras")
+        self.assertIn("ARAS_WEB_TOKEN", data["search"]["skipped"][0]["reason"])
+        self.assertIsNone(data["aras"])
+        hints = " ".join(data["hints"])
+        self.assertIn("ARAS_ROUTER_TOKEN", hints)
+        self.assertIn("ARAS_WEB_TOKEN", hints)
+        self.assertNotIn("LLM_PROVIDER", hints)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class ArasConfiguredApiTests(_HttpCase):
+    """A filled block: every route reaches the ARAS services (mocked at HTTP)."""
+
+    overrides = {
+        "aras_base_url": "http://aras.test",
+        "aras_token": "SHARED-SECRET",
+        "aras_model": "sharif-rayen-gemma4-31b",
+        "aras_collection": "alireza_notes",
+        "aras_tenant": "alireza-kalaie",
+        "aras_owner": "alireza-kalaie",
+        "aras_data_source_id": "ds-1",
+        "orchestrator_planner": "heuristic",
+        "orchestrator_review": False,
+        "orchestrator_evaluate": False,
+    }
+
+    def setUp(self):
+        self.calls: list[tuple[str, str]] = []
+        #: a test sets this to answer some requests itself (None = the default below)
+        self.override: Any = None
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.calls.append((request.method, str(request.url)))
+            port = request.url.port
+            if self.override is not None:
+                answer = self.override(request)
+                if answer is not None:
+                    return answer
+            if request.url.path.rstrip("/").endswith("health"):
+                return httpx.Response(200, json={"status": "ok"})
+            if request.headers.get("authorization") != "Bearer SHARED-SECRET":
+                return httpx.Response(401, json={"detail": "bad token"})
+            if port == 8101 and request.url.path.endswith("/models/"):
+                return httpx.Response(200, json={"data": [{"id": "sharif-rayen-gemma4-31b"}, {"id": "a-model"}]})
+            if port == 8101:
+                return httpx.Response(200, json={
+                    "model": "rayen-gemma4-31b",
+                    "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
+                    "usage": {"total_tokens": 5},
+                })
+            if port == 8108:
+                return httpx.Response(200, json={"results": [
+                    {"title": "ARAS", "url": "https://aras.example/a", "snippet": "s", "engine": "bing"},
+                ]})
+            return httpx.Response(404, json={"detail": "unexpected call"})
+
+        transport = httpx.MockTransport(handler)
+        real = httpx.AsyncClient
+
+        def client(*args, **kwargs):
+            kwargs["transport"] = transport
+            return real(*args, **kwargs)
+
+        patcher = mock.patch.object(aras.httpx, "AsyncClient", client)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def urls(self) -> list[str]:
+        return [url for _, url in self.calls]
+
+    def test_health_shows_the_router_and_the_web_service_ready(self):
+        data = self.client.get("/health").json()
+        self.assertTrue(data["model_provider_ready"])
+        self.assertEqual(data["model_chain"], ["aras"])
+        self.assertEqual(data["search_chain"], ["aras"])
+        self.assertEqual(data["model"]["model"], "sharif-rayen-gemma4-31b")
+        self.assertEqual(data["model"]["endpoint"], "http://aras.test:8101/api/v1")
+        self.assertEqual(data["model"]["missing"], [])
+        self.assertEqual(self.calls, [], "/health is static: it must not call a service")
+
+    def test_no_route_ever_returns_the_token(self):
+        for path in ("/health", "/config", "/providers", "/aras", "/aras/models", "/diagnose", "/agents"):
+            self.assertNotIn("SHARED-SECRET", self.client.get(path).text, path)
+
+    def test_chat_is_one_router_completion(self):
+        response = self.client.post("/chat", json={"message": "ping", "allow_search": False})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["answer"], "pong")
+        self.assertEqual(body["provider"], "aras")
+        self.assertEqual(body["model"], "rayen-gemma4-31b")
+        self.assertEqual(self.calls, [("POST", "http://aras.test:8101/api/v1/chat/completions/")])
+
+    def test_search_is_one_web_call(self):
+        response = self.client.post("/search", json={"query": "aras", "max_results": 3})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["provider"], "aras")
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["results"][0]["url"], "https://aras.example/a")
+        self.assertEqual(body["results"][0]["source"], "aras:bing")
+        self.assertEqual(self.calls, [("POST", "http://aras.test:8108/v1/search/")])
+
+    def test_a_router_failure_is_a_502_that_carries_the_hint(self):
+        self.override = lambda request: (
+            httpx.Response(403, json={"error": {"message": "model not allowed for this key"}})
+            if request.url.port == 8101 else None
+        )
+        response = self.client.post("/chat", json={"message": "ping", "allow_search": False})
+        self.assertEqual(response.status_code, 502)
+        body = response.json()
+        self.assertEqual(body["error"], "aras")
+        self.assertEqual(body["detail"]["service"], "router")
+        self.assertEqual(body["detail"]["status"], 403)
+        self.assertIn("model not allowed", body["message"])
+        self.assertIn("/aras/models", body["detail"]["hint"])
+
+    def test_a_web_failure_is_a_502_not_a_silent_fallback(self):
+        self.override = lambda request: (
+            httpx.Response(503, json={"error": "engines timed out"})
+            if request.url.port == 8108 else None
+        )
+        response = self.client.post("/search", json={"query": "aras"})
+        self.assertEqual(response.status_code, 502)
+        body = response.json()
+        self.assertEqual(body["error"], "aras")
+        self.assertEqual(body["detail"]["service"], "web")
+        self.assertEqual(body["detail"]["status"], 503)
+        self.assertEqual(self.urls(), ["http://aras.test:8108/v1/search/"])
+
+    def test_the_model_list_comes_from_the_router(self):
+        body = self.client.get("/aras/models").json()
+        self.assertEqual(body["models"], ["a-model", "sharif-rayen-gemma4-31b"])
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["configured_model"], "sharif-rayen-gemma4-31b")
+        self.assertEqual(body["endpoint"], "http://aras.test:8101/api/v1")
+        self.assertEqual(self.calls, [("GET", "http://aras.test:8101/api/v1/models/")])
+
+    def test_aras_status_probes_all_seven_services(self):
+        data = self.client.get("/aras").json()
+        self.assertEqual(len(data["checked"]), 7)
+        self.assertTrue(all(item["ok"] for item in data["checked"]))
+        self.assertEqual(data["skipped"], [])
+        self.assertTrue(data["model_ready"])
+        self.assertTrue(data["search_ready"])
+        self.assertEqual(data["model"], "sharif-rayen-gemma4-31b")
+        self.assertEqual({httpx.URL(url).port for url in self.urls()},
+                         {8101, 8102, 8103, 8104, 8105, 8107, 8108})
+        self.assertEqual(data["endpoints"]["router"], "http://aras.test:8101/api/v1")
+
+    def test_diagnose_runs_a_completion_a_search_and_every_health_probe(self):
+        data = self.client.get("/diagnose", params={"q": "aras"}).json()
+        self.assertTrue(data["model"]["ok"])
+        self.assertEqual(data["model"]["reply"], "pong")
+        self.assertEqual(data["model"]["model"], "rayen-gemma4-31b")
+        self.assertEqual(data["search"]["ok"], ["aras"])
+        self.assertEqual(data["search"]["failed"], [])
+        self.assertEqual(data["search"]["skipped"], [])
+        self.assertEqual(data["search"]["checked"][0]["count"], 1)
+        self.assertEqual(len(data["aras"]["checked"]), 7)
+        self.assertIn("http://aras.test:8101/api/v1/chat/completions/", self.urls())
+        self.assertIn("http://aras.test:8108/v1/search/", self.urls())
+        self.assertEqual([hint for hint in data["hints"] if ".env file" not in hint], [])
+
+    def test_diagnose_tells_a_refused_model_apart_from_a_closed_tunnel(self):
+        """Every /health answers, the completion is refused: the fix is the model id."""
+        self.override = lambda request: (
+            httpx.Response(403, json={"error": {"message": "model not allowed for this key"}})
+            if request.url.path.endswith("/chat/completions/") else None
+        )
+        data = self.client.get("/diagnose").json()
+        self.assertFalse(data["model"]["ok"])
+        self.assertEqual(data["model"]["error"]["status"], 403)
+        self.assertTrue(all(item["ok"] for item in data["aras"]["checked"]))
+        hints = " ".join(data["hints"])
+        self.assertIn("did not answer the test completion", hints)
+        self.assertIn("/aras/models", hints)
+        self.assertNotIn("SSH tunnel", hints)
+
+    def test_diagnose_names_the_tunnel_when_nothing_answers(self):
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        self.override = refuse
+        data = self.client.get("/diagnose").json()
+        self.assertFalse(data["model"]["ok"])
+        self.assertEqual(data["search"]["failed"], ["aras"])
+        self.assertFalse(any(item["ok"] for item in data["aras"]["checked"]))
+        hints = " ".join(data["hints"])
+        self.assertIn("SSH tunnel", hints)
+        self.assertIn("aras_smoke.py", hints)
+        # one cause, one hint: the failed calls are not reported a second time
+        self.assertNotIn("did not answer the test completion", hints)
+        self.assertNotIn("did not answer the test search", hints)
+
+    def test_orchestrate_answers_through_the_router(self):
+        response = self.client.post("/orchestrate", json={"message": "What is an agent?"})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["provider"], "aras")
+        self.assertEqual(body["model"], "rayen-gemma4-31b")
+        self.assertIn("pong", body["answer"])
+        self.assertTrue(self.urls())
+        self.assertEqual(set(self.urls()), {"http://aras.test:8101/api/v1/chat/completions/"})
+
+    def test_agents_route_reports_both_ports_ready(self):
+        data = self.client.get("/agents").json()
+        self.assertTrue(data["model_ready"])
+        self.assertTrue(data["search_ready"])
+
 
 
 class FrontendContractTests(unittest.TestCase):
@@ -396,3 +729,6 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("overflow: auto", " ".join(self.rules(self.styles, ".sidebar") + self.rules(self.extra, ".sidebar")))
         self.assertIn("display: grid", " ".join(self.rules(self.extra, ".run-list")))
 
+
+if __name__ == "__main__":
+    unittest.main()

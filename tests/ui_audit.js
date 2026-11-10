@@ -54,7 +54,7 @@ const LEVELS = [
   { id: 'record', title: 'Trace, run record and live stream' },
   { id: 'outcome', title: 'Outcome proxies — grounded, stable answers' },
   { id: 'robust', title: 'Robustness — odd input, injected text' },
-  { id: 'live', title: 'Live model checks (opt-in, needs a key)' },
+  { id: 'live', title: 'Live model checks (opt-in, needs a configured model)' },
 ];
 const CHECKS = [
   ['plan.selection', 'plan', 'Agent selection', 'the rules pick the specialists a request cannot be answered without', 'nothing', false, 'pass'],
@@ -70,8 +70,8 @@ const CHECKS = [
   ['outcome.stability', 'outcome', 'Repeatability', 'the same request plans the same way', 'nothing', false, 'pass'],
   ['robust.inputs', 'robust', 'Odd input', 'huge files do not break the pipeline', 'nothing', false, 'pass'],
   ['robust.injection', 'robust', 'Injected document text', 'instructions in an attachment cannot re-plan the run', 'nothing', false, 'pass'],
-  ['live.planner', 'live', 'LLM planner vs rules', 'the model planner agrees with the rules', 'a model provider (key in .env)', true, 'skip'],
-  ['live.latency', 'live', 'Stage latency', 'a real run gives the per-stage cost', 'a model provider (key in .env)', true, 'skip'],
+  ['live.planner', 'live', 'LLM planner vs rules', 'the model planner agrees with the rules', 'a configured model (the ARAS router block in .env)', true, 'skip'],
+  ['live.latency', 'live', 'Stage latency', 'a real run gives the per-stage cost', 'a configured model (the ARAS router block in .env)', true, 'skip'],
 ];
 
 function scorecard() {
@@ -84,7 +84,7 @@ function scorecard() {
     live,
     status,
     ms: status === 'skip' ? 0 : 4,
-    detail: status === 'skip' ? 'live check — needs a provider key' : 'as intended',
+    detail: status === 'skip' ? 'live check — enable live model checks (needs a configured model)' : 'as intended',
     metrics: status === 'skip' ? {} : { prompts: 10, coverage: 1 },
     findings: [],
   }));
@@ -247,7 +247,7 @@ async function main() {
   check('no row is left queued', final.every((s) => s !== 'queued'), final.join(','));
   check('every row carries a verdict', final.every((s) => ['pass', 'warn', 'fail', 'skip'].includes(s)), final.join(','));
   check('passes and skips are both shown', final.includes('pass') && final.includes('skip'), final.join(','));
-  check('rows show their measured detail', /as intended|needs a provider key|coverage/.test(w.document.getElementById('audit-results').textContent));
+  check('rows show their measured detail', /as intended|needs a configured model|coverage/.test(w.document.getElementById('audit-results').textContent));
   check('a metrics table is available per check', w.document.querySelectorAll('#audit-results .audit-metrics').length > 0);
   check('the progress bar is full', (w.document.getElementById('audit-bar-fill').style.width || '').startsWith('100'));
   check('the counter reports the total time', /\d+\/\d+ · \d+ ms/.test(text(w, 'audit-count')), text(w, 'audit-count'));

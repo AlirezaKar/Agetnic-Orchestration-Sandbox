@@ -145,13 +145,15 @@ class AuditEngineTests(unittest.TestCase):
             self.assertTrue(row["detail"], row["id"])
             self.assertGreaterEqual(row["ms"], 0)
 
-    def test_live_checks_skip_without_a_provider(self) -> None:
+    def test_live_checks_skip_without_a_model(self) -> None:
         card = audit_sync(self.settings, live=True, models=None, log_dir=self.work)
         live_rows = [row for row in card["checks"] if row["live"]]
         self.assertTrue(live_rows)
         for row in live_rows:
             self.assertEqual(row["status"], "skip")
-            self.assertIn("key", row["detail"].lower())
+            # the skip says what to fill, in this app's terms
+            self.assertIn("no model configured", row["detail"].lower())
+            self.assertIn("aras router", row["detail"].lower())
         self.assertTrue(card["live_requested"])
 
     def test_the_live_checks_run_offline_with_a_scripted_planner(self) -> None:
@@ -308,9 +310,9 @@ class AuditApiTests(unittest.TestCase):
         main_module.reset_memory()
         self.patches = [
             mock.patch.object(main_module, "get_settings", lambda: self.settings),
-            mock.patch.object(main_module, "build_chain", lambda settings=None: FakeModel()),
+            mock.patch.object(main_module, "build_model", lambda settings=None: FakeModel()),
             mock.patch.object(
-                main_module, "build_search_chain", lambda settings=None: FakeSearchChain()
+                main_module, "build_search", lambda settings=None: FakeSearchChain()
             ),
             mock.patch.object(main_module, "_audit_dir", lambda: Path(self.tmp.name) / "audit"),
         ]
@@ -380,18 +382,18 @@ class AuditApiTests(unittest.TestCase):
         for key in ("id", "level", "title", "status", "ms", "detail", "metrics", "findings"):
             self.assertIn(key, first_check)
 
-    def test_live_run_degrades_when_the_provider_is_missing(self) -> None:
+    def test_live_run_degrades_when_the_model_port_cannot_be_built(self) -> None:
         def broken(settings=None):
-            raise RuntimeError("no key")
+            raise RuntimeError("the router is not wired")
 
-        with mock.patch.object(main_module, "build_chain", broken):
+        with mock.patch.object(main_module, "build_model", broken):
             self.assertEqual(main_module._audit_ports(self.settings), (None, None))
 
     def test_live_run_skips_its_live_checks_when_unavailable(self) -> None:
         def broken(settings=None):
-            raise RuntimeError("no key")
+            raise RuntimeError("the router is not wired")
 
-        with mock.patch.object(main_module, "build_chain", broken):
+        with mock.patch.object(main_module, "build_model", broken):
             card = self.client.post("/audit/run", json={"live": True}).json()
         live_rows = [row for row in card["checks"] if row["live"]]
         self.assertTrue(live_rows)

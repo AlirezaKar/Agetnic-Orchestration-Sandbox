@@ -1,56 +1,33 @@
 """Environment driven configuration.
 
-Everything that can be swapped at runtime (core model provider, custom provider,
-web-search backend) is configured here from the environment / ``.env`` file.
+The app has exactly one set of backends: the ARAS microservices. Everything
+that can be configured at runtime — where they live, which tokens open them,
+which model id the router is asked for, how the orchestrator behaves — is read
+here from the environment / ``.env`` file.
 
-There is intentionally NO mock/offline model: if no provider is configured the
-app refuses to start a model call and tells you exactly which env vars are
-missing, instead of silently answering with canned text.
+There is intentionally NO mock/offline model and NO fallback provider: if the
+ARAS router is not configured the app refuses to start a model call and says
+exactly which env vars are missing, instead of silently answering with canned
+text or quietly switching to something else.
 """
 
 from __future__ import annotations
 
-import json
 from functools import lru_cache
 from typing import Any, ClassVar
 
-from pydantic import field_validator, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# When LLM_PROVIDER=auto, the first provider in this order that has both a key
-# and an explicitly configured model is used. ``aras`` is first on purpose:
-# when the ARAS router is configured it IS the model, and the public providers
-# below become fallbacks.
-AUTO_PROVIDER_ORDER: tuple[str, ...] = (
-    "aras",
-    "groq",
-    "gemini",
-    "openrouter",
-    "mistral",
-    "cerebras",
-    "nvidia",
-    "cloudflare",
-    "huggingface",
-    "ollama",
-    "lmstudio",
-    "custom",
-)
-
-DEFAULT_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
 
 
 def trust_env_for(url: str) -> bool:
     """Should an HTTP client honour ``HTTP(S)_PROXY`` for this URL? Not loopback.
 
     A VPN or system proxy that answers for ``127.0.0.1`` turns every tunnelled
-    ARAS call — and local Ollama / LM Studio — into the proxy's own error page:
-    the user sees HTTP 503 from seven services at once while the tunnel is
-    perfectly fine. Loopback traffic therefore never goes through a proxy;
-    public hosts keep ``trust_env=True`` so a proxy still works where it is
-    genuinely needed.
+    ARAS call into the proxy's own error page: the user sees HTTP 503 from
+    seven services at once while the tunnel is perfectly fine. Loopback
+    traffic therefore never goes through a proxy; any other host keeps
+    ``trust_env=True`` so a proxy still works where it is genuinely needed.
     """
     from urllib.parse import urlsplit
 
@@ -89,106 +66,20 @@ class Settings(BaseSettings):
     port: int = 8000
     reload: bool = False
 
-    # ------------------------------------------------------- core model
-    # Which provider is the brain of the backend: "auto" or a provider name.
-    # See app/llm/presets.py; "auto" walks AUTO_PROVIDER_ORDER.
-    llm_provider: str = "auto"
-    # Optional override applied to the *primary* provider only.
-    llm_base_url: str | None = None
-    llm_api_key: str | None = None
-    llm_model: str | None = None
-    # Ordered failover list, e.g. "gemini,openrouter". Each entry uses its own
-    # <PROVIDER>_API_KEY / <PROVIDER>_MODEL variables.
-    llm_fallbacks: str = ""
-    llm_temperature: float = 0.2
-    llm_max_tokens: int = 1024
-    llm_timeout: float = 60.0
-    # Off by default: the model you wrote in <PROVIDER>_MODEL is the one used.
-    # Turn on to substitute a live model when that id has been retired.
-    llm_auto_substitute: bool = False
-    llm_model_attempts: int = 3
-
-    # ------------------------------------------------- provider API keys
-    groq_api_key: str | None = None
-    groq_model: str | None = None
-
-    gemini_api_key: str | None = None
-    gemini_model: str | None = None
-
-    openrouter_api_key: str | None = None
-    openrouter_model: str | None = None
-
-    mistral_api_key: str | None = None
-    mistral_model: str | None = None
-
-    cloudflare_api_token: str | None = None
-    cloudflare_account_id: str | None = None
-    cloudflare_model: str | None = None
-
-    nvidia_api_key: str | None = None
-    nvidia_model: str | None = None
-
-    cerebras_api_key: str | None = None
-    cerebras_model: str | None = None
-
-    huggingface_api_key: str | None = None
-    huggingface_model: str | None = None
-
-    # Local, no key, no cloud account
-    ollama_base_url: str = "http://localhost:11434/v1"
-    ollama_model: str | None = None
-    lmstudio_base_url: str = "http://localhost:1234/v1"
-    lmstudio_model: str | None = None
-
-    # Any other OpenAI-compatible endpoint (self hosted vLLM, LiteLLM, a
-    # provider I have not presettled, an internal gateway, ...)
-    custom_label: str = "custom"
-    custom_base_url: str | None = None
-    custom_api_key: str | None = None
-    custom_model: str | None = None
-    # "bearer" (default) | "raw" (key sent as-is) | "none" (no auth header)
-    custom_auth_scheme: str = "bearer"
-    custom_auth_header: str = "Authorization"
-    # JSON objects, merged into headers / request body
-    custom_extra_headers: dict[str, Any] = {}
-    custom_extra_body: dict[str, Any] = {}
-
-    # ---------------------------------------------------------- search
-    # Primary search backend: ddg | wikipedia | tavily | serper | exa |
-    # google_cse | searxng
-    search_provider: str = "ddg"
-    # Optional ordered chain, overrides SEARCH_PROVIDER + SEARCH_FALLBACKS
-    search_providers: str = ""
-    search_fallbacks: str = "wikipedia"
-    search_max_results: int = 5
-    search_timeout: float = 20.0
-    search_user_agent: str = DEFAULT_UA
-    # Drop results whose URL repeats an already-seen host+path
-    search_dedupe: bool = True
-
-    duckduckgo_region: str = "wt-wt"
-    duckduckgo_safe_search: str = "moderate"
-    wikipedia_lang: str = "en"
-
-    tavily_api_key: str | None = None
-    serper_api_key: str | None = None
-    exa_api_key: str | None = None
-    google_cse_api_key: str | None = None
-    google_cse_id: str | None = None
-    searxng_base_urls: str = ""  # comma separated, e.g. http://localhost:8080
-    searxng_api_key: str | None = None
-    jina_api_key: str | None = None
-
     # ------------------------------------------------- ARAS microservices
-    # The other app's services (see README §"ARAS microservices"). One host
-    # root — service ports are appended — or a full per-service URL override.
-    # Tokens are per service; ARAS_TOKEN is the shared fallback for any that
-    # are not set. Everything stays off until a URL + token pair exists.
+    # The only backends this app talks to (see README §"ARAS microservices").
+    # One host root — service ports are appended — or a full per-service URL
+    # override. Tokens are per service; ARAS_TOKEN is the shared fallback for
+    # any that are not set. A service is off until a URL + token pair exists.
     aras_base_url: str = ""  # e.g. http://127.0.0.1 (through the SSH tunnel)
     aras_token: str | None = None  # fallback for every ARAS_*_TOKEN below
     aras_tenant: str | None = None  # X-Tenant for the data service
     aras_owner: str | None = None  # X-Owner-External-Id for the data service
     aras_timeout: float = 60.0
+    # The model: the id the router is asked for, e.g. sharif-rayen-gemma4-31b
+    # (the router strips the sharif- prefix and sends the request to Rayen).
+    # Required — the model you write is the model that is called.
+    aras_model: str | None = None
     # RAG: the collection the document agent retrieves from (and ingestion
     # writes to), e.g. alireza_notes. Empty = retrieval is not offered.
     aras_collection: str = ""
@@ -198,9 +89,6 @@ class Settings(BaseSettings):
     # The analytics source `POST /v1/query/` should answer from (optional —
     # the data agent only uses the service when this is set).
     aras_data_source_id: str | None = None
-    # Router model id, e.g. sharif-rayen-gemma4-31b (the router strips the
-    # sharif- prefix and sends the request to Rayen).
-    aras_model: str | None = None
     # Per-service URL overrides (default: ARAS_BASE_URL + the known port)
     aras_router_url: str | None = None  # :8101 (OpenAI-compatible, /api/v1)
     aras_ocr_url: str | None = None  # :8102
@@ -218,10 +106,16 @@ class Settings(BaseSettings):
     aras_data_token: str | None = None
     aras_web_token: str | None = None
 
+    # ------------------------------------------------------- model calls
+    # Sent with every router call. The names are the orchestrator's contract
+    # (``contracts.OrchestratorSettings``), so they are not ARAS-prefixed.
+    llm_temperature: float = 0.2
+    llm_max_tokens: int = 1024
+
     # ----------------------------------------------------------- agent
+    # The tool loop the search agent (and POST /chat) runs: model <-> web_search.
     agent_max_steps: int = 4
     agent_max_search_results: int = 5
-    fetch_max_chars: int = 4000
 
     # ---------------------------------------------------- orchestration
     # "auto" mode in the UI: a manager plans, specialist agents run in
@@ -278,34 +172,18 @@ class Settings(BaseSettings):
     files_permission_prompt: bool = False
 
     # ------------------------------------------------------- validators
-    @field_validator("custom_extra_headers", "custom_extra_body", mode="before")
-    @classmethod
-    def _parse_json_object(cls, value: Any) -> Any:
-        if value in (None, "", b""):
-            return {}
-        if isinstance(value, dict):
-            return value
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-            except json.JSONDecodeError as exc:  # pragma: no cover - guard
-                raise ValueError(f"expected a JSON object, got {value!r}: {exc}") from exc
-            if not isinstance(parsed, dict):
-                raise ValueError("expected a JSON object")
-            return parsed
-        return value
-
     @model_validator(mode="after")
     def _aras_token_fallback(self) -> "Settings":
         """Every ARAS service token falls back to the shared ARAS_TOKEN."""
-        for name in ("router", "ocr", "vector", "ingestion", "retrieval", "data", "web"):
+        for name in self.ARAS_PORTS:
             field = f"aras_{name}_token"
             if not getattr(self, field):
                 setattr(self, field, self.aras_token)
         return self
 
     # ------------------------------------------------------- ARAS helpers
-    #: service → (default port, path prefix the client expects)
+    #: service → (default port, path prefix the client expects). Port 8106
+    #: (the remote orchestrator) is deliberately absent: it is never called.
     ARAS_PORTS: ClassVar[dict[str, tuple[int, str]]] = {
         "router": (8101, "/api/v1"),
         "ocr": (8102, ""),
@@ -328,7 +206,7 @@ class Settings(BaseSettings):
         return f"{root}:{port}{prefix}"
 
     def aras_configured(self, service: str) -> bool:
-        """A service is usable when it has both an endpoint and a token."""
+        """A service is reachable when it has both an endpoint and a token."""
         return bool(self.aras_endpoint(service) and getattr(self, f"aras_{service}_token", None))
 
     @property
@@ -336,19 +214,62 @@ class Settings(BaseSettings):
         return [name for name in self.ARAS_PORTS if self.aras_configured(name)]
 
     @property
+    def aras_model_id(self) -> str:
+        """The router model id, or '' when it was not written.
+
+        ``auto`` counts as not written: nothing here guesses a model. The id
+        in ``ARAS_MODEL`` is the one that is called, and a missing one is
+        reported instead of silently picking something from the router's list.
+        """
+        value = (self.aras_model or "").strip()
+        return "" if value.lower() == "auto" else value
+
+    def aras_missing(self, service: str) -> list[str]:
+        """Env vars ``service`` still needs before it can do its job ([] = ready).
+
+        "Its job" is the role the service has in this app, so the list goes
+        past URL + token: the router also needs the model id, retrieval and
+        ingestion need the collection, the data service needs its identity
+        headers and a source to query.
+        """
+        missing: list[str] = []
+        if not self.aras_endpoint(service):
+            missing.append("ARAS_BASE_URL")
+        if not getattr(self, f"aras_{service}_token", None):
+            missing.append(f"ARAS_{service.upper()}_TOKEN")
+        if service == "router" and not self.aras_model_id:
+            missing.append("ARAS_MODEL")
+        if service in ("retrieval", "ingestion") and not self.aras_collection.strip():
+            missing.append("ARAS_COLLECTION")
+        if service == "data":
+            for env, value in (
+                ("ARAS_TENANT", self.aras_tenant),
+                ("ARAS_OWNER", self.aras_owner),
+                ("ARAS_DATA_SOURCE_ID", self.aras_data_source_id),
+            ):
+                if not value:
+                    missing.append(env)
+        return missing
+
+    @property
+    def aras_model_ready(self) -> bool:
+        """The model can be called: router URL + token + a model id."""
+        return not self.aras_missing("router")
+
+    @property
+    def aras_search_ready(self) -> bool:
+        """Web search can be called: web URL + token."""
+        return not self.aras_missing("web")
+
+    @property
     def aras_rag_ready(self) -> bool:
         """The document agent may retrieve: retrieval service + a collection."""
-        return bool(self.aras_configured("retrieval") and self.aras_collection.strip())
+        return not self.aras_missing("retrieval")
 
     @property
     def aras_data_ready(self) -> bool:
         """The data agent may query: data service + tenant/owner + a source id."""
-        return bool(
-            self.aras_configured("data")
-            and self.aras_tenant
-            and self.aras_owner
-            and self.aras_data_source_id
-        )
+        return not self.aras_missing("data")
 
     # ----------------------------------------------------------- helpers
     @property
@@ -360,52 +281,18 @@ class Settings(BaseSettings):
             return known
         return [name for name in known if name in allowed]
 
-    @property
-    def is_auto_provider(self) -> bool:
-        return (self.llm_provider or "").strip().lower() in ("", "auto")
-
-    @property
-    def unused_llm_overrides(self) -> list[str]:
-        """LLM_* knobs that only apply to a manually chosen provider."""
-        if not self.is_auto_provider:
-            return []
-        pairs = (
-            ("LLM_MODEL", self.llm_model),
-            ("LLM_BASE_URL", self.llm_base_url),
-            ("LLM_API_KEY", self.llm_api_key),
-        )
-        return [name for name, value in pairs if value]
-
-    @property
-    def llm_chain(self) -> list[str]:
-        if self.is_auto_provider:
-            chain = [*AUTO_PROVIDER_ORDER, *split_csv(self.llm_fallbacks)]
-        else:
-            chain = [self.llm_provider, *split_csv(self.llm_fallbacks)]
-        return split_csv(",".join(chain))
-
-    @property
-    def search_chain(self) -> list[str]:
-        if self.search_providers.strip():
-            return split_csv(self.search_providers)
-        chain = split_csv(",".join([self.search_provider, self.search_fallbacks]))
-        # The ARAS web service, when configured, leads the chain: the point of
-        # wiring it is that it is used, with the public backends as fallbacks.
-        if self.aras_configured("web") and "aras" not in [c.lower() for c in chain]:
-            chain = ["aras", *chain]
-        return chain
-
     def public_summary(self) -> dict[str, Any]:
         """Config summary safe to expose over HTTP (no secrets)."""
         return {
-            "llm_provider": self.llm_provider,
-            "llm_chain": self.llm_chain,
-            "search_chain": self.search_chain,
-            "llm_model": self.llm_model,
+            "model_provider": "aras",
+            "model": self.aras_model_id,
+            "model_ready": self.aras_model_ready,
+            "search_provider": "aras",
+            "search_ready": self.aras_search_ready,
             "temperature": self.llm_temperature,
             "max_tokens": self.llm_max_tokens,
-            "search_max_results": self.search_max_results,
             "agent_max_steps": self.agent_max_steps,
+            "agent_max_search_results": self.agent_max_search_results,
             "orchestrator_planner": self.orchestrator_planner,
             "orchestrator_agents": self.orchestrator_roster,
             "orchestrator_evaluate": self.orchestrator_evaluate,
@@ -420,6 +307,8 @@ class Settings(BaseSettings):
             "aras_services": self.aras_services_configured,
             "aras_rag_ready": self.aras_rag_ready,
             "aras_data_ready": self.aras_data_ready,
+            "aras_auto_ingest": self.aras_auto_ingest,
+            "aras_timeout": self.aras_timeout,
         }
 
 

@@ -15,6 +15,12 @@
  *              must appear *and* the mode buttons must still be rendered.
  * Scenario C — backend only under /api (proxy): negotiation must find it and
  *              join base + path without producing "//".
+ * Scenario I — the ARAS services: the sidebar list, the services panel, the
+ *              status pills and the wiring report, configured and not (stubbed).
+ *
+ * The backend runs on the ARAS microservices only, so every stub below answers
+ * in the shapes GET /health and GET /providers have: one model (the router),
+ * one search (the web service), seven services.
  */
 'use strict';
 
@@ -40,6 +46,107 @@ try {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const failures = [];
+
+/* ── the ARAS backend, as the page sees it ────────────────────────────────
+   Mirrors app/aras.py (SERVICES / catalogue) and app/main.py (/health,
+   /providers, /aras). `configured: false` is the empty ARAS_* block. */
+const ARAS_MODEL = 'sharif-rayen-gemma4-31b';
+const ARAS_ANSWERS_AS = 'rayen-gemma4-31b';
+const ARAS_SERVICES = [
+  ['router', 'Router', 8101, 'The model: every planner, agent, evaluator and manager call.', 'POST /api/v1/chat/completions/', ['ARAS_ROUTER_TOKEN', 'ARAS_MODEL'], '/api/v1'],
+  ['web', 'Web', 8108, 'Web search: the web_search tool of the search agent.', 'POST /v1/search/', ['ARAS_WEB_TOKEN'], ''],
+  ['ocr', 'OCR', 8102, 'Reads uploaded PDFs into text for the document agent.', 'POST /api/v1/ocr/', ['ARAS_OCR_TOKEN'], ''],
+  ['retrieval', 'Retrieval', 8105, "The document agent's knowledge store (RAG) when no file is attached.", 'POST /v1/search/', ['ARAS_RETRIEVAL_TOKEN', 'ARAS_COLLECTION', 'ARAS_RETRIEVAL_MODE'], ''],
+  ['ingestion', 'Ingestion', 8104, 'Indexes accepted uploads into the collection when ARAS_AUTO_INGEST=true.', 'POST /v1/ingest/', ['ARAS_INGESTION_TOKEN', 'ARAS_COLLECTION', 'ARAS_AUTO_INGEST'], ''],
+  ['data', 'Data', 8107, "The data agent's analytics backend when there is nothing local to compute.", 'POST /v1/query/', ['ARAS_DATA_TOKEN', 'ARAS_TENANT', 'ARAS_OWNER', 'ARAS_DATA_SOURCE_ID'], ''],
+  ['vector', 'Vector store', 8103, 'Health and diagnostics only — ingestion and retrieval are the working doors.', 'GET /v1/collections/', ['ARAS_VECTOR_TOKEN'], ''],
+];
+// what each service still needs when only URL + tokens + the model id are set
+const ARAS_PARTIAL = {
+  retrieval: ['ARAS_COLLECTION'],
+  ingestion: ['ARAS_COLLECTION'],
+  data: ['ARAS_TENANT', 'ARAS_OWNER', 'ARAS_DATA_SOURCE_ID'],
+};
+const ARAS_UNSET = {
+  router: ['ARAS_BASE_URL', 'ARAS_ROUTER_TOKEN', 'ARAS_MODEL'],
+  web: ['ARAS_BASE_URL', 'ARAS_WEB_TOKEN'],
+  ocr: ['ARAS_BASE_URL', 'ARAS_OCR_TOKEN'],
+  retrieval: ['ARAS_BASE_URL', 'ARAS_RETRIEVAL_TOKEN', 'ARAS_COLLECTION'],
+  ingestion: ['ARAS_BASE_URL', 'ARAS_INGESTION_TOKEN', 'ARAS_COLLECTION'],
+  data: ['ARAS_BASE_URL', 'ARAS_DATA_TOKEN', 'ARAS_TENANT', 'ARAS_OWNER', 'ARAS_DATA_SOURCE_ID'],
+  vector: ['ARAS_BASE_URL', 'ARAS_VECTOR_TOKEN'],
+};
+
+function arasMissing(configured) {
+  return configured ? ARAS_PARTIAL : ARAS_UNSET;
+}
+
+function arasHealth(version, configured = true) {
+  const missing = arasMissing(configured);
+  return {
+    status: 'ok',
+    version,
+    api_prefixes: ['', '/api'],
+    model_provider_ready: configured,
+    model_chain: configured ? ['aras'] : [],
+    search_chain: configured ? ['aras'] : [],
+    model: {
+      provider: 'aras', service: 'router', ready: configured,
+      endpoint: configured ? 'http://127.0.0.1:8101/api/v1' : '',
+      model: configured ? ARAS_MODEL : '',
+      missing: missing.router || [],
+    },
+    search: {
+      provider: 'aras', service: 'web', ready: configured,
+      endpoint: configured ? 'http://127.0.0.1:8108' : '',
+      missing: missing.web || [],
+    },
+    aras: { configured: configured ? ARAS_SERVICES.map((row) => row[0]) : [], rag_ready: false, data_ready: false },
+    env_file: configured,
+  };
+}
+
+function arasProviders(version, configured = true) {
+  const missing = arasMissing(configured);
+  const health = arasHealth(version, configured);
+  return {
+    version,
+    model: health.model,
+    search: health.search,
+    env_file: configured,
+    services: ARAS_SERVICES.map(([service, label, port, role, route, env, prefix]) => {
+      const need = missing[service] || [];
+      const state = !configured ? 'not configured' : need.length ? 'incomplete' : 'ready';
+      return {
+        service, label, port, role, route, env,
+        endpoint: configured ? `http://127.0.0.1:${port}${prefix}` : '',
+        state, ready: state === 'ready', configured, required: service === 'router',
+        missing_env: need,
+      };
+    }),
+  };
+}
+
+function arasReport(version, configured = true) {
+  const names = ARAS_SERVICES.map((row) => row[0]);
+  return {
+    configured: configured ? names : [],
+    skipped: configured ? [] : names,
+    checked: configured ? names.map((service) => ({ service, ok: true, configured: true, latency_ms: 12 })) : [],
+    model: configured ? ARAS_MODEL : '',
+    model_ready: configured,
+    search_ready: configured,
+    rag_ready: false,
+    data_ready: false,
+    tenant_set: false,
+    missing: arasMissing(configured),
+    version,
+    endpoints: configured
+      ? Object.fromEntries(ARAS_SERVICES.map(([service, , port, , , , prefix]) => [service, `http://127.0.0.1:${port}${prefix}`]))
+      : {},
+  };
+}
+
 function check(name, condition, detail) {
   if (condition) {
     console.log(`  ok   ${name}`);
@@ -112,8 +219,9 @@ async function scenarioApiPrefix() {
   const w = mount(apiOnly, 'http://localhost:8000/');
   await sleep(1400);
 
-  check('negotiation found the prefixed API', text(w, 'badge-llm') !== 'LLM: backend down' && !bannerShown(w), text(w, 'badge-llm'));
-  check('search backends loaded through the prefix', w.document.querySelectorAll('#search-list .provider-row').length > 0);
+  check('negotiation found the prefixed API', !/offline|backend down|checking/.test(text(w, 'badge-llm')) && !bannerShown(w), text(w, 'badge-llm'));
+  check('the ARAS services loaded through the prefix', w.document.querySelectorAll('#search-list .provider-row').length === ARAS_SERVICES.length,
+    `${w.document.querySelectorAll('#search-list .provider-row').length} rows`);
 }
 
 async function scenarioNormalHost() {
@@ -121,13 +229,17 @@ async function scenarioNormalHost() {
   const w = mount((target, init) => fetch(new URL(String(target), liveBase + '/').href, init), liveBase + '/');
   await sleep(1200);
 
-  check('llm badge resolved', !/backend down|offline/.test(text(w, 'badge-llm')), text(w, 'badge-llm'));
+  check('model badge resolved', /^MODEL/.test(text(w, 'badge-llm')) && !/backend down|offline|checking/.test(text(w, 'badge-llm')), text(w, 'badge-llm'));
   check('no error banner', !bannerShown(w));
   check('modes rendered', modes(w) === MODE_COUNT, `${modes(w)} mode buttons`);
   check('auto mode is first and default', (w.document.querySelector('.mode-btn.active') || {}).dataset?.mode === 'auto');
   check('attachment control is present', !!attachButton(w));
   check('orchestrator panel is online', /planner/.test(text(w, 'agents-summary')));
-  check('search backends listed', w.document.querySelectorAll('#search-list .provider-row').length > 0);
+  check('the seven ARAS services are listed', w.document.querySelectorAll('#search-list .provider-row').length === ARAS_SERVICES.length,
+    `${w.document.querySelectorAll('#search-list .provider-row').length} rows`);
+  check('the list names the router and the web service',
+    !!w.document.querySelector('#search-list .provider-row[data-provider="router"]') &&
+    !!w.document.querySelector('#search-list .provider-row[data-provider="web"]'));
 
   w.document.getElementById('prompt').value = 'hello';
   w.document.getElementById('btn-send').click();
@@ -201,7 +313,7 @@ async function scenarioNormalHost() {
   w.document.getElementById('btn-menu-tools').click();
   check('opening Tools closes Status', toolsMenu.classList.contains('open') && !statusMenu.classList.contains('open'));
   check(
-    'Tools holds providers / ARAS / diagnostics / evaluate',
+    'Tools holds ARAS services / ARAS wiring / diagnostics / evaluate',
     ['btn-providers', 'btn-aras-top', 'btn-diag-top', 'btn-audit-top']
       .every((id) => !!toolsMenu.querySelector('#' + id))
   );
@@ -214,7 +326,7 @@ async function scenarioNormalHost() {
     !w.document.getElementById('aras-modal').classList.contains('panel-hidden')
   );
   const arasBody = w.document.getElementById('aras-body').textContent;
-  check('the wiring report rendered', /ARAS|model chain|configured/i.test(arasBody), arasBody.slice(0, 70));
+  check('the wiring report rendered', /ARAS|router :8101|configured/i.test(arasBody), arasBody.slice(0, 70));
   check('the ARAS pill reports the check', !/not checked/.test(text(w, 'badge-aras')), text(w, 'badge-aras'));
   check('the ARAS panel has its copy button', !!w.document.getElementById('btn-aras-copy'));
   check('the ARAS panel has a proof-run button', !!w.document.getElementById('btn-aras-proof'));
@@ -227,7 +339,7 @@ async function scenarioNormalHost() {
     'the diagnostics report carries a copy button',
     !!w.document.querySelector('#diag-summary .diag-copy-row button')
   );
-  check('the providers modal has a copy button', !!w.document.getElementById('btn-providers-copy'));
+  check('the ARAS services modal has a copy button', !!w.document.getElementById('btn-providers-copy'));
 
   // ── D: reload. A brand-new window with the same remembered session id
   // must redraw the conversation exactly as it was, with no model call.
@@ -314,7 +426,8 @@ async function scenarioLayout() {
    The redesign turns the answer bubble into a reading surface: headings,
    tables, lists, callouts, code blocks and inline formatting, with the
    orchestration panel and the inspector timeline underneath. The live
-   backend cannot answer without a key, so this scenario stubs /orchestrate. */
+   backend cannot answer without the ARAS router, so this scenario stubs
+   /orchestrate. */
 const MARKDOWN_ANSWER = [
   '## Findings',
   '',
@@ -323,12 +436,12 @@ const MARKDOWN_ANSWER = [
   '| Area | Result |',
   '| --- | --- |',
   '| Planning | 3 agents, 2 waves |',
-  '| Search | ddg → wikipedia |',
+  '| Search | ARAS web :8108 |',
   '',
   '- The planner wrote a brief per agent.',
   '- Agents ran with tools.',
   '',
-  '> Guardrail: no provider key means no answer, never an invented one.',
+  '> Guardrail: no router means no answer, never an invented one.',
   '',
   '```python',
   'result = await orchestrate(message="hi")',
@@ -343,11 +456,11 @@ function richPayload() {
     answer: MARKDOWN_ANSWER,
     sources: ['https://example.com/doc'],
     latency_ms: 2450,
-    provider: 'groq',
-    model: 'llama-3.3-70b',
+    provider: 'aras',
+    model: ARAS_ANSWERS_AS,
     session: { session_id: 'sess-rich', turns: 1 },
     orchestration: {
-      run_id: 'run-rich', provider: 'groq', model: 'llama-3.3-70b', strategy: 'heuristic',
+      run_id: 'run-rich', provider: 'aras', model: ARAS_ANSWERS_AS, strategy: 'heuristic',
       model_calls: 5, parallel_ms: 1800, latency_ms: 2450, synthesized: true,
       log_path: 'logs/orchestrator/run-rich.json',
       plan: {
@@ -390,8 +503,8 @@ function richPayload() {
 async function scenarioRichAnswer() {
   console.log('F  rich answer rendering (stub backend)');
   const routes = {
-    '/health': { status: 'ok', version: '0.12.0', model_chain: ['groq'], search_chain: ['ddg'] },
-    '/providers': { providers: [], search: { providers: [] } },
+    '/health': arasHealth('0.19.0'),
+    '/providers': arasProviders('0.19.0'),
     '/agents': { planner: 'llm', synthesize: true, parallel: 4, roster: ['search'], agents: [] },
     '/runs': { runs: [] },
     '/sessions': { sessions: [] },
@@ -399,10 +512,10 @@ async function scenarioRichAnswer() {
     '/chat': {
       ok: true,
       answer: 'Two steps: one model turn and one tool call.',
-      provider: 'groq', model: 'llama-3.3-70b', latency_ms: 900, steps: 2,
+      provider: 'aras', model: ARAS_ANSWERS_AS, search_provider: 'aras', latency_ms: 900, steps: 2,
       sources: ['https://example.com/a'],
       trace: [
-        { type: 'model', provider: 'groq', model: 'llama-3.3-70b', latency_ms: 400,
+        { type: 'model', provider: 'aras', model: ARAS_ANSWERS_AS, latency_ms: 400,
           content: 'I should search for this.',
           tool_calls: [{ name: 'web_search', arguments: { query: 'orchestration' } }] },
         { type: 'tool', name: 'web_search', latency_ms: 500, ok: true,
@@ -519,8 +632,8 @@ async function scenarioThemeAndColumns() {
     let clean = String(target).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
     if (!clean.startsWith('/')) clean = '/' + clean;
     const routes = {
-      '/health': { status: 'ok', version: '0.13.0', model_chain: ['groq'], search_chain: ['ddg'] },
-      '/providers': { providers: [], search: { providers: [] } },
+      '/health': arasHealth('0.19.0'),
+      '/providers': arasProviders('0.19.0'),
       '/agents': { planner: 'llm', synthesize: true, parallel: 4, roster: [], agents: [] },
       '/runs': { runs: [] },
       '/sessions': { sessions: [] },
@@ -690,8 +803,8 @@ async function scenarioLiveThoughts() {
       };
     }
     const routes = {
-      '/health': { status: 'ok', version: '0.15.0', model_chain: ['groq'], search_chain: ['ddg'] },
-      '/providers': { providers: [], search: { providers: [] } },
+      '/health': arasHealth('0.19.0'),
+      '/providers': arasProviders('0.19.0'),
       '/agents': { planner: 'llm', synthesize: true, parallel: 4, roster: ['search'], agents: [] },
       '/runs': { runs: [] },
       '/sessions': { sessions: [] },
@@ -784,8 +897,244 @@ async function scenarioLiveThoughts() {
   check('the inspector shows the finished run', !!w.document.querySelector('#inspector-trace'));
 }
 
+/* ── I: the ARAS services ────────────────────────────────────────────────
+   The page has one model (the ARAS router) and one search (ARAS web). This
+   scenario stubs the backend twice — a filled ARAS block and an empty one —
+   and checks that the pills, the sidebar list, the services panel, the wiring
+   report and the diagnostics all say the same thing, and that nothing on the
+   page offers another provider to pick. */
+function arasBackend(configured, calls) {
+  const version = '0.19.0';
+  const unset = {
+    error: 'configuration',
+    message: '[aras:router] not configured — missing ARAS_BASE_URL, ARAS_ROUTER_TOKEN, ARAS_MODEL',
+    detail: {
+      provider: 'aras', service: 'router', status: null,
+      message: '[aras:router] not configured — missing ARAS_BASE_URL, ARAS_ROUTER_TOKEN, ARAS_MODEL',
+      hint: 'set ARAS_BASE_URL (or ARAS_ROUTER_URL), ARAS_ROUTER_TOKEN (or the shared ARAS_TOKEN), ARAS_MODEL in .env, then restart',
+      missing: ['ARAS_BASE_URL', 'ARAS_ROUTER_TOKEN', 'ARAS_MODEL'],
+    },
+  };
+  const routes = {
+    '/health': arasHealth(version, configured),
+    '/providers': arasProviders(version, configured),
+    '/aras': arasReport(version, configured),
+    '/agents': { planner: 'auto', synthesize: true, parallel: 4, roster: ['search'], agents: [] },
+    '/runs': { runs: [] },
+    '/sessions': { sessions: [] },
+    '/diagnose': configured
+      ? {
+          version,
+          model: { ok: true, provider: 'aras', model: ARAS_ANSWERS_AS, reply: 'pong', latency_ms: 420 },
+          search: {
+            checked: [{ provider: 'aras', ok: true, count: 5, latency_ms: 310, empty: false }],
+            skipped: [], ok: ['aras'], failed: [],
+          },
+          aras: arasReport(version, true),
+          hints: [],
+        }
+      : {
+          version,
+          model: { ok: false, provider: 'aras', model: '', latency_ms: 0, error: unset.detail },
+          search: {
+            checked: [],
+            skipped: [{ provider: 'aras', reason: 'not configured — missing ARAS_BASE_URL, ARAS_WEB_TOKEN' }],
+            ok: [], failed: [],
+          },
+          aras: null,
+          hints: ['The model is not configured: set ARAS_BASE_URL, ARAS_ROUTER_TOKEN, ARAS_MODEL in .env.'],
+        },
+    '/search': {
+      query: 'aras', provider: 'aras', count: 1, latency_ms: 210,
+      results: [{ title: 'ARAS', url: 'https://example.com/aras', snippet: 'one hit', source: 'aras:bing' }],
+    },
+    // What the server really sends for the proof run: it asks for no
+    // synthesis, so the run names no model — only the agent that answered does.
+    '/orchestrate': {
+      answer: 'ok', provider: '', model: '', run_id: 'run-proof',
+      orchestration: {
+        run_id: 'run-proof', plan: { agents: ['general'], steps: [] }, waves: [], trace: [],
+        agents: [{ agent: 'general', status: 'ok', provider: 'aras', model: ARAS_ANSWERS_AS, latency_ms: 380 }],
+      },
+    },
+  };
+  return async (target, init) => {
+    let clean = String(target).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+    if (!clean.startsWith('/')) clean = '/' + clean;
+    calls.push({ path: clean, body: init && init.body ? JSON.parse(init.body) : null });
+    if (!configured && (clean === '/chat' || clean === '/search')) {
+      return { ok: false, status: 400, json: async () => unset };
+    }
+    return { ok: true, status: 200, json: async () => routes[clean] || {} };
+  };
+}
+
+async function scenarioArasServices() {
+  console.log('I  ARAS services: one model, one search, seven services');
+  const rowsOf = (w) => [...w.document.querySelectorAll('#search-list .provider-row')];
+  const row = (w, name) => w.document.querySelector(`#search-list .provider-row[data-provider="${name}"]`);
+  const pillHas = (w, id, cls) => w.document.getElementById(id).classList.contains(cls);
+
+  // ── a filled ARAS block
+  const calls = [];
+  const w = mount(arasBackend(true, calls), 'http://localhost:8000/');
+  await sleep(700);
+
+  check('the model pill names the router model', text(w, 'badge-llm').includes(ARAS_MODEL), text(w, 'badge-llm'));
+  check('...and is green', pillHas(w, 'pill-llm', 'success'));
+  check('the search pill names the ARAS web service', /ARAS web/.test(text(w, 'badge-search')), text(w, 'badge-search'));
+  check('the health card shows the model', text(w, 'health-model').includes(ARAS_MODEL), text(w, 'health-model'));
+  check('the sidebar section is the ARAS services',
+    /ARAS services/.test(w.document.querySelector('#section-search .section-label').textContent));
+  check('all seven services are listed', rowsOf(w).length === 7, `${rowsOf(w).length} rows`);
+  check('the list is in the backend order',
+    rowsOf(w).map((node) => node.dataset.provider).join(',') === 'router,web,ocr,retrieval,ingestion,data,vector',
+    rowsOf(w).map((node) => node.dataset.provider).join(','));
+  check('each row carries its port', /:8101/.test(row(w, 'router').textContent) && /:8108/.test(row(w, 'web').textContent));
+  check('a ready service has a filled dot', row(w, 'router').classList.contains('selected') && row(w, 'web').classList.contains('selected'));
+  check('a ready service says what it does', /every planner, agent, evaluator and manager call/.test(row(w, 'router').textContent));
+  check('an incomplete service is not marked ready',
+    !row(w, 'retrieval').classList.contains('selected') && /incomplete/.test(row(w, 'retrieval').textContent));
+  check('...and names the variable it still needs', /set ARAS_COLLECTION/.test(row(w, 'retrieval').textContent),
+    row(w, 'retrieval').textContent);
+  check('port 8106 is never shown', !/8106/.test(w.document.getElementById('search-list').textContent));
+  check('there is no "chain" or provider picker left',
+    !/failover|Chain \(|no key|free key/i.test(w.document.getElementById('search-list').textContent));
+
+  // the services panel: opened from a row and from Tools ▾
+  row(w, 'router').click();
+  await sleep(150);
+  const modal = w.document.getElementById('providers-modal');
+  check('clicking a service opens the services panel', !modal.classList.contains('panel-hidden'));
+  const cards = [...w.document.querySelectorAll('#providers-body .provider-card')];
+  check('the panel has one card per service', cards.length === 7, `${cards.length} cards`);
+  const groups = [...w.document.querySelectorAll('#providers-body .provider-group-title')].map((n) => n.textContent);
+  check('the cards are grouped by what they are for',
+    groups.join(' | ') === 'The model | Web search | Documents & data', groups.join(' | '));
+  const routerCard = w.document.querySelector('#providers-body .provider-card[data-service="router"]');
+  check('the router card shows its endpoint and route',
+    /127\.0\.0\.1:8101\/api\/v1/.test(routerCard.textContent) && /chat\/completions/.test(routerCard.textContent));
+  check('the router card lists its env vars', /ARAS_ROUTER_TOKEN/.test(routerCard.textContent) && /ARAS_MODEL/.test(routerCard.textContent));
+  check('the router card links to the model list',
+    [...routerCard.querySelectorAll('.pc-links a')].some((a) => /aras\/models$/.test(a.getAttribute('href'))));
+  check('the panel says how many services are ready', /4 of 7 ARAS services ready/.test(w.document.getElementById('providers-body').textContent),
+    w.document.getElementById('providers-body').textContent.slice(0, 80));
+  check('no card offers an API key or another vendor',
+    !/Get API key|free tier|needs key|LLM_PROVIDER/i.test(w.document.getElementById('providers-body').textContent));
+  check('the panel title names ARAS', /ARAS services/.test(text(w, 'providers-title')), text(w, 'providers-title'));
+  let copied = '';
+  w.navigator.clipboard.writeText = async (value) => { copied = value; };
+  w.document.getElementById('btn-providers-copy').click();
+  await sleep(80);
+  check('the copy button carries the services report', /"services"/.test(copied) && /"router"/.test(copied), copied.slice(0, 60));
+  w.document.getElementById('btn-providers-close').click();
+  check('the panel closes', modal.classList.contains('panel-hidden'));
+  w.document.getElementById('btn-providers').click();
+  await sleep(120);
+  check('Tools ▾ opens the same panel', !modal.classList.contains('panel-hidden') &&
+    w.document.querySelectorAll('#providers-body .provider-card').length === 7);
+  w.document.getElementById('btn-providers-close').click();
+
+  // the wiring report: config, health, proof
+  w.document.getElementById('btn-aras-top').click();
+  await sleep(300);
+  const arasBody = () => w.document.getElementById('aras-body').textContent;
+  check('the wiring report names the router as the model', /router :8101 → the model/.test(arasBody()), arasBody().slice(0, 90));
+  check('...and shows the configured model id', arasBody().includes(ARAS_MODEL));
+  check('...and what the optional services still need', /set ARAS_COLLECTION/.test(arasBody()) && /set ARAS_TENANT/.test(arasBody()));
+  check('the health rows cover all seven services', w.document.querySelectorAll('#aras-body .diag-row').length === 4 + 7,
+    `${w.document.querySelectorAll('#aras-body .diag-row').length} rows`);
+  check('the ARAS pill counts the services that answered', /7\/7 up/.test(text(w, 'badge-aras')), text(w, 'badge-aras'));
+  w.document.getElementById('btn-aras-proof').click();
+  await sleep(300);
+  check('the proof run names the router and its model',
+    arasBody().includes(`answered by the ARAS router (${ARAS_ANSWERS_AS})`), arasBody().slice(-160));
+  check('the proof run never mentions a fallback provider', !/fallback provider/i.test(arasBody()));
+  const proof = calls.find((call) => call.path === '/orchestrate');
+  check('the proof run is one tiny request to the general agent',
+    !!proof && proof.body.agents.join() === 'general' && proof.body.remember === false);
+  w.document.getElementById('btn-aras-close').click();
+
+  // diagnostics: a model row, a search row, seven health rows
+  w.document.getElementById('btn-diag-top').click();
+  await sleep(300);
+  const diag = w.document.getElementById('diag-summary').textContent;
+  check('diagnostics show the router call', /model · ARAS router/.test(diag) && diag.includes(ARAS_ANSWERS_AS), diag.slice(0, 120));
+  check('diagnostics show the web search', /search · ARAS web/.test(diag) && /5 hits/.test(diag));
+  check('diagnostics show every health probe', (diag.match(/aras · /g) || []).length === 7);
+  check('the diagnostics pill is green', /model ok · search ok/.test(text(w, 'badge-diag')) && pillHas(w, 'pill-diag', 'success'), text(w, 'badge-diag'));
+
+  // search mode: one backend, so the request names none
+  w.document.querySelector('.mode-btn[data-mode="search"]').click();
+  check('search mode says where it searches', /ARAS web search/.test(text(w, 'composer-mode-label')), text(w, 'composer-mode-label'));
+  w.document.getElementById('prompt').value = 'aras';
+  w.document.getElementById('btn-send').click();
+  await sleep(400);
+  const searchCall = calls.find((call) => call.path === '/search');
+  check('search mode posts /search', !!searchCall);
+  check('...with no provider to choose', !!searchCall && !('provider' in searchCall.body), JSON.stringify(searchCall && searchCall.body));
+  const hit = [...w.document.querySelectorAll('.message.assistant .msg-text')].pop();
+  check('the hits are listed', !!hit && /example\.com\/aras/.test(hit.textContent), hit ? hit.textContent.slice(0, 80) : 'none');
+
+  // ── an empty ARAS block: everything says what to set, nothing pretends
+  console.log('');
+  console.log('I2 ARAS not configured: every surface names the missing variables');
+  const calls2 = [];
+  const w2 = mount(arasBackend(false, calls2), 'http://localhost:8000/');
+  await sleep(700);
+  check('the model pill says not configured', /MODEL\s+not configured/.test(text(w2, 'badge-llm')), text(w2, 'badge-llm'));
+  check('...in red', pillHas(w2, 'pill-llm', 'bad'));
+  check('...and its tooltip names the variables', /ARAS_ROUTER_TOKEN/.test(w2.document.getElementById('pill-llm').title) &&
+    /ARAS_MODEL/.test(w2.document.getElementById('pill-llm').title), w2.document.getElementById('pill-llm').title);
+  check('the search pill says not configured', /SEARCH\s+not configured/.test(text(w2, 'badge-search')), text(w2, 'badge-search'));
+  check('the Status dot turns red', w2.document.getElementById('menu-status-dot').classList.contains('bad'));
+  check('the services are still listed', rowsOf(w2).length === 7);
+  check('no service is marked ready', rowsOf(w2).every((node) => !node.classList.contains('selected')));
+  check('every row says not configured', rowsOf(w2).every((node) => /not configured/.test(node.textContent)));
+  check('the router row names its three variables',
+    /set ARAS_BASE_URL, ARAS_ROUTER_TOKEN, ARAS_MODEL/.test(row(w2, 'router').textContent), row(w2, 'router').textContent);
+
+  w2.document.getElementById('btn-aras-top').click();
+  await sleep(300);
+  const body2 = w2.document.getElementById('aras-body').textContent;
+  check('the wiring report says nothing is configured', /No ARAS service is configured/.test(body2), body2.slice(0, 80));
+  check('...and that there is no other model', /only model this app has/.test(body2) && !/fallback provider/i.test(body2));
+  check('the ARAS pill is red', /not configured/.test(text(w2, 'badge-aras')) && pillHas(w2, 'pill-aras', 'bad'), text(w2, 'badge-aras'));
+  w2.document.getElementById('btn-aras-close').click();
+
+  w2.document.getElementById('btn-diag-top').click();
+  await sleep(300);
+  const diag2 = w2.document.getElementById('diag-summary').textContent;
+  check('diagnostics name the missing variables', /ARAS_ROUTER_TOKEN/.test(diag2) && /ARAS_WEB_TOKEN/.test(diag2), diag2.slice(0, 140));
+  check('diagnostics carry the hint', /→ The model is not configured/.test(diag2));
+  check('the diagnostics pill is red', /model failed · search failed/.test(text(w2, 'badge-diag')) && pillHas(w2, 'pill-diag', 'bad'), text(w2, 'badge-diag'));
+  check('the health card says not configured', /not configured/.test(text(w2, 'health-model')) && /not configured/.test(text(w2, 'health-search')),
+    `${text(w2, 'health-model')} / ${text(w2, 'health-search')}`);
+
+  w2.document.querySelector('.mode-btn[data-mode="agent"]').click();
+  w2.document.getElementById('prompt').value = 'hello';
+  w2.document.getElementById('btn-send').click();
+  await sleep(400);
+  const answer = [...w2.document.querySelectorAll('.message.assistant .msg-text')].pop();
+  const said = answer ? answer.textContent : '';
+  check('a prompt answers with the configuration error', /not configured — missing ARAS_BASE_URL, ARAS_ROUTER_TOKEN, ARAS_MODEL/.test(said), said.slice(0, 120));
+  check('...and the hint that fixes it', /hint: set ARAS_BASE_URL/.test(said));
+  check('...said once, not repeated', (said.match(/not configured — missing/g) || []).length === 1,
+    `${(said.match(/not configured — missing/g) || []).length} times`);
+  check('...and never an invented answer', !/pong|stub answer/.test(said));
+
+  // ── the page itself: nothing left to pick, no other vendor named
+  const page = (HTML + JS).toLowerCase();
+  const vendors = ['groq', 'gemini', 'ollama', 'mistral', 'cerebras', 'tavily', 'serper', 'duckduckgo', 'wikipedia', 'searxng'];
+  check('the page names no other model or search vendor', vendors.every((name) => !page.includes(name)),
+    vendors.filter((name) => page.includes(name)).join(', '));
+  check('the page never asks for LLM_PROVIDER', !/llm_provider|search_provider=|search_providers/.test(page));
+}
+
 (async () => {
   await scenarioStaticHost();
+  console.log('');
+  await scenarioArasServices();
   console.log('');
   await scenarioThemeAndColumns();
   console.log('');

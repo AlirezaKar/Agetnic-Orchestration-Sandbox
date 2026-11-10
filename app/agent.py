@@ -1,8 +1,14 @@
-"""The orchestration loop: model <-> tools, with a full trace.
+"""The single-agent tool loop: model <-> ``web_search``, with a full trace.
+
+This is the loop the orchestrator's *search* agent delegates to (its
+``AgentLoopFactory`` port, see ``app/orchestrator/host.py``) and the loop
+behind ``POST /chat``. The model is the ARAS router and the one tool is the
+ARAS web service; both arrive as arguments, so the loop itself knows nothing
+about URLs or tokens.
 
 The model decides when to search. Every tool call is executed against the
-configured search chain, the result is fed back, and the loop stops when the
-model answers without requesting another tool.
+search port, the result is fed back, and the loop stops when the model answers
+without requesting another tool.
 """
 
 from __future__ import annotations
@@ -12,15 +18,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.aras import ArasError, ModelResponse
 from app.config import Settings
-from app.llm.base import ModelResponse, ProviderError
-from app.search.base import SearchError
-from app.search.fetch import fetch_page
 
 SYSTEM_PROMPT = (
     "You are the orchestration core of a local sandbox. You can call tools.\n"
-    "Use `web_search` whenever the answer depends on current or verifiable facts, "
-    "and `fetch_url` when a snippet is not enough. Prefer primary sources.\n"
+    "Use `web_search` whenever the answer depends on current or verifiable facts. "
+    "Prefer primary sources.\n"
     "Cite the URLs you used inline, like [1] https://... .\n"
     "If a tool fails, say what failed instead of inventing results. "
     "If you did not search, do not imply that you did."
@@ -47,18 +51,6 @@ TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_url",
-            "description": "Fetch a URL and return its readable text (truncated).",
-            "parameters": {
-                "type": "object",
-                "properties": {"url": {"type": "string", "description": "Absolute http(s) URL."}},
-                "required": ["url"],
             },
         },
     },
@@ -96,7 +88,7 @@ class AgentResult:
 
 
 class WebSearchAgent:
-    """One model, two tools (``web_search``, ``fetch_url``), fully traced.
+    """One model, one tool (``web_search``), fully traced.
 
     ``observer`` is an optional callable the orchestrator passes in to see the
     loop from the inside:
@@ -141,7 +133,9 @@ class WebSearchAgent:
                 limit = self.settings.agent_max_search_results
             try:
                 response = await self.search_chain.search(query, limit)
-            except SearchError as exc:
+            except ArasError as exc:
+                # the model is told what failed, so it can say so instead of
+                # inventing results; the structured error also lands in the trace
                 return {"ok": False, "error": exc.to_dict()}
             return {
                 "ok": True,
@@ -149,16 +143,6 @@ class WebSearchAgent:
                 "query": response.query,
                 "results": [r.as_tool_output() for r in response.results],
             }
-
-        if name == "fetch_url":
-            url = str(arguments.get("url") or "").strip()
-            if not url:
-                return {"ok": False, "error": "fetch_url requires a 'url'"}
-            try:
-                page = await fetch_page(url, self.settings)
-            except SearchError as exc:
-                return {"ok": False, "error": exc.to_dict()}
-            return {"ok": True, **page}
 
         return {"ok": False, "error": f"unknown tool '{name}'"}
 
@@ -289,7 +273,7 @@ class WebSearchAgent:
             answer = final.content
             provider, model = final.provider, final.model
             usage = final.usage or usage
-        except ProviderError as exc:
+        except ArasError as exc:
             answer = ""
             errors.append(exc.to_dict())
 
@@ -308,12 +292,10 @@ class WebSearchAgent:
         )
 
 
-def _preview(output: dict[str, Any], limit: int = 400) -> Any:
+def _preview(output: dict[str, Any]) -> Any:
     if output.get("ok") and "results" in output:
         return [
             {"title": r.get("title", "")[:120], "url": r.get("url", "")}
             for r in output["results"][:5]
         ]
-    if output.get("ok") and "content" in output:
-        return str(output["content"])[:limit]
     return output.get("error")

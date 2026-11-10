@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from app.aras import ArasError, ModelResponse, SearchResponse, SearchResult, ToolCall
 from app.config import Settings
-from app.llm.base import ModelResponse, ToolCall
 from app.orchestrator import agents as agents_module
 from app.orchestrator.agents import (
     AgentContext,
@@ -38,7 +38,6 @@ from app.orchestrator.planner import (
     make_plan,
 )
 from app.orchestrator.trace import RunTrace, clip_event
-from app.search.base import SearchResponse, SearchResult
 
 
 def settings_for(tmp_dir: str = "/tmp/agetnic-tests", **overrides) -> Settings:
@@ -661,6 +660,181 @@ class SearchTraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(prompts), 2)
 
 
+class SearchFailureTests(unittest.IsolatedAsyncioTestCase):
+    """A search that never came back is a failed agent, not a green one.
+
+    There is one search service and no second one to fall back to, so "the
+    model was told the search failed and wrote something anyway" must not be
+    reported as research.
+    """
+
+    class SearchingModel:
+        """Asks for one search per turn until ``searches`` are used up, then answers."""
+
+        def __init__(self, searches: int = 1, answer: str = "From memory: Python 3.14 is out."):
+            self.searches = searches
+            self.answer = answer
+            self.n = 0
+
+        async def complete(self, messages, tools=None, **kwargs):
+            self.n += 1
+            if self.n <= self.searches:
+                return ModelResponse(
+                    content="",
+                    tool_calls=[ToolCall(name="web_search", arguments={"query": f"python {self.n}"})],
+                    provider="fake",
+                    model="fake-1",
+                )
+            return ModelResponse(content=self.answer, provider="fake", model="fake-1")
+
+    class DownSearch:
+        """The web service rejects the token on the first ``failures`` calls."""
+
+        def __init__(self, failures: int = 99):
+            self.failures = failures
+            self.calls = 0
+
+        async def search(self, query, limit=5):
+            self.calls += 1
+            if self.calls <= self.failures:
+                raise ArasError("web", "401 unauthorized — the token was rejected",
+                                status=401, hint="check ARAS_WEB_TOKEN")
+            return SearchResponse(
+                query=query, provider="aras",
+                results=[SearchResult(title="Result", url="https://example.org/a", snippet="snip")],
+                latency_ms=3,
+            )
+
+    async def outcome_for(self, model, search, trace=None):
+        from app.orchestrator.agents import run_search
+
+        ctx = AgentContext(
+            message="What is the latest Python release? Cite your sources.",
+            attachments=[],
+            model_chain=model,
+            search_chain=search,
+            settings=settings_for(agent_max_steps=4),
+            trace=trace,
+        )
+        return await run_search(PlanStep(agent="search", task="find it", reason="fresh"), ctx)
+
+    async def test_a_search_that_never_came_back_fails_the_agent_and_names_the_service(self):
+        trace = RunTrace()
+        outcome = await self.outcome_for(self.SearchingModel(), self.DownSearch(), trace)
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.error, "[aras:web] 401 unauthorized — the token was rejected")
+        self.assertEqual(outcome.hint, "check ARAS_WEB_TOKEN")
+        # what the model wrote without results is not passed on as research
+        self.assertEqual(outcome.answer, "")
+        self.assertEqual(outcome.sources, [])
+        self.assertIn("no search succeeded", outcome.detail)
+        self.assertEqual(outcome.data["errors"], [outcome.error])
+        # the calls still count, and the trace says what happened
+        self.assertEqual((outcome.model_calls, outcome.tool_calls), (2, 1))
+        event = next(e for e in trace.to_list() if e["title"] == "No search succeeded")
+        self.assertEqual(event["detail"]["error"], outcome.error)
+
+    async def test_a_retry_that_succeeds_keeps_the_agent_ok_and_counts_the_failure(self):
+        outcome = await self.outcome_for(
+            self.SearchingModel(searches=2, answer="Python 3.14 — https://example.org/a"),
+            self.DownSearch(failures=1),
+        )
+        self.assertEqual(outcome.status, "ok")
+        self.assertEqual(outcome.error, "")
+        self.assertEqual(outcome.sources, ["https://example.org/a"])
+        self.assertIn("1 tool call(s) failed", outcome.detail)
+        self.assertEqual(len(outcome.data["errors"]), 1)
+
+    async def test_an_empty_result_list_is_an_answer_not_a_failure(self):
+        class EmptySearch:
+            async def search(self, query, limit=5):
+                return SearchResponse(query=query, provider="aras", results=[], latency_ms=1)
+
+        outcome = await self.outcome_for(self.SearchingModel(answer="Nothing was found."), EmptySearch())
+        self.assertEqual(outcome.status, "ok")
+        self.assertEqual(outcome.answer, "Nothing was found.")
+        self.assertNotIn("errors", outcome.data)
+
+    async def test_an_answer_without_any_search_stays_ok(self):
+        search = self.DownSearch()
+        outcome = await self.outcome_for(self.SearchingModel(searches=0), search)
+        self.assertEqual(outcome.status, "ok")
+        self.assertEqual(search.calls, 0)
+        self.assertNotIn("errors", outcome.data)
+
+    async def test_the_manager_reports_the_dead_search_instead_of_a_green_run(self):
+        manager = Manager(
+            settings=settings_for(), model_chain=self.SearchingModel(), search_chain=self.DownSearch()
+        )
+        result = await manager.run(
+            "What is the latest Python release? Cite your sources.", attachments=[],
+            planner="heuristic", evaluate=False, review=False,
+        )
+        payload = result.to_dict()
+        search = next(item for item in payload["orchestration"]["agents"] if item["agent"] == "search")
+        self.assertEqual(search["status"], "failed")
+        self.assertIn("[aras:web] 401", search["error"])
+        self.assertEqual(search["hint"], "check ARAS_WEB_TOKEN")
+        self.assertFalse(payload["orchestration"]["synthesized"])
+        self.assertIn("[aras:web] 401", payload["answer"])
+        self.assertEqual([item["agent"] for item in payload["errors"]], ["search"])
+        self.assertEqual(payload["sources"], [])
+
+    async def test_a_loop_without_an_errors_attribute_is_untouched(self):
+        # another host's loop: the contract makes ``errors`` optional
+        from types import SimpleNamespace
+
+        from app.orchestrator.agents import _loop_failures
+
+        self.assertEqual(_loop_failures(SimpleNamespace(answer="x")), [])
+        self.assertEqual(
+            _loop_failures(SimpleNamespace(errors=["boom", {"tool": "t", "error": "bad call"},
+                                                   {"message": "m", "hint": "h"}])),
+            [("boom", ""), ("bad call", ""), ("m", "h")],
+        )
+
+
+class ModelFailureTests(unittest.IsolatedAsyncioTestCase):
+    """A model call that raises fails the agent, and the reason keeps its hint."""
+
+    @staticmethod
+    def router_that_raises(error: Exception):
+        class Router:
+            async def complete(self, messages, tools=None, **kwargs):
+                raise error
+
+        return Router()
+
+    async def run_general(self, error: Exception) -> dict:
+        manager = Manager(
+            settings=settings_for(),
+            model_chain=self.router_that_raises(error),
+            search_chain=FakeSearchChain(),
+        )
+        result = await manager.run("Explain event loops.", attachments=[], planner="heuristic")
+        return result.to_dict()
+
+    async def test_a_rejected_router_token_fails_the_agent_with_message_and_hint(self):
+        payload = await self.run_general(
+            ArasError("router", "401 unauthorized — the token was rejected",
+                      status=401, hint="check ARAS_ROUTER_TOKEN")
+        )
+        [general] = payload["orchestration"]["agents"]
+        self.assertEqual(general["status"], "failed")
+        self.assertIn("[aras:router] 401 unauthorized", general["error"])
+        self.assertEqual(general["hint"], "check ARAS_ROUTER_TOKEN")
+        # the request itself is answered: the reason is the answer
+        self.assertIn("[aras:router] 401 unauthorized", payload["answer"])
+        self.assertEqual([item["agent"] for item in payload["errors"]], ["general"])
+
+    async def test_an_error_without_a_hint_leaves_the_hint_empty(self):
+        payload = await self.run_general(RuntimeError("boom"))
+        [general] = payload["orchestration"]["agents"]
+        self.assertEqual(general["status"], "failed")
+        self.assertEqual(general["error"], "RuntimeError: boom")
+        self.assertEqual(general["hint"], "")
+
+
 class DeterministicMergeTests(unittest.TestCase):
     def test_reports_are_labelled_and_failures_listed(self):
         answer = deterministic_answer(
@@ -1069,7 +1243,9 @@ class TraceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcomes[0].sources, ["https://example.org"])
 
 
-class RunLogTests(unittest.TestCase):
+class RunLogTests(unittest.IsolatedAsyncioTestCase):
+    # async base: test_manager_writes_the_run_log is a coroutine, and under a plain
+    # TestCase it was never awaited — it passed without running
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = self.tmp.name

@@ -24,8 +24,8 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.aras import ModelResponse
 from app.config import Settings, get_settings
-from app.llm.base import ModelResponse
 from app.orchestrator import OrchestrationRequest, OrchestratorService, runlog
 from app.orchestrator.files import Attachment, AttachmentStore
 from app.orchestrator.planner import PlanStep
@@ -40,9 +40,6 @@ FOLLOW_UP = json.dumps(
 
 class ReviewModel:
     """Answers the manager's review with a follow-up step, then the synthesis."""
-
-    providers: list = []
-    skipped: dict = {}
 
     async def complete(self, messages, tools=None, **kwargs):
         system = messages[0]["content"]
@@ -147,7 +144,7 @@ class FilePermissionApiTests(unittest.TestCase):
         main_module.reset_memory()
         self.patches = [
             mock.patch.object(main_module, "get_settings", lambda: self.settings),
-            mock.patch.object(main_module, "build_chain", lambda settings=None: ReviewModel()),
+            mock.patch.object(main_module, "build_model", lambda settings=None: ReviewModel()),
         ]
         for patch in self.patches:
             patch.start()
