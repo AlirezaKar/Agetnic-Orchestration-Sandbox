@@ -11,7 +11,7 @@ Files here are **generated at runtime and git-ignored** — only this README and
 
 | File | What it holds | Rotates |
 | --- | --- | --- |
-| `agetnic.log` | everything at `LOG_LEVEL`+ — requests, provider calls, warnings, info | 5 MB × 5 |
+| `agetnic.log` | everything at `LOG_LEVEL`+ — requests, ARAS calls, warnings, info | 5 MB × 5 |
 | `error.log` | `WARNING` and above **with full tracebacks** — start here when something fails | 5 MB × 5 |
 | `requests.log` | one line per HTTP call: `POST /chat -> 400 12.4ms req=4f2a1c client=127.0.0.1:54321 bytes=318` | 5 MB × 5 |
 | `terminal.log` | raw mirror of stdout/stderr, i.e. what the terminal window printed (uvicorn lines included) | 10 MB, at startup |
@@ -44,12 +44,15 @@ python -m scripts.logs path                 # print $LOG_DIR
 
 Plain `tail -f logs/agetnic.log` works as well — the files are ordinary text.
 
-## Configuration (`.env` / environment)
+## Configuration (process environment)
+
+These four are read from the process environment, not from `.env` — the logger
+does not parse that file. Export them, or use the `run.py` flags below.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LOG_DIR` | `<repo>/logs` | where the files go (created if missing) |
-| `LOG_LEVEL` | `INFO` | `DEBUG` for provider payloads, `WARNING` for a quiet run |
+| `LOG_LEVEL` | `INFO` | `DEBUG` adds the HTTP client's connection-level lines, `WARNING` for a quiet run |
 | `LOG_ROTATE_MB` | `5` | size that triggers rotation |
 | `LOG_BACKUPS` | `5` | how many rotated copies to keep |
 
@@ -61,8 +64,8 @@ run; `--no-terminal-log` keeps the terminal mirror off (useful in Docker).
 - Every request: method, path, status, duration, request id, client, bytes. The
   same id is returned in the `x-request-id` response header, so a number from a
   browser error dialog leads straight to its lines.
-- Every provider/search failure the API turns into a `4xx`/`5xx`, with the
-  provider name and the exception text.
+- Every ARAS failure the API turns into a `4xx`/`5xx`, with the service name
+  (`[aras:router]`, `[aras:web]`, …) and the exception text.
 - Every unhandled exception, with a traceback, plus a JSON 500 that names the
   request id.
 - Startup and shutdown, with process data.
@@ -70,7 +73,9 @@ run; `--no-terminal-log` keeps the terminal mirror off (useful in Docker).
 **Secrets are redacted** before writing: values of any env var matching
 `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, plus `sk-…`, `gsk_…`, `AIza…`,
 `Bearer …` and `api_key=…` shapes become `«redacted»`. Prompts and answers are
-not logged at `INFO`; set `LOG_LEVEL=DEBUG` if you need that while debugging.
+not logged at any level — they are in the run records (`logs/orchestrator/`) and
+in `memory/`; an error line may quote the first few hundred characters of what a
+service replied.
 
 ## `changelog/`
 

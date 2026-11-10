@@ -4,8 +4,7 @@ This package is the orchestration microservice: a manager, a planner, an
 executor, four specialist agents, a trace and a run log. It talks to the rest of
 the application only through **ports** it is handed at construction time
 (``contracts.py``), and through a single host seam (``host.py``). Nothing inside
-it imports the model client, the search stack, the HTTP layer or the
-configuration module — so the directory can be lifted into another project with
+it imports the ARAS clients, the HTTP layer or the configuration module — so the directory can be lifted into another project with
 a similar architecture and wired up in one place.
 
 ```
@@ -24,17 +23,17 @@ app/orchestrator/
   files.py       attachment decoding/extraction/store — the document agent's input
 ```
 
-Sibling services (host side, not part of this package): ``app/llm`` (model
-providers), ``app/search`` (web backends), ``app/agent.py`` (the single-agent
-tool loop), ``app/memory.py`` (conversations) and ``app/main.py`` (the HTTP
-adapter that wires them together).
+Sibling services (host side, not part of this package): ``app/aras.py`` (the
+ARAS microservices — the router is the model, the web service is the search),
+``app/agent.py`` (the single-agent tool loop), ``app/memory.py`` (conversations)
+and ``app/main.py`` (the HTTP adapter that wires them together).
 
 Typical host wiring — this is all ``app/main.py`` does::
 
     service = OrchestratorService(
         settings,
-        models=build_chain(settings),
-        search=build_search_chain(settings),
+        models=aras.build_model(settings),      # ARAS router
+        search=aras.build_search(settings),     # ARAS web
         agent_loop=WebSearchAgent,
     )
     result = await service.run(OrchestrationRequest(message=…, attachments=…))

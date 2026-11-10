@@ -2,7 +2,7 @@
    App components on top of the studio design system (styles.css).
    Everything here is specific to this harness: the orchestration
    transcript panel, attachment/permission UI, the sidebar lists
-   (sessions, runs, agents, search backends), diagnostics rows, the
+   (sessions, runs, agents, ARAS services), diagnostics rows, the
    connection banner and the toasts.
    ═══════════════════════════════════════════════════════════════ */
 
@@ -360,7 +360,7 @@
 
 .json-view { min-height: 100%; margin: 0; padding: 12px; border-radius: 9px; background: #090e16; border: 1px solid var(--line); color: #adc0df; font: 9.5px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* ─── providers modal ────────────────────────────────────────── */
+/* ─── ARAS services modal ────────────────────────────────────────── */
 .provider-card { padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: rgba(20, 30, 46, .65); }
 .provider-card + .provider-card { margin-top: 8px; }
 .pc-head { display: flex; align-items: center; gap: 7px; }

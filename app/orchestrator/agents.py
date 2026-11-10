@@ -5,7 +5,7 @@ so the executor can fan them out with ``asyncio.gather`` and the manager can
 merge whatever comes back, including failures.
 
 * ``document``  reads attached files (retrieval → grounded answer, quotes)
-* ``search``    runs the existing tool loop (web_search / fetch_url) with sources
+* ``search``    runs the host's tool loop (``web_search``) and keeps its sources
 * ``data``      computes statistics deterministically, then explains them
 * ``general``   plain completion, no tools
 
@@ -251,8 +251,8 @@ async def run_general(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             status="failed",
             task=step.task,
             reason=step.reason,
-            error="No model provider is configured.",
-            hint="Set LLM_PROVIDER and a provider key + model in .env.",
+            error="No model is configured.",
+            hint="Set ARAS_BASE_URL, ARAS_ROUTER_TOKEN and ARAS_MODEL in .env.",
             latency_ms=int((time.perf_counter() - started) * 1000),
             depends_on=list(step.depends_on),
         )
@@ -361,7 +361,7 @@ async def run_search(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
                 f"Prompt sent to the model (step {payload.get('step')})",
                 payload["messages"],
                 kind="search",
-                tools=["web_search", "fetch_url"],
+                tools=["web_search"],
             )
         elif kind == "model":
             ctx.emit_response(
@@ -412,23 +412,65 @@ async def run_search(step: PlanStep, ctx: AgentContext) -> AgentOutcome:
             "refers to them; do not pretend they were searched online."
         )
     result = await agent.run(step.task + upstream_text + extra, history=ctx.history, allow_search=True)
+    failures = _loop_failures(result)
+    searched = bool(result.search_provider or result.sources)
+    status, answer, error, hint = "ok", result.answer, "", ""
+    detail = f"{result.steps} step(s) · search via {result.search_provider or 'n/a'}"
+    data: dict[str, Any] = {"trace": result.trace[:12], "search_provider": result.search_provider}
+    if failures:
+        data["errors"] = [message for message, _ in failures]
+    if not answer:
+        status = "failed"
+        error, hint = failures[-1] if failures else ("the search agent produced no answer", "")
+    elif failures and not searched:
+        # It tried to search and no search came back. What the model wrote after
+        # that is not research, so it is not reported as such: a down service is
+        # an outcome, as it is for the knowledge store and the data backend.
+        status, answer = "failed", ""
+        error, hint = failures[0]
+        detail = f"{result.steps} step(s) · no search succeeded"
+        ctx.emit("agent", "search", "No search succeeded", error=error, hint=hint,
+                 failed_calls=len(failures))
+    elif failures:
+        detail += f" · {len(failures)} tool call(s) failed"
     return AgentOutcome(
         agent="search",
-        status="ok" if result.answer else "failed",
-        answer=result.answer,
+        status=status,
+        answer=answer,
         task=step.task,
         reason=step.reason,
         sources=result.sources,
         provider=result.provider,
         model=result.model,
-        error="" if result.answer else "the search agent produced no answer",
-        detail=f"{result.steps} step(s) · search via {result.search_provider or 'n/a'}",
+        error=error,
+        hint=hint,
+        detail=detail,
         latency_ms=int((time.perf_counter() - started) * 1000),
-        data={"trace": result.trace[:12], "search_provider": result.search_provider},
+        data=data,
         model_calls=calls["model"],
         tool_calls=calls["tool"],
         depends_on=list(step.depends_on),
     )
+
+
+def _loop_failures(result: Any) -> list[tuple[str, str]]:
+    """``(message, hint)`` for every failure the tool loop reported.
+
+    The loop belongs to the host (``contracts.AgentLoop``), so ``errors`` is read
+    defensively: absent means none, and an entry is either a failure itself or
+    ``{"tool": ..., "error": failure}``, where a failure is a string or a
+    mapping with ``message`` and, optionally, ``hint``.
+    """
+    failures: list[tuple[str, str]] = []
+    for entry in getattr(result, "errors", None) or []:
+        failure = entry.get("error", entry) if isinstance(entry, dict) else entry
+        if isinstance(failure, dict):
+            message = str(failure.get("message") or failure.get("error") or failure)
+            hint = str(failure.get("hint") or "")
+        else:
+            message, hint = str(failure or "the tool call failed"), ""
+        failures.append((message, hint))
+    return failures
 
 
 # ----------------------------------------------------------------- document

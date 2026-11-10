@@ -38,8 +38,8 @@ from typing import Any, Protocol, runtime_checkable
 class ModelChain(Protocol):
     """Anything that can answer a chat completion.
 
-    The real one is ``app.llm.registry.build_chain(settings)``; the tests pass a
-    two-method fake. Only ``complete`` is used, and only with keyword arguments
+    The real one is ``app.aras.build_model(settings)`` (the ARAS router); the
+    tests pass a two-method fake. Only ``complete`` is used, and only with keyword arguments
     (``temperature``, ``max_tokens``) plus an optional ``tools`` list.
     """
 
@@ -53,7 +53,10 @@ class ModelChain(Protocol):
 
 @runtime_checkable
 class SearchChain(Protocol):
-    """Anything that can run a web search query."""
+    """Anything that can run a web search query.
+
+    The real one is ``app.aras.build_search(settings)`` (the ARAS web service).
+    """
 
     async def search(self, query: str, limit: int = 5) -> Any: ...
 
@@ -63,6 +66,13 @@ class AgentLoop(Protocol):
 
     The search agent delegates to it instead of re-implementing the loop. The
     real one is ``app.agent.WebSearchAgent``; another project brings its own.
+
+    ``run`` returns an object with ``answer``, ``sources``, ``steps``,
+    ``provider``, ``model``, ``trace`` and ``search_provider`` (empty when no
+    search succeeded). ``errors`` is optional: the failures of the run, each a
+    string or a mapping with ``message`` and ``hint``, alone or under
+    ``{"tool": ..., "error": ...}``. A run that tried to search and has
+    failures but no successful search is reported as a failed agent.
     """
 
     async def run(

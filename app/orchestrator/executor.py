@@ -80,6 +80,9 @@ async def _run_one(
                 task=step.task,
                 reason=step.reason,
                 error=f"{type(exc).__name__}: {exc}",
+                # a port's error may say what to check first (the host's model
+                # and search errors do); pass that on instead of dropping it
+                hint=str(getattr(exc, "hint", "") or ""),
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
     outcome.task = outcome.task or step.task

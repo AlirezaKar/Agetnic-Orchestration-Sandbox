@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Start the Agetnic Orchestration Sandbox, with real logs.
 
-One process serves **both** the test harness and the API, which is what keeps
+One process serves **both** the studio page and the API, which is what keeps
 ``POST /chat`` from returning ``Not Found``: the page must come from FastAPI,
 not from a static file server or a raw ``index.html``.
+
+The app runs on the ARAS microservices only (router = the model, web = the
+search). The banner below names every ``ARAS_*`` variable that is still
+missing; ``python scripts/aras_smoke.py`` probes the services themselves.
 
     python run.py                    # http://localhost:8000
     python run.py --port 9000
@@ -70,7 +74,18 @@ def main() -> int:
     if not ASSETS_DIR.exists():
         problems.append(f"missing assets folder: {ASSETS_DIR} (the UI would load unstyled)")
     if not Path(".env").exists():
-        problems.append("no .env file — copy .env.example to .env and add one provider key")
+        problems.append("no .env file — copy .env.example to .env and fill the ARAS block")
+    model_missing = settings.aras_missing("router")
+    if model_missing:
+        problems.append(
+            "no model: the ARAS router needs " + ", ".join(model_missing)
+            + " — no agent can write an answer until then"
+        )
+    search_missing = settings.aras_missing("web")
+    if search_missing:
+        problems.append(
+            "no web search: the ARAS web service needs " + ", ".join(search_missing)
+        )
 
     display_host = "localhost" if host in ("0.0.0.0", "::") else host
     base = f"http://{display_host}:{port}"
@@ -81,12 +96,22 @@ def main() -> int:
     print(f"  API also : {base}/api/…")
     print(f"  Docs     : {base}/docs")
     print(f"  Bind     : {host}:{port}")
+    if not model_missing:
+        print(f"  Model    : ARAS router {settings.aras_endpoint('router')} · {settings.aras_model_id}")
+    if not search_missing:
+        print(f"  Search   : ARAS web {settings.aras_endpoint('web')}")
+    others = [
+        name for name in settings.aras_services_configured if name not in ("router", "web")
+    ]
+    if others:
+        print("  ARAS also: " + ", ".join(others))
     for problem in problems:
         print(f"  ! {problem}")
     print("-" * 68)
     print("  routes: " + ", ".join(route.split()[1] for route in API_ROUTES[:8]))
     if problems:
         print("  (the server still starts; fix the notes above for a complete setup)")
+        print("  probe the ARAS services:  python scripts/aras_smoke.py")
     if not summary["writable"]:
         print(f"  ! logs are not writable at {summary['dir']} — console logging only")
     else:
@@ -94,7 +119,7 @@ def main() -> int:
         print("             agetnic.log (everything) · error.log (failures) ·")
         print("             requests.log (one line per HTTP call) · process.log ·")
         if terminal:
-            print(f"             terminal.log (mirror of this window) · crash.log")
+            print("             terminal.log (mirror of this window) · crash.log")
         print("  tail     : python -m scripts.logs tail        # or: errors / requests")
     print("-" * 68)
 

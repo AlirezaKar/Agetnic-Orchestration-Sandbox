@@ -1,9 +1,11 @@
 /* ═══════════════════════════════════════════════════════════════
    Agetnic Orchestration Sandbox — studio frontend
    Talks to the FastAPI backend on the same origin:
-     GET  /health /providers /providers/{name}/models /diagnose
+     GET  /health /providers /aras /aras/models /diagnose
      GET  /sessions /sessions/{id}   (harness memory)
      POST /chat /search /orchestrate /files
+   The backend runs on the ARAS microservices only: the model is the ARAS
+   router, web search is the ARAS web service. Nothing here names another.
    No build step, no dependencies, no CDN: the Markdown renderer below is
    local so a conversation still reads correctly when the network is gone.
    ═══════════════════════════════════════════════════════════════ */
@@ -24,7 +26,7 @@
       id: "agent",
       title: "Agent",
       long: "Agent (tools)",
-      desc: "The model decides when to call web_search / fetch_url. Full trace.",
+      desc: "The model decides when to call web_search. Full trace.",
     },
     {
       id: "answer",
@@ -36,7 +38,7 @@
       id: "search",
       title: "Search",
       long: "Search only",
-      desc: "Run the search chain directly (no model, no tool loop).",
+      desc: "Query the ARAS web service directly (no model, no tool loop).",
     },
   ];
 
@@ -99,10 +101,10 @@
     mode: store.getItem(STORAGE.mode) || "auto",
     files: [],
     agents: null,
-    pinnedSearch: null,
     runs: loadRuns(),
     diagnostics: null,
-    providers: null,
+    // GET /providers: the ARAS services (role, endpoint, state, missing env).
+    services: null,
     messages: [],
     sessions: [],
     sessionId: null,
@@ -476,7 +478,10 @@
     const detail = data.detail;
     if (detail && typeof detail === "object" && detail.hint) parts.push("\n\nhint: " + detail.hint);
     if (data.hint) parts.push("\n\nhint: " + data.hint);
-    if (detail && typeof detail === "object" && detail.message) parts.push("\n\n" + detail.message);
+    // the ARAS error detail repeats the headline: only add it when it says more
+    if (detail && typeof detail === "object" && detail.message && detail.message !== data.message) {
+      parts.push("\n\n" + detail.message);
+    }
     if (!data.hint && !(detail && detail.hint) && result.status === 404) {
       parts.push(
         "\n\nhint: this path is not served here. The API answers on /chat and /api/chat; " +
@@ -518,6 +523,11 @@
     if (tone) dot.classList.add(tone);
   }
 
+  // "ARAS_BASE_URL, ARAS_MODEL" from a `missing` list (or the usual suspects).
+  function missingText(missing, fallback) {
+    return Array.isArray(missing) && missing.length ? missing.join(", ") : fallback || "";
+  }
+
   function setHealth(key, value, status) {
     const node = $("health-" + key);
     if (node) node.textContent = value;
@@ -534,29 +544,46 @@
   async function loadHealth() {
     const { ok, data } = await api("/health");
     if (!ok) {
-      setBadge("badge-llm", "LLM  offline", "bad");
+      setBadge("badge-llm", "MODEL  offline", "bad");
       setBadge("badge-search", "SEARCH  unknown", "bad");
       setHealth("model", "offline");
       setHealth("search", "unknown");
       setHealth("state", "backend down", "bad");
       return;
     }
-    const models = data.model_chain || [];
-    const searches = data.search_chain || [];
+    // One model (the ARAS router) and one search (ARAS web). `ready` says
+    // whether each can be called; `missing` names the env vars when it cannot.
+    const model = data.model || {};
+    const search = data.search || {};
+    const modelReady = Boolean(model.ready || (data.model_chain || []).length);
+    const searchReady = Boolean(search.ready || (data.search_chain || []).length);
+    const modelName = model.model || (data.model_chain || [])[0] || "router";
     setBadge(
       "badge-llm",
-      models.length ? "LLM  " + models.join(" → ") : "LLM  no key",
-      models.length ? "ok" : "bad"
+      modelReady ? "MODEL  " + modelName : "MODEL  not configured",
+      modelReady ? "ok" : "bad"
     );
     setBadge(
       "badge-search",
-      searches.length ? "SEARCH  " + searches.join(" → ") : "SEARCH  none",
-      searches.length ? "ok" : "warn"
+      searchReady ? "SEARCH  ARAS web" : "SEARCH  not configured",
+      searchReady ? "ok" : "warn"
     );
-    setHealth("model", models[0] || "no key", models.length ? "ok" : "bad");
-    setHealth("search", searches[0] || "none");
+    const pillModel = $("pill-llm");
+    if (pillModel) {
+      pillModel.title = modelReady
+        ? "ARAS router · " + (model.endpoint || "") + " · " + modelName
+        : "Set in .env: " + missingText(model.missing, "ARAS_BASE_URL, ARAS_ROUTER_TOKEN, ARAS_MODEL");
+    }
+    const pillSearch = $("pill-search");
+    if (pillSearch) {
+      pillSearch.title = searchReady
+        ? "ARAS web · " + (search.endpoint || "")
+        : "Set in .env: " + missingText(search.missing, "ARAS_BASE_URL, ARAS_WEB_TOKEN");
+    }
+    setHealth("model", modelReady ? modelName : "not configured", modelReady ? "ok" : "bad");
+    setHealth("search", searchReady ? "ARAS web" : "not configured");
     setHealth("state", "connected", "ok");
-    document.body.dataset.modelReady = models.length ? "1" : "0";
+    document.body.dataset.modelReady = modelReady ? "1" : "0";
     const permission = Boolean((data.files || {}).permission_prompt);
     if (permission !== state.permissionPrompt) {
       state.permissionPrompt = permission;
@@ -605,9 +632,8 @@
     if (label) {
       const bits = [];
       if (state.mode === "auto") bits.push("Manager-led · parallel agents");
-      else if (state.mode === "search") {
-        bits.push("Chain " + (state.pinnedSearch || "auto"));
-      } else bits.push(mode.long);
+      else if (state.mode === "search") bits.push("ARAS web search");
+      else bits.push(mode.long);
       if (state.files.length) bits.push(state.files.length + " file(s)");
       const waiting = state.files.filter((item) => item.consent === false).length;
       if (waiting && state.permissionPrompt) bits.push(waiting + " awaiting permission");
@@ -782,7 +808,7 @@
      output cannot inject markup.
      ═══════════════════════════════════════════════════════════════ */
   // bold → code → *emphasis* → _emphasis_ → [label](url) → bare URL.
-  // The underscore form is boundary-anchored so LLM_PROVIDER stays literal.
+  // The underscore form is boundary-anchored so ARAS_BASE_URL stays literal.
   const INLINE = /\*\*[^*]+\*\*|`[^`]+`|\*[^*\n]+\*|\b_[^_\n]+_\b|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<)]+/g;
 
   function inlineInto(parent, text) {
@@ -1227,7 +1253,7 @@
       [
         ["Research a topic", "Use web search and synthesize multiple sources.", "What changed in the latest Python release? Cite your sources."],
         ["Analyze a document", "Attach a CSV, DOCX or PDF and inspect the findings.", "Average revenue per month in the attached CSV, and which month grew fastest?"],
-        ["Compare providers", "Evaluate free tiers, rate limits and capabilities.", "Search for the newest free LLM APIs and compare their rate limits."],
+        ["Combine agents", "One request, several specialists working in parallel.", "What is the average of 12, 30 and 58, and what changed in the latest Python release? Cite your sources."],
       ].forEach(([title, copy, prompt]) => {
         const card = el("button", "suggestion");
         card.type = "button";
@@ -1843,14 +1869,22 @@
     openInspector();
   }
 
-  /* ──────────────────── search backend sidebar ──────────────── */
-  function backendPill(preset) {
-    const pill = el("span", "pill " + (preset.configured ? "ok" : "bad"));
-    pill.textContent = preset.needs_server ? "server" : "no server";
-    pill.title = preset.needs_server
-      ? "This backend must run as a process you keep alive"
-      : "Talks straight to a public HTTPS endpoint — nothing to run";
-    return pill;
+  /* ──────────────────── ARAS services sidebar ───────────────── */
+  // One word per service state -> the tag colour the design already has.
+  const SERVICE_TONE = { ready: "", off: "warn", incomplete: "warn", "not configured": "error" };
+
+  function serviceTone(service) {
+    const tone = SERVICE_TONE[service.state];
+    return tone === undefined ? "warn" : tone;
+  }
+
+  // What a row says under its name: the role when the service works, the
+  // exact env vars when it does not — the fix, not a description of the gap.
+  function serviceHint(service) {
+    const missing = service.missing_env || [];
+    if (missing.length) return "set " + missing.join(", ");
+    if (service.state === "off") return "switched off — ARAS_AUTO_INGEST=false";
+    return service.role || "";
   }
 
   function providerRow(selected, name, tagText, tagTone, desc, onPick) {
@@ -1869,46 +1903,35 @@
     return row;
   }
 
-  function renderSearchList(providers) {
+  // The sidebar list: every ARAS service, a filled dot when it is ready.
+  // A click opens the services panel — there is nothing to choose between.
+  function renderSearchList(services) {
     const list = $("search-list");
     if (!list) return;
     list.textContent = "";
 
-    list.appendChild(
-      providerRow(
-        !state.pinnedSearch,
-        "Chain (failover)",
-        "all",
-        "",
-        "Try each backend in order, first non-empty wins.",
-        () => {
-          state.pinnedSearch = null;
-          renderSearchList(state.providers);
-          updateComposerLabel();
-        }
-      )
-    );
+    if (!services || !services.length) {
+      const empty = el("span", "muted", "Backend not reachable — no service list.");
+      empty.style.fontSize = "11px";
+      list.appendChild(empty);
+      return;
+    }
 
-    (providers || []).forEach((preset) => {
-      const tagText = preset.needs_server ? "server" : "no server";
-      const tone = preset.configured ? "" : "warn";
-      const desc = preset.needs_key ? "free key · " + preset.free_tier : preset.free_tier;
+    services.forEach((service) => {
       const row = providerRow(
-        state.pinnedSearch === preset.name,
-        preset.label,
-        tagText,
-        tone,
-        desc,
-        () => {
-          state.pinnedSearch = state.pinnedSearch === preset.name ? null : preset.name;
-          renderSearchList(state.providers);
-          updateComposerLabel();
-          if (state.mode !== "search") setMode("search");
-        }
+        Boolean(service.ready),
+        service.label + " :" + service.port,
+        service.state || "unknown",
+        serviceTone(service),
+        serviceHint(service),
+        () => openProviders()
       );
-      row.title = preset.notes || "";
-      const nameLine = row.querySelector(".provider-name-line");
-      if (nameLine && !preset.configured) nameLine.appendChild(el("span", "tag error", "no key"));
+      row.dataset.provider = service.service;
+      row.dataset.state = service.state || "";
+      row.title =
+        (service.role || "") +
+        (service.endpoint ? "\n" + service.endpoint : "") +
+        (service.route ? "\n" + service.route : "");
       list.appendChild(row);
     });
   }
@@ -1916,8 +1939,8 @@
   async function loadProviders() {
     const { ok, data } = await api("/providers");
     if (!ok) return;
-    state.providers = data.search ? data.search.providers : [];
-    renderSearchList(state.providers);
+    state.services = Array.isArray(data.services) ? data.services : [];
+    renderSearchList(state.services);
     state.fullProviders = data;
   }
 
@@ -2298,7 +2321,7 @@
     const summary = $("diag-summary") || document.createElement("div");
     summary.className = "diag-summary";
     summary.hidden = false;
-    summary.textContent = "Running model ping + search backends…";
+    summary.textContent = "Running a model call, a web search and the ARAS health checks…";
 
     const { ok, data } = await api("/diagnose");
     state.diagnostics = data;
@@ -2330,37 +2353,45 @@
       return;
     }
 
+    // model = one real completion through the ARAS router (:8101)
     const model = data.model || {};
     if (model.ok) {
-      summary.appendChild(diagRow(true, "model · " + model.provider, model.latency_ms + " ms"));
+      summary.appendChild(diagRow(true, "model · ARAS router", model.latency_ms + " ms"));
       summary.appendChild(
         el("div", "pdesc", model.model + (model.reply ? " · reply " + JSON.stringify(model.reply) : ""))
       );
-      setHealth("model", model.model || model.provider, "ok");
+      setHealth("model", model.model || "router", "ok");
     } else {
       const error = model.error || {};
-      summary.appendChild(diagRow(false, "model · " + (error.provider || "none"), ""));
+      const unset = Array.isArray(error.missing) && error.missing.length > 0;
+      summary.appendChild(
+        diagRow(false, "model · ARAS router", unset ? "not configured" : error.status ? "HTTP " + error.status : "")
+      );
       if (error.message) summary.appendChild(el("div", "pdesc", error.message));
       if (error.hint) summary.appendChild(el("div", "pdesc", error.hint));
-      setHealth("model", "failed", "bad");
+      setHealth("model", unset ? "not configured" : "failed", "bad");
     }
 
+    // search = one real query through the ARAS web service (:8108)
     const search = data.search || { checked: [] };
     (search.checked || []).forEach((report) => {
       summary.appendChild(
         diagRow(
           !!report.ok,
-          "search · " + report.provider,
+          "search · ARAS web",
           report.ok ? report.count + " hits · " + report.latency_ms + " ms" : ""
         )
       );
+      if (report.ok && report.empty) {
+        summary.appendChild(el("div", "pdesc", "the service answered, with no results for the test query"));
+      }
       if (!report.ok && report.error) {
         summary.appendChild(el("div", "pdesc", report.error.message || "failed"));
         if (report.error.hint) summary.appendChild(el("div", "pdesc", report.error.hint));
       }
     });
     (search.skipped || []).forEach((skip) => {
-      summary.appendChild(diagRow(false, "search · " + skip.provider, "skipped", "skip"));
+      summary.appendChild(diagRow(false, "search · ARAS web", "not configured", "skip"));
       summary.appendChild(el("div", "pdesc", skip.reason));
     });
     if (data.aras) {
@@ -2387,8 +2418,8 @@
 
     const modelOk = !!model.ok;
     const anySearch = (search.ok || []).length > 0;
-    const okCount = (search.checked || []).filter((report) => report.ok).length;
-    setHealth("search", okCount + " ok", anySearch ? "ok" : "bad");
+    const searchUnset = !(search.checked || []).length;
+    setHealth("search", anySearch ? "ARAS web" : searchUnset ? "not configured" : "failed", anySearch ? "ok" : "bad");
     setHealth("state", "checked", modelOk && anySearch ? "ok" : "bad");
     setBadge(
       "badge-diag",
@@ -2400,42 +2431,64 @@
     summary.hidden = false; // showInspector hides the rows for run records
   }
 
-  /* ─────────────────────────── providers modal ─────────────── */
-  function providerCard(provider) {
+  /* ───────────────────── ARAS services modal ───────────────── */
+  // Which sidebar/modal group a service belongs to, in display order.
+  const SERVICE_GROUPS = [
+    { title: "The model", services: ["router"] },
+    { title: "Web search", services: ["web"] },
+    { title: "Documents & data", services: ["ocr", "retrieval", "ingestion", "data", "vector"] },
+  ];
+
+  function serviceLink(text, path) {
+    const link = el("a", null, text);
+    link.href = apiUrl(path);
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    return link;
+  }
+
+  function providerCard(service) {
     const card = el("div", "provider-card");
+    card.dataset.service = service.service;
     const head = el("div", "pc-head");
-    head.appendChild(el("span", "pc-name", provider.label));
-    const statusPill = el("span", "pill " + (provider.configured ? "ok" : "bad"));
-    statusPill.textContent = provider.configured ? "configured" : "needs key";
-    head.appendChild(statusPill);
-    if (provider.is_active) head.appendChild(el("span", "pill warn", "active"));
-    if (provider.needs_local_server) head.appendChild(el("span", "pill", "local"));
+    head.appendChild(el("span", "pc-name", service.label + " :" + service.port));
+    // ready = green, by-choice off = neutral, anything that needs a value = red
+    const tone = service.ready ? " ok" : service.state === "off" ? "" : " bad";
+    head.appendChild(el("span", "pill" + tone, service.state || "unknown"));
     card.appendChild(head);
 
-    const links = el("div", "pc-links");
-    const key = el("a", null, "Get API key ↗");
-    key.href = provider.key_url;
-    key.target = "_blank";
-    key.rel = "noreferrer";
-    const models = el("a", null, "See models ↗");
-    models.href = provider.models_url;
-    models.target = "_blank";
-    models.rel = "noreferrer";
-    const api = el("a", null, "Models API");
-    api.href = "/providers/" + provider.name + "/models";
-    api.target = "_blank";
-    api.rel = "noreferrer";
-    links.appendChild(key);
-    links.appendChild(models);
-    links.appendChild(api);
-    card.appendChild(links);
+    card.appendChild(el("div", "pc-note", service.role || ""));
 
-    card.appendChild(el("div", "pc-note", provider.free_tier));
+    const where = el("div", "pc-note");
+    where.appendChild(document.createTextNode("endpoint: "));
+    where.appendChild(el("code", null, service.endpoint || "— (set ARAS_BASE_URL)"));
+    if (service.route) {
+      where.appendChild(document.createTextNode("  ·  "));
+      where.appendChild(el("code", null, service.route));
+    }
+    card.appendChild(where);
+
     const env = el("div", "pc-note");
     env.appendChild(document.createTextNode("env: "));
-    env.appendChild(el("code", null, "LLM_PROVIDER=" + provider.name + "  " + provider.model_env + "=auto"));
+    env.appendChild(el("code", null, (service.env || []).join("  ")));
     card.appendChild(env);
-    if (provider.notes) card.appendChild(el("div", "pc-note", provider.notes));
+
+    const missing = service.missing_env || [];
+    if (missing.length) {
+      const need = el("div", "pc-note");
+      need.appendChild(document.createTextNode("still needs: "));
+      need.appendChild(el("code", null, missing.join("  ")));
+      card.appendChild(need);
+    } else if (service.state === "off") {
+      card.appendChild(el("div", "pc-note", "configured, switched off: ARAS_AUTO_INGEST=false"));
+    }
+
+    if (service.service === "router") {
+      const links = el("div", "pc-links");
+      links.appendChild(serviceLink("Models the router serves", "/aras/models"));
+      links.appendChild(serviceLink("Health of every service", "/aras"));
+      card.appendChild(links);
+    }
     return card;
   }
 
@@ -2455,52 +2508,52 @@
     openProvidersModal();
     if (!state.fullProviders) await loadProviders();
     const data = state.fullProviders || {};
+    const services = Array.isArray(data.services) ? data.services : [];
     body.textContent = "";
 
-    body.appendChild(el("h3", "provider-group-title", "Core model"));
-    (data.providers || []).forEach((provider) => body.appendChild(providerCard(provider)));
+    if (!services.length) {
+      body.appendChild(el("span", "muted", "No service list — the backend did not answer GET /providers."));
+      return;
+    }
 
-    body.appendChild(el("h3", "provider-group-title", "Web search (free)"));
-    ((data.search && data.search.providers) || []).forEach((preset) => {
-      const card = el("div", "provider-card");
-      const head = el("div", "pc-head");
-      head.appendChild(el("span", "pc-name", preset.label));
-      const mode = el("span", "pill " + (preset.needs_server ? "warn" : "ok"));
-      mode.textContent = preset.needs_server ? "needs server" : "no server";
-      head.appendChild(mode);
-      const status = el("span", "pill " + (preset.configured ? "ok" : "bad"));
-      status.textContent = preset.configured ? "ready" : "needs key";
-      head.appendChild(status);
-      card.appendChild(head);
+    const ready = services.filter((service) => service.ready).length;
+    const lead = el("div", "pc-note");
+    lead.textContent =
+      ready + " of " + services.length + " ARAS services ready" +
+      (typeof data.env_file === "boolean" ? " · .env " + (data.env_file ? "found" : "missing") : "") +
+      " · nothing else is called: no other model, no other search.";
+    body.appendChild(lead);
 
-      const links = el("div", "pc-links");
-      const setup = el("a", null, "Key / setup ↗");
-      setup.href = preset.key_url;
-      setup.target = "_blank";
-      setup.rel = "noreferrer";
-      const docs = el("a", null, "Docs ↗");
-      docs.href = preset.docs_url;
-      docs.target = "_blank";
-      docs.rel = "noreferrer";
-      links.appendChild(setup);
-      links.appendChild(docs);
-      card.appendChild(links);
-      card.appendChild(el("div", "pc-note", preset.free_tier));
-      if (preset.notes) card.appendChild(el("div", "pc-note", preset.notes));
-      body.appendChild(card);
+    const byName = {};
+    services.forEach((service) => (byName[service.service] = service));
+    const shown = new Set();
+    SERVICE_GROUPS.forEach((group) => {
+      const members = group.services.map((name) => byName[name]).filter(Boolean);
+      if (!members.length) return;
+      body.appendChild(el("h3", "provider-group-title", group.title));
+      members.forEach((service) => {
+        shown.add(service.service);
+        body.appendChild(providerCard(service));
+      });
     });
+    // a service the backend knows and this page does not: still show it
+    const rest = services.filter((service) => !shown.has(service.service));
+    if (rest.length) {
+      body.appendChild(el("h3", "provider-group-title", "Other"));
+      rest.forEach((service) => body.appendChild(providerCard(service)));
+    }
   }
 
   async function copyProvidersJson() {
     if (!state.fullProviders) await loadProviders();
     const text = state.fullProviders ? JSON.stringify(state.fullProviders, null, 2) : "";
     if (!text) {
-      toast("No providers report yet", "warn");
+      toast("No services report yet", "warn");
       return;
     }
     try {
       await navigator.clipboard.writeText(text);
-      toast("Providers report copied");
+      toast("ARAS services report copied");
     } catch (_) {
       toast("Clipboard blocked — use GET /providers instead", "warn");
     }
@@ -2539,7 +2592,7 @@
     });
   }
 
-  /* ──────────── ARAS wiring panel (is it actually used?) ────── */
+  /* ──────────── ARAS wiring panel (configured · up · used) ──── */
   const ARAS = { report: null, proof: null, busy: false };
 
   function openArasModal() {
@@ -2557,6 +2610,12 @@
     return diagRow(ok, name, detail, pillText);
   }
 
+  // "set A, B" for one service of a GET /aras report ('' when nothing is missing)
+  function arasNeeds(report, service) {
+    const missing = (report.missing || {})[service] || [];
+    return missing.length ? "set " + missing.join(", ") : "";
+  }
+
   function renderArasReport() {
     const body = $("aras-body");
     const report = ARAS.report;
@@ -2570,23 +2629,26 @@
     if (!configured.length) {
       body.appendChild(el(
         "div", "pdesc",
-        "No ARAS service is configured — fill the ARAS block in .env (URL + per-service tokens) " +
-        "and restart. Until then every request uses the public fallback providers."
+        "No ARAS service is configured — fill the ARAS block in .env (ARAS_BASE_URL, the tokens " +
+        "and ARAS_MODEL) and restart. The ARAS router is the only model this app has, so until " +
+        "then no agent can write an answer."
       ));
-      setBadge("badge-aras", "ARAS  not configured", "warn");
+      setBadge("badge-aras", "ARAS  not configured", "bad");
       return;
     }
 
-    // level 1 — wiring: is ARAS actually in the chains?
+    // level 1 — wiring: does each service have what its job needs?
     body.appendChild(el("div", "aras-section", "Wiring (config)"));
-    body.appendChild(arasRow(!!report.router_in_model_chain, "router :8101 leads the model chain",
-      report.router_in_model_chain ? "every model call tries ARAS first" : "not in the chain — check ARAS_ROUTER_TOKEN / LLM_PROVIDER"));
-    body.appendChild(arasRow(!!report.web_in_search_chain, "web :8108 in the search chain",
-      report.web_in_search_chain ? "" : "not in the chain — check ARAS_WEB_TOKEN / SEARCH_PROVIDERS"));
+    body.appendChild(arasRow(!!report.model_ready, "router :8101 → the model",
+      report.model_ready ? report.model || "" : arasNeeds(report, "router"),
+      report.model_ready ? "" : "required"));
+    body.appendChild(arasRow(!!report.search_ready, "web :8108 → web_search (search agent)",
+      report.search_ready ? "" : arasNeeds(report, "web")));
     body.appendChild(arasRow(!!report.rag_ready, "retrieval :8105 → document agent (RAG)",
-      report.rag_ready ? "collection wired" : "needs ARAS_RETRIEVAL_TOKEN + ARAS_COLLECTION"));
+      report.rag_ready ? "collection wired" : arasNeeds(report, "retrieval"),
+      report.rag_ready ? "" : "optional"));
     body.appendChild(arasRow(!!report.data_ready, "data :8107 → data agent",
-      report.data_ready ? "" : "needs ARAS_DATA_TOKEN + ARAS_TENANT/OWNER + ARAS_DATA_SOURCE_ID", report.data_ready ? "" : "optional"));
+      report.data_ready ? "" : arasNeeds(report, "data"), report.data_ready ? "" : "optional"));
 
     // level 2 — health: does each configured service answer?
     body.appendChild(el("div", "aras-section", "Health (live, GET /aras)"));
@@ -2605,15 +2667,21 @@
       body.appendChild(arasRow(false, name, "not configured", "skip"));
     });
 
-    const allHttp = checked.length > 0 && checked.every(
-      (service) => !service.ok && /^HTTP /.test(service.error || "")
-    );
+    const failed = checked.filter((service) => !service.ok);
+    const allHttp = failed.length > 0 && failed.length === checked.length &&
+      failed.every((service) => /^HTTP /.test(service.error || ""));
     if (allHttp) {
       body.appendChild(el(
         "div", "pdesc",
         "→ Every service answered an HTTP error: something IS replying, so the tunnel is not " +
         "closed. A VPN or system proxy may be intercepting 127.0.0.1 — unset HTTP_PROXY/HTTPS_PROXY " +
         "(or add 127.0.0.1 to NO_PROXY) and compare with: curl http://127.0.0.1:8101/api/v1/health/"
+      ));
+    } else if (failed.length && failed.length === checked.length) {
+      body.appendChild(el(
+        "div", "pdesc",
+        "→ No service answered. Is the SSH tunnel open? python scripts/aras_smoke.py probes every " +
+        "port without this app."
       ));
     }
 
@@ -2630,23 +2698,31 @@
       if (proof.error) {
         body.appendChild(el("div", "aras-verdict bad", "Proof run failed: " + proof.error));
       } else {
-        (proof.agents || []).forEach((agent) => {
+        const agents = proof.agents || [];
+        agents.forEach((agent) => {
+          const answered = agent.provider === "aras" && agent.status !== "failed";
           body.appendChild(arasRow(
-            agent.provider === "aras",
-            agent.agent + " → " + (agent.provider || "?") + " · " + (agent.model || "?"),
+            answered,
+            agent.agent + " → " + (answered ? "router · " + (agent.model || "?") : "no answer"),
             (agent.latency_ms || 0) + " ms",
-            agent.provider === "aras" ? "aras" : "fallback"
+            answered ? "aras" : "failed"
           ));
+          if (!answered && agent.error) body.appendChild(el("div", "pdesc", agent.error));
+          if (!answered && agent.hint) body.appendChild(el("div", "pdesc", agent.hint));
         });
-        const viaAras = (proof.agents || []).length &&
-          (proof.agents || []).every((agent) => agent.provider === "aras");
+        const viaAras = agents.length > 0 &&
+          agents.every((agent) => agent.provider === "aras" && agent.status !== "failed");
+        // The proof run asks for no synthesis, so the run itself names no
+        // model: the one that answered is on the agent.
+        const answeredBy = proof.model || (agents.find((agent) => agent.model) || {}).model || "";
         body.appendChild(el(
           "div",
           "aras-verdict" + (viaAras ? "" : " warn"),
           viaAras
-            ? "Proof: this run was answered by ARAS (" + (proof.model || "") + ") — the wiring is live and used."
-            : "This run was answered by “" + (proof.provider || "?") + "”, not ARAS — the stack is " +
-              "configured but a fallback provider answered. Check the health rows above."
+            ? "Proof: this run was answered by the ARAS router" + (answeredBy ? " (" + answeredBy + ")" : "") +
+              " — the wiring is live and used."
+            : "The router did not answer this run, and nothing else may: there is no fallback model. " +
+              "The rows above name the reason; GET /diagnose repeats the call with hints."
         ));
       }
     }
@@ -2697,9 +2773,12 @@
         run_id: data.run_id,
         agents: (orchestration.agents || []).map((agent) => ({
           agent: agent.agent,
+          status: agent.status,
           provider: agent.provider,
           model: agent.model,
           latency_ms: agent.latency_ms,
+          error: agent.error,
+          hint: agent.hint,
         })),
       };
     }
@@ -3314,7 +3393,6 @@
           body: JSON.stringify({
             query: text,
             max_results: 5,
-            provider: state.pinnedSearch || null,
             session_id: state.sessionId,
           }),
         });
@@ -3412,7 +3490,7 @@
   // (GET /audit), so the panel opens as a visible checklist instead of a
   // spinner; a run then fills each row as its verdict lands. Offline by
   // default — the checks drive the real pipeline through scripted ports — and
-  // the two live checks are opt-in and skip loudly when no key is configured.
+  // the two live checks are opt-in and skip loudly when the router is not configured.
   const AUDIT = {
     specs: [],
     levels: [],
@@ -3629,7 +3707,7 @@
         wrap.classList.toggle("disabled", !AUDIT.liveAvailable);
         wrap.title = AUDIT.liveAvailable
           ? "Also call the configured model: planner agreement + stage latency"
-          : "No model provider configured — live checks would skip";
+          : "The ARAS router is not configured — live checks would skip";
       }
     }
     setAuditTab(AUDIT.tab);
@@ -3660,11 +3738,11 @@
     if (sub) {
       // say what this host is wired to, so a skip is never a surprise
       sub.textContent =
-        "Offline checks drive the real pipeline through scripted ports: no key, no network, under a second." +
+        "Offline checks drive the real pipeline through scripted ports: no ARAS service, no network, under a second." +
         " · planner " + (env.planner || "?") +
         " · evaluator " + (env.evaluate === false ? "off" : "on") +
         " · review " + (env.review === false ? "off" : "on") +
-        " · model " + (env.model_ready ? "ready" : "no key (live checks skip)");
+        " · model " + (env.model_ready ? "ready" : "not configured (live checks skip)");
     }
     if (data.last) {
       applyAuditCard(data.last);
@@ -4114,7 +4192,7 @@
     const online = await negotiate();
     if (!online) {
       renderSearchList([]);
-      setBadge("badge-llm", "LLM  offline", "bad");
+      setBadge("badge-llm", "MODEL  offline", "bad");
       setBadge("badge-search", "SEARCH  offline", "bad");
       setHealth("model", "offline");
       setHealth("search", "offline");
@@ -4139,8 +4217,8 @@
           hint: "Nothing inspected yet.",
           modes: MODES.map((mode) => mode.id),
           endpoints: [
-            "/health", "/providers", "/agents", "/chat", "/orchestrate",
-            "/files", "/search", "/diagnose", "/search/diagnose", "/audit", "/audit/run",
+            "/health", "/providers", "/aras", "/aras/models", "/agents", "/chat",
+            "/orchestrate", "/files", "/search", "/diagnose", "/audit", "/audit/run",
             "/audit/stream",
             "/sessions", "/sessions/{id}",
           ],

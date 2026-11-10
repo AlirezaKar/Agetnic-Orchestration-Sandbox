@@ -84,9 +84,11 @@ def log_paths(directory: Path | None = None) -> dict[str, Path]:
 
 _SECRET_ENV = re.compile(r"(API_KEY|APIKEY|_TOKEN|TOKEN$|SECRET|PASSWORD)", re.IGNORECASE)
 _SHAPES = (
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"),  # OpenAI / OpenRouter style
-    re.compile(r"\bgsk_[A-Za-z0-9_\-]{8,}"),  # Groq
-    re.compile(r"\bAIza[A-Za-z0-9_\-]{10,}"),  # Google
+    # well-known API-key shapes: a key pasted into a prompt or a traceback is
+    # scrubbed even though this app holds no such key itself
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"\bgsk_[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"\bAIza[A-Za-z0-9_\-]{10,}"),
     re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{8,}"),
     re.compile(r"(?i)\b(api[-_]?key|token|secret|password)\b\s*[:=]\s*\S+"),
 )
